@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Bytecode / cache
+.json/bytecode/modules.cache
+cache/
+
+# C++ build output
+build/
+*.o
+*.so
+
+# Build output
+dist/
+*.mcpack
+*.mcaddon
+!scripts/Berry*.js
+
+# Eval noise
+eval_dump/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
