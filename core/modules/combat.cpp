@@ -78,6 +78,7 @@ CombatOutcome Combat::Damage(EntityId victim, EntityId attacker, f32 amt,
   }
   if (cancelled) {
     if (onCancelled_) onCancelled_(evt);
+    EventBus::Instance().Emit("berry:combat", &evt);
     return CombatOutcome::Cancelled;
   }
 
@@ -90,6 +91,7 @@ CombatOutcome Combat::Damage(EntityId victim, EntityId attacker, f32 amt,
   if (applied && !cancelled) {
     if (onApplied_) onApplied_(evt);
     RecordHitUnlocked(attacker, evt.finalDamage > 0 ? evt.finalDamage : evt.baseDamage);
+    EventBus::Instance().Emit("berry:combat", &evt);
     return CombatOutcome::Applied;
   }
   return CombatOutcome::Cancelled;
