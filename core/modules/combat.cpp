@@ -2,6 +2,7 @@
 #include "berry/logger.h"
 #include <chrono>
 #include <algorithm>
+#include <cmath>
 
 namespace Berry {
 
@@ -14,7 +15,7 @@ bool Combat::Attach(DamageSeam* seam) {
   if (attached_) return false;
   seam_ = seam;
   attached_ = true;
-  Log::Info("Berry::Combat attached (%s)",
+  Log::Info("Berry::Combat attached (read-only observer; %s)",
             seam_ ? "damage seam present" : "no seam — metrics only");
   return true;
 }
@@ -25,98 +26,19 @@ void Combat::Detach() {
   Log::Info("Berry::Combat detached");
 }
 
-u64 Combat::AddPreRule(DamageRule rule) {
-  std::lock_guard<std::mutex> lk(mutex_);
-  auto id = nextRuleId_++;
-  preRules_[std::to_string(id)] = std::move(rule);
-  return id;
-}
+CombatOutcome Combat::Observe(const CombatEvent& evt) {
+  // Fail closed: ignore invalid or nonsensical observations rather than
+  // recording wrong data. A zero victim, non-finite damage, or negative
+  // damage is not a real applied hit.
+  if (!evt.victim.raw && !evt.victim.runtime) return CombatOutcome::Ignored;
+  if (!std::isfinite(evt.finalDamage) || evt.finalDamage < 0) return CombatOutcome::Ignored;
 
-u64 Combat::AddPostRule(DamageRule rule) {
-  std::lock_guard<std::mutex> lk(mutex_);
-  auto id = nextRuleId_++;
-  postRules_[std::to_string(id)] = std::move(rule);
-  return id;
-}
+  if (seam_ && !seam_->OnDamage(evt)) return CombatOutcome::Ignored;
 
-bool Combat::RemoveRule(u64 id) {
-  std::lock_guard<std::mutex> lk(mutex_);
-  std::string key = std::to_string(id);
-  bool a = preRules_.erase(key) > 0;
-  bool b = postRules_.erase(key) > 0;
-  return a || b;
-}
-
-void Combat::FirePipeline(std::unordered_map<std::string, DamageRule>& rules,
-                          CombatEvent& evt, bool* cancelled) {
-  for (auto& [key, rule] : rules) {
-    if (rule) {
-      rule(evt);
-      if (evt.cancelled) {
-        *cancelled = true;
-        break;
-      }
-    }
-  }
-}
-
-CombatOutcome Combat::Damage(EntityId victim, EntityId attacker, f32 amt,
-                             DamageCause cause) {
-  if (!attached_) return CombatOutcome::Applied;
-
-  CombatEvent evt;
-  evt.victim = victim;
-  evt.attacker = attacker;
-  evt.baseDamage = amt;
-  evt.finalDamage = amt;
-  evt.cause = cause;
-
-  bool cancelled = false;
-  {
-    std::lock_guard<std::mutex> lk(mutex_);
-    FirePipeline(preRules_, evt, &cancelled);
-  }
-  if (cancelled) {
-    if (onCancelled_) onCancelled_(evt);
-    EventBus::Instance().Emit("berry:combat", &evt);
-    return CombatOutcome::Cancelled;
-  }
-
-  // Apply via seam, then run post rules.
-  bool applied = !seam_ || seam_->Apply(evt);
-  {
-    std::lock_guard<std::mutex> lk(mutex_);
-    FirePipeline(postRules_, evt, &cancelled);
-  }
-  if (applied && !cancelled) {
-    if (onApplied_) onApplied_(evt);
-    RecordHitUnlocked(attacker, evt.finalDamage > 0 ? evt.finalDamage : evt.baseDamage);
-    EventBus::Instance().Emit("berry:combat", &evt);
-    return CombatOutcome::Applied;
-  }
-  return CombatOutcome::Cancelled;
-}
-
-bool Combat::Kill(EntityId victim, EntityId attacker, DamageCause cause) {
-  auto outcome = Damage(victim, attacker, 99999.0f, cause);
-  if (outcome == CombatOutcome::Applied) {
-    RecordKill(attacker, victim, cause);
-    return true;
-  }
-  return false;
-}
-
-size_t Combat::AreaDamage(const Vec3& center, f32 radius, f32 amt,
-                          DamageCause cause, EntityId source) {
-  // The seam provides the entity list; without it, no entities to hit.
-  size_t hits = 0;
-  if (seam_) {
-    // Combat does not own a LevelSeam; if the World module registered one it
-    // is reachable via the engine, but to keep modules strict, damage here is
-    // driven by whatever entities the caller already knows about. Callers can
-    // use World::EntitiesInRadius + Combat::Damage per entity.
-  }
-  return hits;
+  if (onApplied_) onApplied_(evt);
+  RecordHit(evt.attacker, evt.finalDamage > 0 ? evt.finalDamage : evt.baseDamage);
+  EventBus::Instance().Emit("berry:combat", const_cast<CombatEvent*>(&evt));
+  return CombatOutcome::Observed;
 }
 
 void Combat::RecordHit(EntityId attacker, f32 damage) {
@@ -126,16 +48,22 @@ void Combat::RecordHit(EntityId attacker, f32 damage) {
 
 void Combat::RecordHitUnlocked(EntityId attacker, f32 damage) {
   if (!attacker.raw && !attacker.runtime) return;
-  auto& m = metrics_[attacker.raw ? attacker.raw : attacker.runtime];
-  m.damageDealt += damage;
-  m.hits++;
-  m.lastHitDamage = damage;
+  u64 key = attacker.raw ? attacker.raw : attacker.runtime;
+  AttackerEntry& e = metrics_[key];
+  if (e.metrics.hits == 0) e.firstHitNs = NowNs();
+  e.metrics.damageDealt += damage;
+  e.metrics.hits++;
+  e.metrics.lastHitDamage = damage;
+  // Rolling DPS window: at least one second of collected data before DPS is
+  // meaningful.
+  double elapsed = (double)((NowNs() - e.firstHitNs) / 1000000000ULL);
+  e.metrics.windowSeconds = elapsed < 1.0 ? 0.0 : elapsed;
 }
 
 void Combat::RecordKill(EntityId killer, EntityId victim, DamageCause cause) {
   std::lock_guard<std::mutex> lk(mutex_);
-  auto& m = metrics_[killer.raw ? killer.raw : killer.runtime];
-  m.kills++;
+  AttackerEntry& e = metrics_[killer.raw ? killer.raw : killer.runtime];
+  e.metrics.kills++;
   KillAttribution ka;
   ka.killer = killer;
   ka.victim = victim;
@@ -149,7 +77,7 @@ CombatMetrics Combat::Metrics(EntityId attacker) const {
   std::lock_guard<std::mutex> lk(mutex_);
   auto it = metrics_.find(attacker.raw ? attacker.raw : attacker.runtime);
   if (it == metrics_.end()) return {};
-  return it->second;
+  return it->second.metrics;
 }
 
 std::vector<KillAttribution> Combat::RecentKills(size_t count) const {
@@ -158,9 +86,6 @@ std::vector<KillAttribution> Combat::RecentKills(size_t count) const {
   return std::vector<KillAttribution>(kills_.begin() + start, kills_.end());
 }
 
-void Combat::OnCancelled(std::function<void(const CombatEvent&)> fn) {
-  onCancelled_ = std::move(fn);
-}
 void Combat::OnApplied(std::function<void(const CombatEvent&)> fn) {
   onApplied_ = std::move(fn);
 }

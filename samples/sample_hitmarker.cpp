@@ -39,11 +39,11 @@ class HitmarkerModule : public BerryModule {
   u32 Capabilities() const override { return kCapCombat | kCapRender | kCapWorld; }
 
   bool Attach(Engine& e) override {
-    // Subscribe to the combat pipeline. Combat::Damage emits "berry:combat"
-    // with a CombatEvent* payload on every applied or cancelled hit.
+    // Subscribe to the combat pipeline. Combat::Observe emits "berry:combat"
+    // with a CombatEvent* payload on every observed (engine-applied) hit.
     applied_ = e.Bus().On("berry:combat", [this](const EventContext& ctx) {
       auto* evt = static_cast<const CombatEvent*>(ctx.data);
-      if (evt && !evt->cancelled) flashUntil_ = Berry::NowMs() + 80;
+      if (evt && evt->finalDamage > 0) flashUntil_ = Berry::NowMs() + 80;
       return EventResult::Continue;
     });
     Log::Info("Hitmarker attached (cap %08x)", Capabilities());

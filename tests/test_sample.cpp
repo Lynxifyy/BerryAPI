@@ -1,8 +1,9 @@
 // test_sample.cpp — integration test for a strict module pattern.
 //
 // Verifies:
-//   * Combat::Damage emits "berry:combat" on the event bus for both the
-//     applied and cancelled paths.
+//   * Combat::Observe emits "berry:combat" on the event bus for observed
+//     (engine-applied) hits.
+//   * Invalid observations (zero victim) are ignored and do not emit.
 //   * A listener can inspect the CombatEvent payload.
 //   * A strict module can pull World+Combat+Render from the registry and
 //     exercise them headlessly (the pattern the sample module uses).
@@ -23,12 +24,12 @@ static int g_fail = 0;
 #define CHECK(cond) do { if (!(cond)) { \
   printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); ++g_fail; } } while (0)
 
-// Minimal damage seam so Combat can apply hits without touching the engine.
+// Minimal damage seam: accepts observed damage events.
 class LocalDamageSeam final : public DamageSeam {
  public:
   int applied = 0;
   int lastAmount = 0;
-  bool Apply(CombatEvent& evt) override {
+  bool OnDamage(const CombatEvent& evt) override {
     applied++;
     lastAmount = (int)evt.finalDamage;
     return true;
@@ -37,7 +38,7 @@ class LocalDamageSeam final : public DamageSeam {
 };
 
 // Strict module mimicking samples/sample_hitmarker.cpp: listens on
-// "berry:combat", publishes hits, then pulls the World service to chat.
+// "berry:combat" for observed hits and flashes a marker.
 class TestProbeModule final : public BerryModule {
  public:
   int hits = 0;
@@ -49,7 +50,7 @@ class TestProbeModule final : public BerryModule {
   bool Attach(Engine& e) override {
     id_ = e.Bus().On("berry:combat", [this](const EventContext& ctx) {
       auto* evt = static_cast<const CombatEvent*>(ctx.data);
-      if (evt && !evt->cancelled) {
+      if (evt && evt->finalDamage > 0) {
         hits++;
         lastFlashAt = NowMs() + 80;
       }
@@ -107,15 +108,24 @@ int main() {
   auto dseam = std::make_shared<LocalDamageSeam>();
   combat->BindSeam(dseam.get());
 
-  // Applied hit should fire the bus event.
+  // Observed (engine-applied) hit fires the bus event + metrics.
   EntityId attacker{99, 900};
-  combat->Damage(e1, attacker, 5.0f, DamageCause::EntityAttack);
+  auto observe = [&](f32 dmg) {
+    CombatEvent evt;
+    evt.victim = e1;
+    evt.attacker = attacker;
+    evt.baseDamage = dmg;
+    evt.finalDamage = dmg;
+    evt.cause = DamageCause::EntityAttack;
+    return combat->Observe(evt);
+  };
+  CHECK(observe(5.0f) == CombatOutcome::Observed);
   CHECK(probe->hits == 1);
   CHECK(dseam->applied == 1);
   CHECK(dseam->lastAmount == 5);
 
   // A second hit.
-  combat->Damage(e1, attacker, 3.0f, DamageCause::EntityAttack);
+  CHECK(observe(3.0f) == CombatOutcome::Observed);
   CHECK(probe->hits == 2);
   CHECK(dseam->applied == 2);
 
@@ -124,16 +134,14 @@ int main() {
   CHECK(m.hits == 2);
   CHECK(m.damageDealt >= 8.0f - 0.001f);
 
-  // Cancelled hit (a pre-rule blocks it) must still emit the event with
-  // cancelled == true, and the probe must not flash.
-  auto cancelRule = combat->AddPreRule([](CombatEvent& evt) {
-    evt.cancelled = true;
-    return true;
-  });
-  combat->Damage(e1, attacker, 1.0f, DamageCause::EntityAttack);
-  CHECK(probe->hits == 2);              // cancelled hit not counted as hit
+  // Invalid observations (zero victim) are ignored and emit nothing.
+  CombatEvent bad;
+  bad.victim = EntityId{};
+  bad.attacker = attacker;
+  bad.finalDamage = 1.0f;
+  CHECK(combat->Observe(bad) == CombatOutcome::Ignored);
+  CHECK(probe->hits == 2);              // ignored hit not counted
   CHECK(dseam->applied == 2);
-  combat->RemoveRule(cancelRule);
 
   // Full engine frame + tick keeps everything healthy.
   eng.OnGameTick(21);

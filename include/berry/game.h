@@ -25,13 +25,10 @@ enum class EntityType : u32 { Player, Mob, Projectile, Item, Vehicle, Unknown };
 
 enum class DamageCause : u32 {
   None = 0,
-  Override,
   Contact, EntityAttack, EntitySweepAttack, Projectile, Suffocation, Fall,
   Fire, FireTick, Lava, Drowning, BlockExplosion, EntityExplosion, Void,
   Magic, Wither, Anvil, FallingBlock, Thorns, Fatal, Starve, OutOfWorld,
-  Lightning, Suiciding, Stalagmite,
-  // BerryAPI-applied custom causes
-  BerryBonus, BerryTech
+  Lightning, Suiciding, Stalagmite
 };
 
 struct BERRY_API EntityId {
