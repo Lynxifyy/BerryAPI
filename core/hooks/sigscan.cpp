@@ -112,6 +112,8 @@ bool Signature::Parse(const char* hex) {
 }
 
 bool Signature::Match(const u8* data) const {
+  if (bytes.empty()) return false;   // an empty pattern is never a real match
+  if (!data) return false;
   for (size_t i = 0; i < bytes.size(); ++i) {
     if (mask[i] && data[i] != bytes[i]) return false;
   }

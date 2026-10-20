@@ -34,7 +34,8 @@ TEST_SRC := \
   tests/test_render.cpp \
   tests/test_sample.cpp \
   tests/test_sigscan.cpp \
-  tests/test_thread.cpp
+  tests/test_thread.cpp \
+  tests/test_fuzz.cpp
 
 CORE_OBJ := $(CORE_SRC:.cpp=.o)
 TEST_OBJ := $(TEST_SRC:.cpp=.o)
@@ -70,13 +71,54 @@ check-samples: samples/sample_hitmarker.o
 	@rm -f samples/sample_hitmarker.o
 
 test: $(TEST_BINS) build/$(SHARED_NAME) check-samples
-	@for b in build/test_test_math build/test_test_modules build/test_test_net build/test_test_render build/test_test_sample build/test_test_sigscan build/test_test_thread; do \
+	@for b in build/test_test_math build/test_test_modules build/test_test_net build/test_test_render build/test_test_sample build/test_test_sigscan build/test_test_thread build/test_test_fuzz; do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
 	@echo "-- dlopen ABI --"
 	@$(CC) -std=c11 -Wall -O2 -Iinclude tests/dlopen_test.c -ldl -o build/dlopen_test
 	@./build/dlopen_test build/$(SHARED_NAME) || exit 1
 	@echo "== all tests passed =="
+
+# Sanitizer build: ASan+UBSan host tests. Everything is built into its own
+# directory so it never collides with the normal build/, and every binary runs
+# Sanitizer build: ASan+UBSan host tests. Everything is built into its own
+# directory so it never collides with the normal build/, and every binary runs
+# with leak + stack checks enabled.
+SAN_CXXFLAGS := -std=c++17 -Wall -Wextra -O1 -g -Iinclude -DBERRY_THREAD_ASSERT \
+                -fsanitize=address,undefined -fno-omit-frame-pointer
+SAN_LDFLAGS  := -pthread -fsanitize=address,undefined
+SAN_TEST_OBJ := $(patsubst tests/%.cpp,build/san/tests/%.o,$(TEST_SRC))
+SAN_BINS     := $(patsubst tests/%.cpp,build/san/test_%,$(TEST_SRC))
+SAN_CORE_OBJ := $(patsubst core/%.cpp,build/san/core/%.o,$(filter core/%.cpp,$(CORE_SRC))) \
+                $(patsubst util/%.cpp,build/san/util/%.o,$(filter util/%.cpp,$(CORE_SRC)))
+
+build/san/tests/%.o: tests/%.cpp | build/san/tests
+	$(CXX) $(SAN_CXXFLAGS) -Itests -c $< -o $@
+
+build/san/core/%.o: core/%.cpp | build/san/core
+	@mkdir -p $(dir $@)
+	$(CXX) $(SAN_CXXFLAGS) -c $< -o $@
+
+build/san/util/%.o: util/%.cpp | build/san/util
+	@mkdir -p $(dir $@)
+	$(CXX) $(SAN_CXXFLAGS) -c $< -o $@
+
+build/san/tests:
+	mkdir -p $@
+build/san/core:
+	mkdir -p $@
+build/san/util:
+	mkdir -p $@
+
+build/san/test_%: build/san/tests/%.o $(SAN_CORE_OBJ)
+	$(CXX) $(SAN_LDFLAGS) $^ -o $@
+
+.PHONY: test-sanitize
+test-sanitize: $(SAN_BINS)
+	@for b in $(SAN_BINS); do \
+	  echo "-- $$b --"; ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 ./$$b "$$b" || exit 1; \
+	done
+	@echo "== sanitizer tests passed =="
 
 # Shared library build (targets: the injectable .so that host/dlopen).
 # Object files land in build/shared/ so tests and .so don't collide.

@@ -51,6 +51,8 @@ Typed service: `Renderer`.
 
 ## `Berry::Network` (`net.h` / `core/net/net.cpp`)
 
+Typed service: `Network`. **Never touches the render thread.**
+
 Types: `TcpSocket`, `HttpRequest`/`HttpResponse`, `WebSocket` (RFC6455 client +
 frame handling), `JsonRpc` (2.0 parse/build), `RateLimiter`.
 
@@ -58,6 +60,10 @@ frame handling), `JsonRpc` (2.0 parse/build), `RateLimiter`.
 - WebSocket client: handshake, masked client frames, unmasked server frames;
   `SendFrame`/`RecvFrame` match RFC6455 byte order (see the fix history for
   the mask-key byte-order bug).
+- `ParseWsFrame` — pure in-memory frame parser (fuzz-tested in
+  `tests/test_fuzz.cpp`): reserved bits/opcodes, malformed control frames,
+  oversized frames and truncated headers fail closed with
+  `WsFrameStatus::{Invalid,Oversized,NeedMore}`.
 - JSON-RPC 2.0: `ParseRequest` handles `method`, `params` object, `id`.
 
 ## Capability matrix
