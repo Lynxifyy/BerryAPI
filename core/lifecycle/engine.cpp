@@ -88,11 +88,10 @@ bool Engine::Bootstrap(const BerryConfigC& cfg) {
 }
 
 void Engine::ResolveCoreSignatures() {
-  // This is where on-device code would Register() the "damageCall",
-  // "entityPosition", "levelTick" etc signatures from a version table.
-  // The table lives in modules/ so it can be updated independently of the
-  // core. When running against the shim, resolutions happen inside the
-  // modules themselves because the shim exports concrete C functions.
+  // Fail-closed default: until a module registers its per-version signature
+  // table AND pins the expected build fingerprint, no signature rule may
+  // resolve. An empty expected build permanently closes the table.
+  SigCache::Instance().SetExpectedBuild({});
 }
 
 bool Engine::Attach() {

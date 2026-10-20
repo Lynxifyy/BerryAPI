@@ -13,6 +13,67 @@
 
 namespace Berry {
 
+const char* SigStateName(SigState s) {
+  switch (s) {
+    case SigState::Unknown: return "unknown";
+    case SigState::Missing: return "missing";
+    case SigState::Found:   return "found";
+  }
+  return "unknown";
+}
+
+// FNV-1a 64-bit. Cheap, and a plain byte fingerprint is enough to distinguish
+// one build from another.
+static u64 Fnv1a(const u8* data, size_t len) {
+  u64 h = 1469598103934665603ULL;
+  for (size_t i = 0; i < len; ++i) {
+    h ^= data[i];
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+//----------------------------------------------------------------------------
+// BuildLibrary
+//----------------------------------------------------------------------------
+
+u64 BuildLibrary::HashSection(const u8* data, size_t len) {
+  return data && len ? Fnv1a(data, len) : 0;
+}
+
+BuildLibrary BuildLibrary::Fingerprint(const char* name) {
+  BuildLibrary b;
+  if (!name) return b;
+  b.name = name;
+  b.base = ProcessImages::MainModuleBase(name);
+  if (!b.base) return b;
+
+  // Hash the executable memory range(s) of the module (crosses merges).
+  u64 h = 1469598103934665603ULL;  // FNV-1a accumulator seeded
+  size_t total = 0;
+  for (auto& r : ProcessImages::EnumExecutable()) {
+    if (r.name.find(name) == std::string::npos) continue;
+    const u8* p = reinterpret_cast<const u8*>(r.base);
+    for (size_t i = 0; i < r.size; ++i) {
+      h ^= p[i];
+      h *= 1099511628211ULL;
+      ++total;
+    }
+  }
+  b.textSize = total;
+  // If hashing could not touch any byte (no ranges found), hash 0 marks the
+  // module as unverifiable -> features fail closed.
+  b.textHash = total ? h : 0;
+  // File size: report the size of the first matching executable mapping.
+  for (auto& r : ProcessImages::EnumExecutable()) {
+    if (r.name.find(name) != std::string::npos) {
+      b.fileSize = (u64)r.size;
+      break;
+    }
+  }
+  return b;
+}
+
 //----------------------------------------------------------------------------
 // Signature
 //----------------------------------------------------------------------------
@@ -249,18 +310,67 @@ SigScanner& SigCache::Scanner() {
   return *scanner_;
 }
 
+void SigCache::SetExpectedBuild(const BuildLibrary& build) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  expectedBuild_ = build;
+  buildGateOpen_.store(false);
+
+  bool empty = build.name.empty() && build.base == 0 && build.textHash == 0;
+  if (empty) {
+    // No fingerprint provided at all: the whole table is permanently closed.
+    // Rules resolve to Missing on first use — features disable themselves.
+    gateClosedPermanently_ = true;
+  } else {
+    gateClosedPermanently_ = false;
+  }
+  for (auto& e : entries_) e.second.state = SigState::Unknown;
+}
+
+bool SigCache::BuildVerifiedLocked() const {
+  if (buildGateOpen_.load()) return true;
+  if (gateClosedPermanently_.load()) return false;
+  // Lazily fingerprint the live module and compare against the expected one.
+  BuildLibrary live = BuildLibrary::Fingerprint(expectedBuild_.name.c_str());
+  bool ok = expectedBuild_.verified && live.base != 0 &&
+            expectedBuild_.base == live.base &&
+            (expectedBuild_.fileSize == 0 || expectedBuild_.fileSize == live.fileSize) &&
+            (expectedBuild_.textSize == 0 || expectedBuild_.textSize == live.textSize) &&
+            (expectedBuild_.textHash == 0 || expectedBuild_.textHash == live.textHash);
+  if (ok) {
+    buildGateOpen_.store(true);
+    return true;
+  }
+  Log::Warn("BerryAPI: engine build fingerprint does not match signature table "
+            "(expected base=%llx, live base=%llx hash=%llx) — "
+            "signature features disabled",
+            (unsigned long long)expectedBuild_.base,
+            (unsigned long long)live.base,
+            (unsigned long long)live.textHash);
+  return false;
+}
+
+bool SigCache::BuildVerified() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return BuildVerifiedLocked();
+}
+
 void SigCache::Register(const std::string& id, const Signature& sig) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  SigState initial = gateClosedPermanently_.load() ? SigState::Missing
+                                                   : SigState::Unknown;
   for (auto& e : entries_) {
     if (e.first == id) {
       e.second.sig = sig;
-      e.second.resolved = false;
+      e.second.state = initial;
+      e.second.results.clear();
       return;
     }
   }
-  entries_.emplace_back(id, Entry{sig, {}, false});
+  entries_.emplace_back(id, Entry{sig, {}, initial});
 }
 
 bool SigCache::Has(const std::string& id) const {
+  std::lock_guard<std::mutex> lk(mutex_);
   for (auto& e : entries_)
     if (e.first == id) return true;
   return false;
@@ -274,18 +384,45 @@ uptr SigCache::ResolveAndRegister(const std::string& id, const Signature& sig) {
 }
 
 uptr SigCache::Resolve(const std::string& id, size_t occurrence) {
+  std::lock_guard<std::mutex> lk(mutex_);
   for (auto& e : entries_) {
     if (e.first != id) continue;
     Entry& en = e.second;
-    if (!en.resolved) {
-      en.results = Scanner().FindAll(en.sig, 64);
-      en.resolved = true;
+    if (en.state == SigState::Found) {
+      if (occurrence < en.results.size())
+        return en.sig.Resolve(en.results[occurrence]);
+      return 0;
     }
+    if (en.state == SigState::Missing) return 0;
+    // Unknown: resolve now, but only when the build passes the gate.
+    if (!BuildVerifiedLocked() || !expectedBuild_.base) {
+      en.state = SigState::Missing;
+      Log::Warn("BerryAPI: rule '%s' not resolved (build not verified) — "
+                "dependent feature disabled",
+                id.c_str());
+      return 0;
+    }
+    en.results = Scanner().FindAll(en.sig, 64);
+    if (en.results.empty()) {
+      en.state = SigState::Missing;
+      Log::Warn("BerryAPI: rule '%s' not found in verified build — dependent "
+                "feature disabled",
+                id.c_str());
+      return 0;
+    }
+    en.state = SigState::Found;
     if (occurrence < en.results.size())
       return en.sig.Resolve(en.results[occurrence]);
     return 0;
   }
   return 0;
+}
+
+SigState SigCache::State(const std::string& id) const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  for (auto& e : entries_)
+    if (e.first == id) return e.second.state;
+  return SigState::Unknown;
 }
 
 }  // namespace Berry

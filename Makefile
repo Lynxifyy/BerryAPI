@@ -31,7 +31,8 @@ TEST_SRC := \
   tests/test_modules.cpp \
   tests/test_net.cpp \
   tests/test_render.cpp \
-  tests/test_sample.cpp
+  tests/test_sample.cpp \
+  tests/test_sigscan.cpp
 
 CORE_OBJ := $(CORE_SRC:.cpp=.o)
 TEST_OBJ := $(TEST_SRC:.cpp=.o)
@@ -67,7 +68,7 @@ check-samples: samples/sample_hitmarker.o
 	@rm -f samples/sample_hitmarker.o
 
 test: $(TEST_BINS) build/$(SHARED_NAME) check-samples
-	@for b in build/test_test_math build/test_test_modules build/test_test_net build/test_test_render build/test_test_sample; do \
+	@for b in build/test_test_math build/test_test_modules build/test_test_net build/test_test_render build/test_test_sample build/test_test_sigscan; do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
 	@echo "-- dlopen ABI --"
