@@ -2,7 +2,7 @@
 # Produces tests/berry_tests binary that runs every module's test suite.
 
 CXX      ?= g++
-CXXFLAGS ?= -std=c++17 -Wall -Wextra -O2 -g -Iinclude
+CXXFLAGS ?= -std=c++17 -Wall -Wextra -O2 -g -Iinclude -DBERRY_THREAD_ASSERT
 LDFLAGS  ?= -pthread
 
 # The injectable shared library (android/linux target build).
@@ -22,6 +22,7 @@ CORE_SRC := \
   core/modules/services.cpp \
   core/modules/world.cpp \
   core/lifecycle/engine.cpp \
+  core/lifecycle/thread.cpp \
   core/net/net.cpp \
   util/logger.cpp \
   util/mem.cpp
@@ -32,7 +33,8 @@ TEST_SRC := \
   tests/test_net.cpp \
   tests/test_render.cpp \
   tests/test_sample.cpp \
-  tests/test_sigscan.cpp
+  tests/test_sigscan.cpp \
+  tests/test_thread.cpp
 
 CORE_OBJ := $(CORE_SRC:.cpp=.o)
 TEST_OBJ := $(TEST_SRC:.cpp=.o)
@@ -68,7 +70,7 @@ check-samples: samples/sample_hitmarker.o
 	@rm -f samples/sample_hitmarker.o
 
 test: $(TEST_BINS) build/$(SHARED_NAME) check-samples
-	@for b in build/test_test_math build/test_test_modules build/test_test_net build/test_test_render build/test_test_sample build/test_test_sigscan; do \
+	@for b in build/test_test_math build/test_test_modules build/test_test_net build/test_test_render build/test_test_sample build/test_test_sigscan build/test_test_thread; do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
 	@echo "-- dlopen ABI --"

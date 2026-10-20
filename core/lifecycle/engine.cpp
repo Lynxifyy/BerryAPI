@@ -1,6 +1,7 @@
 #include "berry/engine.h"
 #include "berry/event.h"
 #include "berry/services.h"
+#include "berry/thread.h"
 
 #include <cstring>
 #include <mutex>
@@ -124,16 +125,23 @@ void Engine::Detach() {
 }
 
 void Engine::OnGameTick(GameTick tick) {
+  ThreadModel::Instance().Enter(ThreadRole::GameTick);
+  ThreadModel::Instance().AssertTick();
   currentTick_.store(tick);
   sched_.SetCurrentTick(tick);
   sched_.Tick(tick);
   Modules().TickAll(tick);
+  ThreadModel::Instance().Leave();
 }
 
 void Engine::OnFrame() {
   if (!attached_.load()) return;
+  ThreadModel::Instance().Enter(ThreadRole::Render);
+  ThreadModel::Instance().AssertRender();
   // Render module's frame hook gets installed by Berry::Render on Attach.
+  // Scripts never run on this thread; only render work + overlay.
   EventBus::Instance().Emit("berry:frame", nullptr, nullptr);
+  ThreadModel::Instance().Leave();
 }
 
 }  // namespace Berry
