@@ -2,6 +2,7 @@
 #include "berry/version.h"
 #include "berry/export.h"
 #include "berry/types.h"
+#include "berry/config.h"
 #include "berry/logger.h"
 #include "berry/hooks.h"
 #include "berry/sigscan.h"
@@ -23,6 +24,9 @@ namespace Berry {
 // driven by hooking eglSwapBuffers (the presentation call) once per frame.
 //----------------------------------------------------------------------------
 
+// Configuration passed through the C ABI. The C struct BerryConfigC is the
+// transport format; this is the internal view the engine holds. Bootstrap
+// converts and re-validates so a tampered or mismatched config fails closed.
 struct EngineConfig {
   const char* logLevel = nullptr;      // "trace" | "debug" | "info" | "warn" | "error"
   bool captureLog = false;
@@ -35,7 +39,11 @@ class BERRY_API Engine {
   static Engine& Instance();
 
   // Lifecycle -------------------------------------------------------------
-  bool Bootstrap(const EngineConfig& cfg);
+  /// C ABI entry: validates the config struct (size + abi_version) and
+  /// bootstraps. Fail-closed on mismatch.
+  bool Bootstrap(const BerryConfigC& cfg);
+  /// C++ convenience: builds a BerryConfigC from defaults and bootstraps.
+  bool Bootstrap();
   bool Attach();               // install hooks, attach modules
   void Detach();               // remove hooks, detach modules
   bool attached() const { return attached_.load(); }
@@ -89,14 +97,14 @@ class BERRY_API Engine {
 // On Android these are reached from a JNI / dlopen descriptor, but the
 // canonical path is the ELF constructor:
 //    __attribute__((constructor))
-//    static void BerryInit() { Berry::Engine::Instance().Bootstrap({}); }
+//    static void BerryInit() { Berry::Engine::Instance().Bootstrap(); }
 //
 // Berry::Inject() is the explicit, idempotent entry that the constructor
 // calls, guarded so multiple dlopen/detach cycles are safe.
 //----------------------------------------------------------------------------
 extern "C" {
 BERRY_API bool BERRY_Inject();
-BERRY_API bool BERRY_InjectWithConfig(const Berry::EngineConfig& cfg);
+BERRY_API bool BERRY_InjectWithConfig(const BerryConfigC* cfg);
 BERRY_API void BERRY_Detach();
 BERRY_API bool BERRY_IsAttached();
 BERRY_API const char* BERRY_Version();

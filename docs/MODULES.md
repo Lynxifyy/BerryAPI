@@ -6,34 +6,35 @@ Network) so the registry attach/detach cycle is safe.
 
 ## `Berry::World` (`services.h` / `core/modules/world.cpp`)
 
-Typed service: `WorldHandle`.
+Typed service: `WorldHandle`. **Read-only.** World access never mutates the
+game; any former setter (entity position/velocity/health, block writes,
+time writes, chat messages, applied damage) is removed from the public API.
+The only writable surface is the module-local KV store.
 
 - `SetSeam / Seam` — bind a `LevelSeam` (shim on host, engine pointers on device).
 - `RefreshCache / CachedEntities` — entity id cache refreshed every 20 ticks.
 - `GetEntity(id) → EntitySnapshot` — position, velocity, rotation, health,
   alive flag, name.
-- `GetBlock / SetBlock`, `GetTime / SetTime` — block access + time.
-- `SendMessage` — chat/console message.
-- `SetValue / GetValue / HasValue` — small per-module KV store.
+- `GetBlock`, `GetTime` — read-only block + time access.
+- `SetValue / GetValue / HasValue` — small per-module KV store (module-local,
+  not game state).
 
 ## `Berry::Combat` (`combat.h` / `core/modules/combat.cpp`)
 
-Typed service: `Combat`.
+Typed service: `Combat`. **Read-only (v2, 0.3).** The module observes damage
+that the engine already applied. It cannot apply, cancel, or change damage;
+the rules pipeline and the `Kill`/`AreaDamage` helpers were removed.
 
-- `AddPreRule / AddPostRule / RemoveRule` — damage rules that can mutate or
-  cancel a hit.
-- `Damage(victim, attacker, amt, cause)` — runs the pipeline, returns
-  `Applied | Cancelled`.
-- `Kill(victim, attacker, cause)` — one-shot `Damage(…, 99999, …)`.
-- `AreaDamage(center, radius, amt, cause, source)`.
-- `RecordHit / RecordKill / Metrics(attacker)` — rolling DPS metrics.
+- `Observe(CombatEvent)` — feed an engine-applied hit into metrics +
+  observers. Invalid events (zero victim, non-finite/negative damage) are
+  ignored — fail closed.
+- `RecordHit / RecordKill / Metrics(attacker)` — rolling DPS metrics
+  (windowed, at least 1s before DPS is reported).
 - `RecentKills` — kill attribution window.
-- `OnCancelled / OnApplied` — quest-style hooks.
-- `DamageSeam::Apply` — the engine adapter: modules never call engine damage
-  directly, they go through `Combat` → `DamageSeam`.
-
-Rules returning `cancelled == true` block the hit. A pre-rule can alter
-`finalDamage` before the engine applies it.
+- `OnApplied` — called for every observed hit.
+- `DamageSeam::OnDamage` — the read-only adapter: modules use
+  `Combat::Observe`, which forwards to the seam after validation.
+- The `berry:combat` event bus emits every observed hit.
 
 ## `Berry::Render` (`render.h` / `core/modules/render.cpp`)
 
@@ -50,6 +51,8 @@ Typed service: `Renderer`.
 
 ## `Berry::Network` (`net.h` / `core/net/net.cpp`)
 
+Typed service: `Network`. **Never touches the render thread.**
+
 Types: `TcpSocket`, `HttpRequest`/`HttpResponse`, `WebSocket` (RFC6455 client +
 frame handling), `JsonRpc` (2.0 parse/build), `RateLimiter`.
 
@@ -57,6 +60,10 @@ frame handling), `JsonRpc` (2.0 parse/build), `RateLimiter`.
 - WebSocket client: handshake, masked client frames, unmasked server frames;
   `SendFrame`/`RecvFrame` match RFC6455 byte order (see the fix history for
   the mask-key byte-order bug).
+- `ParseWsFrame` — pure in-memory frame parser (fuzz-tested in
+  `tests/test_fuzz.cpp`): reserved bits/opcodes, malformed control frames,
+  oversized frames and truncated headers fail closed with
+  `WsFrameStatus::{Invalid,Oversized,NeedMore}`.
 - JSON-RPC 2.0: `ParseRequest` handles `method`, `params` object, `id`.
 
 ## Capability matrix

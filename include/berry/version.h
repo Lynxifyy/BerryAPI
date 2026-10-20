@@ -4,6 +4,13 @@
 #define BERRY_VERSION_MINOR 0
 #define BERRY_VERSION_PATCH 0
 #define BERRY_VERSION_STRING "2.0.0"
+
+// The BerryAPI C ABI version. Bump whenever the exported C surface or the
+// layout of a public config / ingest struct changes. Loader tools and the
+// library both check this; mismatches are rejected at attach time.
+#define BERRY_ABI_VERSION 2
+
+// Legacy internal SDK ABI identifier (kept for compatibility).
 #define BERRY_SDK_ABI 1
 
 // Strict Berry:: module identifiers.

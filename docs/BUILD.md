@@ -8,8 +8,9 @@
 ## Host build (tests + injectable lib)
 
 ```sh
-make test    # build + run all host suites + dlopen ABI check
-make lib     # build/build/libBerryAPI.so
+make test          # build + run all host suites + dlopen ABI check
+make test-sanitize # same suites under ASan+UBSan (build/san/)
+make lib           # build/build/libBerryAPI.so
 make clean
 ```
 
@@ -18,6 +19,7 @@ Targets:
 | Target | Output |
 |---|---|
 | `make test` | `build/test_test_*` + `build/dlopen_test` |
+| `make test-sanitize` | `build/san/test_test_*` (`-fsanitize=address,undefined`) |
 | `make lib` | `build/libBerryAPI.so` |
 
 Flags used for the shared lib:
@@ -67,8 +69,12 @@ Test binaries:
 | `test_modules` | engine bootstrap, World+Combat+Render services, ESP |
 | `test_net` | HTTP, WebSocket echo, JSON-RPC |
 | `test_render` | camera projection, draw batching, backend factory |
+| `test_sigscan` | signature parse/match, build-hash gate, fail-closed rules |
+| `test_thread` | ThreadModel role routing + assertions |
+| `test_fuzz` | deterministic fuzzers: WS `ParseWsFrame` + `SigScanner` |
 
-Add a new suite by adding to `TEST_SRC` + the `test:` loop.
+Add a new suite by adding to `TEST_SRC` + the `test:` loop + the
+`test-sanitize` prerequisites (it shares `$(TEST_SRC)`).
 
 `dlopen_test` ensures the `.so` auto-attaches on load, that Inject/Detach are
 idempotent, and re-inject works.

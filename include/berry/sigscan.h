@@ -1,12 +1,25 @@
 #pragma once
 #include "berry/export.h"
 #include "berry/types.h"
+#include <atomic>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <memory>
 
 namespace Berry {
+
+// Resolution state of a registered signature. A feature that depends on a
+// signature must check this and disable itself when the state is anything
+// other than Found — fail closed, never guess.
+enum class SigState : u8 {
+  Unknown = 0,  // not registered yet
+  Missing,      // registered but resolution failed (or build not verified)
+  Found         // resolved to a verified address
+};
+
+const char* SigStateName(SigState s);
 
 //----------------------------------------------------------------------------
 // Signature scanning engine.
@@ -53,6 +66,28 @@ class BERRY_API ProcessImages {
   /// Loads an ELF section (e.g. .text) by reading the mapped file; used as a
   /// fallback if the in-memory layout is disturbed by runtime patching.
   static bool FindSection(uptr moduleBase, const char* sectionName, uptr* addr, size_t* size);
+};
+
+//----------------------------------------------------------------------------
+// Build/library hash — fingerprint of the executable we are attached to.
+//
+// Every signature table is written against a concrete build. Before any rule
+// resolves, record the build fingerprint once; if the fingerprint does not
+// match the table's expected value, rules stay Missing and features disable
+// themselves instead of scanning a foreign build (fail closed).
+//----------------------------------------------------------------------------
+
+struct BERRY_API BuildLibrary {
+  std::string name;          // e.g. "libminecraftpe.so"
+  uptr base = 0;             // module base address
+  u64 textHash = 0;          // hash of the exported .text bytes
+  u64 fileSize = 0;          // size of the backing file, if available
+  size_t textSize = 0;
+  bool verified = false;     // matched an expected fingerprint
+
+  /// Fingerprints the main game module (or `name`) in the current process.
+  static BuildLibrary Fingerprint(const char* name = "libminecraftpe.so");
+  static u64 HashSection(const u8* data, size_t len);
 };
 
 /// Scans `range` memory for the signature; returns resolved target or 0.
@@ -120,24 +155,42 @@ class BERRY_API SigCache {
 
   /// Registers a signature. Does not resolve until `Resolve(id)`.
   void Register(const std::string& id, const Signature& sig);
+
+  /// Sets the build fingerprint this signature table was written against.
+  /// Rules only resolve to Found when the runtime fingerprint matches.
+  /// Pass an empty BuildLibrary to force every rule to Missing (fail closed).
+  void SetExpectedBuild(const BuildLibrary& build);
+
   /// Resolves a registered signature to an absolute address (cached).
+  /// Returns 0 when the build is not verified (state will be Missing).
   uptr Resolve(const std::string& id, size_t occurrence = 0);
+
   /// Directly resolves a signature and registers it under `id`.
   uptr ResolveAndRegister(const std::string& id, const Signature& sig);
 
+  /// Current state of a signature. Feature code checks this before using a
+  /// resolved address; anything other than Found disables the feature.
+  SigState State(const std::string& id) const;
+
   bool Has(const std::string& id) const;
   size_t Count() const;
+  bool BuildVerified() const;
 
  private:
   struct Entry {
     Signature sig;
     std::vector<uptr> results;
-    bool resolved = false;
+    SigState state = SigState::Unknown;
   };
   SigCache() = default;
+  bool BuildVerifiedLocked() const;
   std::vector<std::pair<std::string, Entry>> entries_;
   SigScanner* scanner_ = nullptr;
   SigScanner& Scanner();
+  BuildLibrary expectedBuild_;
+  mutable std::atomic<bool> buildGateOpen_{false};   // fingerprint verified
+  std::atomic<bool> gateClosedPermanently_{false};  // empty fingerprint given
+  mutable std::mutex mutex_;
 };
 
 }  // namespace Berry

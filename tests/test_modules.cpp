@@ -7,6 +7,7 @@
 #include "shim_level.h"
 
 #include <cstdio>
+#include <cmath>
 #include <memory>
 #include <vector>
 
@@ -16,18 +17,18 @@ static int g_fail = 0;
 #define CHECK(cond) do { if (!(cond)) { \
   printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); ++g_fail; } } while (0)
 
-// Damage seam that records what the Combat module asked the engine to apply.
+// Damage seam that records observed (engine-applied) damage events.
 class CaptureDamageSeam final : public DamageSeam {
  public:
   int called = 0;
   f32 lastAmount = 0;
   EntityId lastVictim;
 
-  bool Apply(CombatEvent& evt) override {
+  bool OnDamage(const CombatEvent& evt) override {
     called++;
     lastAmount = evt.finalDamage;
     lastVictim = evt.victim;
-    return true;
+    return true;   // accept the observation
   }
   void OnTick(u64 tick) override { (void)tick; }
 };
@@ -35,7 +36,7 @@ class CaptureDamageSeam final : public DamageSeam {
 int main() {
   // --- Engine + default modules bootstrap ---
   Engine& eng = Engine::Instance();
-  eng.Bootstrap({});
+  eng.Bootstrap();
   CHECK(eng.Attach());
 
   // World module: inject a shim level.
@@ -63,20 +64,22 @@ int main() {
   CHECK(snap.health == 20);
   CHECK(snap.name == "zombie");
 
-  // Time control
+  // Time: only readable through the public seam — mutate via the shim's
+  // test-only helper, read through WorldHandle (read-only API).
   LevelTime t;
   t.day = false;
   t.absolute = 13000;
-  world->SetTime(t);
+  shim->SetTime(t);          // shim state only; not part of LevelSeam
   CHECK(!world->GetTime().day);
 
-  // Block set/get
-  CHECK(world->SetBlock(Vec3(5, 40, -8), 1));
+  // Block get (read-only path); mutating is a shim-only test op.
+  shim->SetBlock(Vec3(5, 40, -8), 1);
   CHECK(world->GetBlock(Vec3(5, 40, -8)) == 1);
   CHECK(world->GetBlock(Vec3(99, 99, 99)) == 0);
 
-  // Messages
-  CHECK(world->SendMessage("hello from BerryAPI"));
+  // RecordMessage is a shim-only test hook; there is no game-facing
+  // SendMessage in the read-only world API.
+  shim->RecordMessage("hello from BerryAPI");
   CHECK(shim->Messages().size() == 1);
   CHECK(shim->Messages()[0] == "hello from BerryAPI");
 
@@ -86,53 +89,54 @@ int main() {
   CHECK(std::string(world->GetValue("mode", "?")) == "survival");
   CHECK(std::string(world->GetValue("missing", "fb")) == "fb");
 
-  // --- Combat module ---
+  // --- Combat module (read-only observer) ---
   Combat* combat = CombatFrom(eng.Modules());
   CHECK(combat != nullptr);
   CaptureDamageSeam dseam;
   combat->BindSeam(&dseam);   // module already attached via engine; swap seam
 
-  // Pre-rule that doubles damage.
-  auto preId = combat->AddPreRule([](CombatEvent& evt) {
-    evt.finalDamage = evt.baseDamage * 2.0f;
-    return false;
-  });
-  // Pre-rule that cancels a specific victim.
-  auto cancelId = combat->AddPreRule([](CombatEvent& evt) {
-    if (evt.victim.raw == 2) evt.cancelled = true;
-    return evt.cancelled;
-  });
-
   EntityId attacker{99, 900};
-  auto outcome = combat->Damage(e1, attacker, 5.0f, DamageCause::EntityAttack);
-  CHECK(outcome == CombatOutcome::Applied);
-  CHECK(dseam.called == 1);
-  CHECK(dseam.lastAmount == 10.0f);   // doubled
 
-  // Cancel rule path
-  EntityId victim2{2, 200};
+  // Observe an engine-applied hit.
+  CombatEvent evt;
+  evt.victim = e1;
+  evt.attacker = attacker;
+  evt.baseDamage = 5.0f;
+  evt.finalDamage = 5.0f;
+  evt.cause = DamageCause::EntityAttack;
+  auto outcome = combat->Observe(evt);
+  CHECK(outcome == CombatOutcome::Observed);
+  CHECK(dseam.called == 1);
+  CHECK(dseam.lastAmount == 5.0f);
+
+  // Invalid events are ignored (fail closed): zero victim, NaN damage.
   dseam.called = 0;
-  auto outcome2 = combat->Damage(victim2, attacker, 5.0f, DamageCause::EntityAttack);
-  CHECK(outcome2 == CombatOutcome::Cancelled);
+  CombatEvent bad;
+  bad.victim = EntityId{};              // no victim
+  bad.attacker = attacker;
+  bad.finalDamage = 5.0f;
+  CHECK(combat->Observe(bad) == CombatOutcome::Ignored);
+  CHECK(dseam.called == 0);
+
+  CombatEvent nan;
+  nan.victim = e1;
+  nan.attacker = attacker;
+  nan.finalDamage = std::nanf("");
+  CHECK(combat->Observe(nan) == CombatOutcome::Ignored);
   CHECK(dseam.called == 0);
 
   // Metrics
   auto metrics = combat->Metrics(attacker);
   CHECK(metrics.hits == 1);
-  CHECK(metrics.damageDealt == 10.0);
+  CHECK(metrics.damageDealt == 5.0);
 
-  // Kill attribution (e1 survived; cancel rule still only affects victim2)
-  bool killed = combat->Kill(e1, attacker, DamageCause::EntityAttack);
-  CHECK(killed);
+  // Kill attribution is recorded from engine-observed events only.
+  combat->RecordKill(attacker, e1, DamageCause::EntityAttack);
   auto kills = combat->RecentKills();
   CHECK(kills.size() == 1);
   CHECK(kills[0].killer.raw == attacker.raw);
   CHECK(kills[0].victim.raw == e1.raw);
   CHECK(combat->Metrics(attacker).kills == 1);
-
-  // Remove rules
-  combat->RemoveRule(preId);
-  combat->RemoveRule(cancelId);
 
   // --- Render module ---
   Renderer* r = RendererFrom(eng.Modules());

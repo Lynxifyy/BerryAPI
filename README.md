@@ -56,6 +56,7 @@ See [docs/BUILD.md](docs/BUILD.md) for NDK details, Dobby CMake, and hook flags.
 - [Modules](docs/MODULES.md) — per-module API walkthrough
 - [Hooking](docs/HOOKING.md) — shim vs Dobby backends, VTable patches
 - [Signatures](docs/SIGNATURES.md) — writing signature tables, AArch64 xrefs
+- [Threading](docs/THREADING.md) — tick/render/script threads and assertions
 - [Build](docs/BUILD.md) — host build, NDK cross build, exports
 - [samples/sample_hitmarker.cpp](samples/sample_hitmarker.cpp) — minimal module
 
@@ -65,7 +66,7 @@ See [docs/BUILD.md](docs/BUILD.md) for NDK details, Dobby CMake, and hook flags.
 
 ```c
 bool        BERRY_Inject();
-bool        BERRY_InjectWithConfig(const Berry::EngineConfig& cfg);
+bool        BERRY_InjectWithConfig(const BerryConfigC* cfg);
 void        BERRY_Detach();
 bool        BERRY_IsAttached();
 const char* BERRY_Version();
@@ -73,6 +74,10 @@ BERRY_PatchedFn BERRY_ShimPatchInPlace(void* target, void* detour);
 int         BERRY_ShimUnpatch(void* target);
 bool        BERRY_ShimCanPatch();
 ```
+
+`BerryConfigC` is a **plain C struct** (see `include/berry/config.h`) that starts
+with `uint32_t size; uint32_t abi_version;`. The library validates both and
+rejects mismatches at attach time (`BERRY_ABI_VERSION` in `version.h`).
 
 Everything else is compiled with `-fvisibility=hidden`.
 

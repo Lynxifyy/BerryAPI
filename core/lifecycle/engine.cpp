@@ -1,9 +1,25 @@
 #include "berry/engine.h"
 #include "berry/event.h"
 #include "berry/services.h"
+#include "berry/thread.h"
 
 #include <cstring>
 #include <mutex>
+
+namespace {
+
+// A struct equal to defaults but with size + abi_version stamped, so the
+// no-arg paths can call the same validated C ABI entry point.
+BerryConfigC DefaultConfigC() {
+  BerryConfigC cfg{};
+  cfg.size = sizeof(cfg);
+  cfg.abi_version = BERRY_ABI_VERSION;
+  cfg.auto_attach_modules = 1;
+  cfg.enable_render = 1;
+  return cfg;
+}
+
+}  // namespace
 
 namespace Berry {
 
@@ -28,9 +44,43 @@ void Engine::ApplyConfig(const EngineConfig& cfg) {
   Log::Capture(cfg.captureLog);
 }
 
-bool Engine::Bootstrap(const EngineConfig& cfg) {
-  ApplyConfig(cfg);
-  Log::Info("BerryAPI v%s bootstrapped", BERRY_VERSION_STRING);
+namespace {
+const char* LogLevelNameC(int level) {
+  switch (level) {
+    case BerryLogTraceC: return "trace";
+    case BerryLogDebugC: return "debug";
+    case BerryLogInfoC:  return "info";
+    case BerryLogWarnC:  return "warn";
+    case BerryLogErrorC: return "error";
+    default:             return nullptr;
+  }
+}
+}  // namespace
+
+bool Engine::Bootstrap() {
+  return Bootstrap(DefaultConfigC());
+}
+
+bool Engine::Bootstrap(const BerryConfigC& cfg) {
+  if (cfg.abi_version != BERRY_ABI_VERSION) {
+    Log::Error("BerryAPI config ABI mismatch: library=%u caller=%u",
+               (unsigned)BERRY_ABI_VERSION, (unsigned)cfg.abi_version);
+    return false;
+  }
+  if (cfg.size == 0 || cfg.size < sizeof(cfg)) {
+    Log::Error("BerryAPI config too small or empty: got %u bytes, need %zu",
+               (unsigned)cfg.size, sizeof(cfg));
+    return false;
+  }
+
+  EngineConfig internal;
+  internal.logLevel = LogLevelNameC(cfg.log_level);
+  internal.captureLog = cfg.capture_log != 0;
+  internal.autoAttachModules = cfg.auto_attach_modules != 0;
+  internal.enableRender = cfg.enable_render != 0;
+  ApplyConfig(internal);
+  Log::Info("BerryAPI v%s bootstrapped (abi %u)", BERRY_VERSION_STRING,
+            (unsigned)BERRY_ABI_VERSION);
   // Register core signatures used by module seams. The combat/render/world
   // modules register their own per-version tables; engine here just resolves
   // the local runtime symbol the modules need.
@@ -39,11 +89,10 @@ bool Engine::Bootstrap(const EngineConfig& cfg) {
 }
 
 void Engine::ResolveCoreSignatures() {
-  // This is where on-device code would Register() the "damageCall",
-  // "entityPosition", "levelTick" etc signatures from a version table.
-  // The table lives in modules/ so it can be updated independently of the
-  // core. When running against the shim, resolutions happen inside the
-  // modules themselves because the shim exports concrete C functions.
+  // Fail-closed default: until a module registers its per-version signature
+  // table AND pins the expected build fingerprint, no signature rule may
+  // resolve. An empty expected build permanently closes the table.
+  SigCache::Instance().SetExpectedBuild({});
 }
 
 bool Engine::Attach() {
@@ -76,16 +125,23 @@ void Engine::Detach() {
 }
 
 void Engine::OnGameTick(GameTick tick) {
+  ThreadModel::Instance().Enter(ThreadRole::GameTick);
+  ThreadModel::Instance().AssertTick();
   currentTick_.store(tick);
   sched_.SetCurrentTick(tick);
   sched_.Tick(tick);
   Modules().TickAll(tick);
+  ThreadModel::Instance().Leave();
 }
 
 void Engine::OnFrame() {
   if (!attached_.load()) return;
+  ThreadModel::Instance().Enter(ThreadRole::Render);
+  ThreadModel::Instance().AssertRender();
   // Render module's frame hook gets installed by Berry::Render on Attach.
+  // Scripts never run on this thread; only render work + overlay.
   EventBus::Instance().Emit("berry:frame", nullptr, nullptr);
+  ThreadModel::Instance().Leave();
 }
 
 }  // namespace Berry
@@ -101,14 +157,15 @@ static std::mutex g_injectMutex;
 BERRY_API bool BERRY_Inject() {
   std::lock_guard<std::mutex> lk(g_injectMutex);
   auto& e = Berry::Engine::Instance();
-  if (!e.Bootstrap({})) return false;
+  if (!e.Bootstrap()) return false;
   return e.Attach();
 }
 
-BERRY_API bool BERRY_InjectWithConfig(const Berry::EngineConfig& cfg) {
+BERRY_API bool BERRY_InjectWithConfig(const BerryConfigC* cfg) {
+  if (!cfg) return BERRY_Inject();   // null config fails safe to defaults
   std::lock_guard<std::mutex> lk(g_injectMutex);
   auto& e = Berry::Engine::Instance();
-  if (!e.Bootstrap(cfg)) return false;
+  if (!e.Bootstrap(*cfg)) return false;
   return e.Attach();
 }
 
@@ -134,7 +191,7 @@ BERRY_API const char* BERRY_Version() {
 __attribute__((constructor))
 static void BerryLibraryInit() {
   if (!Berry::Engine::Instance().attached()) {
-    Berry::Engine::Instance().Bootstrap({});
+    Berry::Engine::Instance().Bootstrap();
     Berry::Engine::Instance().Attach();
   }
 }

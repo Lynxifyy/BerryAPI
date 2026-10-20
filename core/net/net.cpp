@@ -353,13 +353,77 @@ bool WebSocket::SendFrame(WsOpcode op, const void* payload, size_t len) {
   return sock_ && sock_->Send(frame.data(), frame.size()) == (ssize_t)frame.size();
 }
 
+//----------------------------------------------------------------------------
+// Pure RFC6455 frame parser. This is the part we can fuzz headlessly: no
+// sockets, just a buffer + fail-closed statuses.
+//----------------------------------------------------------------------------
+
+WsFrameStatus ParseWsFrame(const u8* data, size_t len, WsFrameView* out,
+                           u64 maxPayload) {
+  if (!out) return WsFrameStatus::Invalid;
+  *out = WsFrameView{};
+  if (!data || len < 2) return WsFrameStatus::NeedMore;
+
+  const u8 b0 = data[0];
+  const u8 b1 = data[1];
+  if (b0 & 0x70) return WsFrameStatus::Invalid;   // RSV bits not negotiated
+  bool fin = (b0 & 0x80) != 0;
+  u8 opcode = b0 & 0x0F;
+  bool masked = (b1 & 0x80) != 0;
+  u64 payloadLen = b1 & 0x7F;
+
+  // Reserved opcodes and fragmentation control-frame misuse.
+  if (opcode >= 0x3 && opcode <= 0x7) return WsFrameStatus::Invalid;
+  if (opcode >= 0xB && opcode <= 0xF) return WsFrameStatus::Invalid;
+  bool control = opcode >= 0x8;
+
+  // RFC6455 §5.5: control frames MUST have a payload <=125 bytes, so the
+  // 126/127 length-marker forms are invalid for them outright (fail closed,
+  // before deciding we need more header bytes).
+  if (control && (payloadLen == 126 || payloadLen == 127)) return WsFrameStatus::Invalid;
+
+  size_t off = 2;
+  if (payloadLen == 126) {
+    if (len < off + 2) return WsFrameStatus::NeedMore;
+    payloadLen = ((u64)data[off] << 8) | data[off + 1];
+    off += 2;
+  } else if (payloadLen == 127) {
+    if (len < off + 8) return WsFrameStatus::NeedMore;
+    payloadLen = 0;
+    for (int i = 0; i < 8; ++i) payloadLen = (payloadLen << 8) | data[off + i];
+    off += 8;
+  }
+
+  if (masked) {
+    if (len < off + 4) return WsFrameStatus::NeedMore;
+    off += 4;   // masking key; payload that follows is masked on the wire
+  }
+
+  // RFC6455: control frames are <=125 bytes and not fragmented.
+  if (control && (payloadLen > 125 || !fin)) return WsFrameStatus::Invalid;
+  if (payloadLen > maxPayload) return WsFrameStatus::Oversized;
+  if (payloadLen > len - off) return WsFrameStatus::NeedMore;
+
+  // The view is read-only: `payload` points into the caller's buffer (the
+  // on-the-wire bytes, still masked if `masked`). Callers that need the
+  // decoded content unmask themselves using the key at data+off-4 (when
+  // masked). Parsing never writes into the buffer, which keeps this function
+  // pure and fuzz-safe.
+  out->fin = fin;
+  out->opcode = opcode;
+  out->masked = masked;
+  out->payloadLen = payloadLen;
+  out->payload = data + off;
+  out->frameLen = off + (size_t)payloadLen;
+  return WsFrameStatus::Ok;
+}
+
 void WebSocket::Pump() {
   if (!open_ || !sock_) return;
   if (!sock_->WaitReadable(0)) return;
   unsigned char hdr[2];
   ssize_t hr = sock_->Recv(hdr, 2, 100);
   if (hr < 2) {
-    if (hr == 0 || hr == -2) { /* peer closed or timeout */ }
     if (hr == 0) { open_ = false; if (onClose_) onClose_(1006, "eof"); }
     return;
   }

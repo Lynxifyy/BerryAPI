@@ -15,34 +15,31 @@ namespace Berry {
 //----------------------------------------------------------------------------
 // Berry::Combat module types.
 //
-// The combat module sits on a DamageSeam that hooks the engine's damage
-// function. Rules run before and after damage is applied; kill attribution
-// tracks who killed whom; the DPS tracker measures real combat throughput
-// (for performance debugging / damage tuning). Everything is testable
-// against the shim's fake Level.
+// v2 (0.3): the combat module is strictly read-only. It OBSERVES damage that
+// the engine applied; it cannot apply, cancel, or change damage. The rules
+// pipeline, Kill/AreaDamage helpers and the Berry-specific damage causes were
+// removed. CombatMetrics (DPS, average hit), KillAttribution, OnApplied and
+// the "berry:combat" event bus remain.
 //----------------------------------------------------------------------------
 
-// A single resolved combat fact passed through the pipeline.
+// A single resolved combat fact: a hit that happened in-game.
 struct BERRY_API CombatEvent {
   EntityId victim;
   EntityId attacker;        // may be 0 for environmental causes
   f32 baseDamage = 0;
-  f32 finalDamage = 0;      // after rules, before engine applies
+  f32 finalDamage = 0;      // the damage the engine actually applied
   DamageCause cause = DamageCause::None;
-  bool cancelled = false;   // set by a rule to block the hit
-  f32 knockbackX = 0, knockbackY = 0, knockbackZ = 0;
   u64 tick = 0;
 };
 
-using DamageRule = std::function<bool(CombatEvent&)>;
-
-enum class CombatOutcome { Cancelled, Applied };
+enum class CombatOutcome { Observed, Ignored };
 
 class BERRY_API DamageSeam {
  public:
   virtual ~DamageSeam() = default;
-  /// Invoked by Combat module when it wants to apply a hit through the engine.
-  virtual bool Apply(CombatEvent& evt) = 0;
+  /// Receives a read-only damage observation after the engine applied it.
+  /// Returns true when the event was accepted.
+  virtual bool OnDamage(const CombatEvent& evt) = 0;
   /// Refreshes the combat pipeline (called each tick).
   virtual void OnTick(u64 tick) = 0;
 };
@@ -67,7 +64,7 @@ struct BERRY_API CombatMetrics {
 };
 
 //----------------------------------------------------------------------------
-// Berry::Combat — the strict module itself.
+// Berry::Combat — the strict module itself (read-only observer).
 //----------------------------------------------------------------------------
 
 class BERRY_API Combat {
@@ -83,19 +80,11 @@ class BERRY_API Combat {
   /// Re-binds the damage seam at runtime (test harness or device adapter swap).
   void BindSeam(DamageSeam* seam) { seam_ = seam; }
 
-  // Rules engine
-  u64 AddPreRule(DamageRule rule);   // before engine applies
-  u64 AddPostRule(DamageRule rule);  // after engine applies
-  bool RemoveRule(u64 id);
-
-  // Apply a hit through the pipeline.
-  CombatOutcome Damage(EntityId victim, EntityId attacker, f32 amt,
-                       DamageCause cause);
-  // One-shot kill.
-  bool Kill(EntityId victim, EntityId attacker, DamageCause cause = DamageCause::BerryTech);
-  // Area damage at a point.
-  size_t AreaDamage(const Vec3& center, f32 radius, f32 amt,
-                    DamageCause cause, EntityId source);
+  /// Observe a damage event that the engine already applied. Read-only: never
+  /// applies, cancels, or modifies damage in the game. Records metrics and
+  /// notifies the seam + OnApplied/event-bus observers. Invalid events
+  /// (zero victim, non-finite or negative damage) are ignored — fail closed.
+  CombatOutcome Observe(const CombatEvent& evt);
 
   // Metrics
   void RecordHit(EntityId attacker, f32 damage);
@@ -104,26 +93,22 @@ class BERRY_API Combat {
   CombatMetrics Metrics(EntityId attacker) const;
   std::vector<KillAttribution> RecentKills(size_t count = 16) const;
 
-  // Quest-style hooks: called when your damage rule cancels a hit.
-  void OnCancelled(std::function<void(const CombatEvent&)> fn);
+  /// Called for every observed (applied) hit.
   void OnApplied(std::function<void(const CombatEvent&)> fn);
 
  private:
+  struct AttackerEntry {
+    CombatMetrics metrics;
+    u64 firstHitNs = 0;   // for the rolling DPS window
+  };
+
   DamageSeam* seam_ = nullptr;
   bool attached_ = false;
 
   mutable std::mutex mutex_;
-  std::unordered_map<std::string, DamageRule> preRules_;
-  std::unordered_map<std::string, DamageRule> postRules_;
-  uint64_t nextRuleId_ = 1;
-
-  std::unordered_map<u64, CombatMetrics> metrics_;  // by attacker raw id
+  std::unordered_map<u64, AttackerEntry> metrics_;  // by attacker raw id
   std::vector<KillAttribution> kills_;
-  std::function<void(const CombatEvent&)> onCancelled_;
   std::function<void(const CombatEvent&)> onApplied_;
-
-  static void FirePipeline(std::unordered_map<std::string, DamageRule>& rules,
-                           CombatEvent& evt, bool* cancelled);
 };
 
 }  // namespace Berry

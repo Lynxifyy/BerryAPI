@@ -25,13 +25,10 @@ enum class EntityType : u32 { Player, Mob, Projectile, Item, Vehicle, Unknown };
 
 enum class DamageCause : u32 {
   None = 0,
-  Override,
   Contact, EntityAttack, EntitySweepAttack, Projectile, Suffocation, Fall,
   Fire, FireTick, Lava, Drowning, BlockExplosion, EntityExplosion, Void,
   Magic, Wither, Anvil, FallingBlock, Thorns, Fatal, Starve, OutOfWorld,
-  Lightning, Suiciding, Stalagmite,
-  // BerryAPI-applied custom causes
-  BerryBonus, BerryTech
+  Lightning, Suiciding, Stalagmite
 };
 
 struct BERRY_API EntityId {
@@ -94,22 +91,17 @@ class BERRY_API LevelSeam {
   virtual bool RaycastBlock(const Vec3& origin, const Vec3& dir, f32 maxDist,
                             Vec3* outPos, u32* outBlockType) const = 0;
 
-  /// Block id at integer coordinates (0 = air).
+  /// Block id at integer coordinates (0 = air). Read-only.
   virtual u32 GetBlock(const Vec3& worldPos) const = 0;
-  virtual bool SetBlock(const Vec3& worldPos, u32 blockType) = 0;
 
+  /// Read-only level time.
   virtual LevelTime GetTime() const = 0;
-  virtual void SetTime(const LevelTime& t) = 0;
-
-  virtual bool SendMessage(const char* message) = 0;
-
-  /// Applies damage through the engine's own pipeline.
-  virtual bool ApplyDamage(EntityId target, f32 amount, DamageCause cause,
-                           EntityId source) = 0;
 };
 
 //----------------------------------------------------------------------------
-// ActorController — control one entity (usually the local player).
+// ActorController — read-only observation of one entity (usually the local
+// player). World access through BerryAPI is read-only: none of these mutate
+// the game. Mutating wrappers were removed in v2 (see 0.2).
 //----------------------------------------------------------------------------
 
 class BERRY_API ActorController {
@@ -121,13 +113,9 @@ class BERRY_API ActorController {
   EntitySnapshot Snapshot() const;
 
   Vec3 Position() const;
-  void SetPosition(const Vec3& p);
   Vec3 Velocity() const;
-  void SetVelocity(const Vec3& v);
-  void AddVelocity(const Vec3& dv);
 
   f32 Health() const;
-  void SetHealth(f32 h);
 
  private:
   LevelSeam& seam_;

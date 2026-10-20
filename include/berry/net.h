@@ -77,6 +77,34 @@ enum class WsOpcode : u8 {
   Close = 0x8, Ping = 0x9, Pong = 0xA
 };
 
+// Result of parsing an in-memory RFC6455 frame (see ParseWsFrame).
+enum class WsFrameStatus : u8 {
+  Ok = 0,       // header (and full payload) present; header/mask valid
+  NeedMore,     // buffer too short: wait for more bytes
+  Oversized,    // payload length exceeds the safety cap — fail closed
+  Invalid       // reserved bits, bad opcode, oversized/rsv control frame
+};
+
+// Parsed frame header + (unmasked) payload from `data`. Server->client frames
+// are unmasked per RFC6455; a present mask is still accepted and applied so a
+// hostile/faulty peer cannot smuggle a corrupt stream.
+struct BERRY_API WsFrameView {
+  bool fin = true;
+  u8 opcode = 0;
+  bool masked = false;
+  u64 payloadLen = 0;
+  const u8* payload = nullptr;     // valid when status == Ok
+  size_t frameLen = 0;             // total bytes consumed (header + payload)
+};
+
+// Parses a WebSocket frame from an in-memory buffer. Fail closed: returns
+// Invalid for reserved opcodes, RSV bits, or malformed control frames
+// (control frames must be <=125 bytes and FIN). `maxPayload` guards against
+// oversized frame bombs.
+BERRY_API WsFrameStatus ParseWsFrame(const u8* data, size_t len,
+                                     WsFrameView* out,
+                                     u64 maxPayload = 16u * 1024 * 1024);
+
 struct BERRY_API WsMessage {
   WsOpcode opcode = WsOpcode::Text;
   std::vector<u8> payload;

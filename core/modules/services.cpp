@@ -104,11 +104,8 @@ class WorldModule : public BerryModule, public WorldHandle {
     if (seam_ && seam_->GetEntity(id, &s)) return s;
     return s;
   }
-  void SetTime(const LevelTime& t) override { if (seam_) seam_->SetTime(t); }
   LevelTime GetTime() const override { return seam_ ? seam_->GetTime() : LevelTime{}; }
-  bool SetBlock(const Vec3& p, u32 b) override { return seam_ && seam_->SetBlock(p, b); }
   u32 GetBlock(const Vec3& p) const override { return seam_ ? seam_->GetBlock(p) : 0; }
-  bool SendMessage(const char* m) override { return seam_ && seam_->SendMessage(m); }
   void SetValue(const char* k, const char* v) override { kv_[k] = v; }
   const char* GetValue(const char* k, const char* fb) const override {
     auto it = kv_.find(k);

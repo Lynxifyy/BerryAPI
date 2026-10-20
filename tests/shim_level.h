@@ -108,31 +108,27 @@ class ShimLevel final : public LevelSeam {
     auto it = blocks_.find(BlockKey(worldPos));
     return it == blocks_.end() ? 0 : it->second;
   }
-  bool SetBlock(const Vec3& worldPos, u32 blockType) override {
-    std::lock_guard<std::mutex> lk(blockM_);
-    blocks_[BlockKey(worldPos)] = blockType;
-    return true;
-  }
 
   LevelTime GetTime() const override { return time_; }
-  void SetTime(const LevelTime& t) override { time_ = t; }
 
-  bool SendMessage(const char* message) override {
-    std::lock_guard<std::mutex> lk(m_);
-    messages_.push_back(message ? message : "");
-    return true;
+  // Test-only mutators (the shim is fake state, not the game). These are NOT
+  // part of LevelSeam; the public seam is read-only.
+  void SetBlock(const Vec3& worldPos, u32 blockType) {
+    std::lock_guard<std::mutex> lk(blockM_);
+    blocks_[BlockKey(worldPos)] = blockType;
   }
-
-  bool ApplyDamage(EntityId target, f32 amount, DamageCause cause,
-                   EntityId source) override {
+  void SetTime(const LevelTime& t) { time_ = t; }
+  void RecordMessage(const std::string& msg) {
     std::lock_guard<std::mutex> lk(m_);
-    auto it = entities_.find(target.raw ? target.raw : target.runtime);
-    if (it == entities_.end()) return false;
-    auto& e = it->second;
-    e.health -= amount;
-    if (e.health <= 0) e.alive = false;
-    (void)cause; (void)source;
-    return true;
+    messages_.push_back(msg);
+  }
+  void SetHealth(const EntityId& id, f32 health) {
+    std::lock_guard<std::mutex> lk(m_);
+    auto key = id.raw ? id.raw : id.runtime;
+    auto it = entities_.find(key);
+    if (it == entities_.end()) return;
+    it->second.health = health;
+    it->second.alive = health > 0;
   }
 
   const std::vector<std::string>& Messages() const { return messages_; }
