@@ -73,7 +73,7 @@ int main() {
   auto mods = CreateDefaultModules();
   auto probe = std::make_shared<TestProbeModule>();
   mods.push_back(probe);
-  eng.Bootstrap({});
+  eng.Bootstrap();
   for (auto& m : mods) {
     CHECK(eng.Modules().Register(m));
   }

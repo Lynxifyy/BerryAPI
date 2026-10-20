@@ -71,7 +71,7 @@ test: $(TEST_BINS) build/$(SHARED_NAME) check-samples
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
 	@echo "-- dlopen ABI --"
-	@$(CC) -std=c11 -Wall -O2 tests/dlopen_test.c -ldl -o build/dlopen_test
+	@$(CC) -std=c11 -Wall -O2 -Iinclude tests/dlopen_test.c -ldl -o build/dlopen_test
 	@./build/dlopen_test build/$(SHARED_NAME) || exit 1
 	@echo "== all tests passed =="
 

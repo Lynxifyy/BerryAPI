@@ -35,7 +35,7 @@ class CaptureDamageSeam final : public DamageSeam {
 int main() {
   // --- Engine + default modules bootstrap ---
   Engine& eng = Engine::Instance();
-  eng.Bootstrap({});
+  eng.Bootstrap();
   CHECK(eng.Attach());
 
   // World module: inject a shim level.
