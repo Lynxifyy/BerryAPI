@@ -6,15 +6,18 @@ Network) so the registry attach/detach cycle is safe.
 
 ## `Berry::World` (`services.h` / `core/modules/world.cpp`)
 
-Typed service: `WorldHandle`.
+Typed service: `WorldHandle`. **Read-only.** World access never mutates the
+game; any former setter (entity position/velocity/health, block writes,
+time writes, chat messages, applied damage) is removed from the public API.
+The only writable surface is the module-local KV store.
 
 - `SetSeam / Seam` — bind a `LevelSeam` (shim on host, engine pointers on device).
 - `RefreshCache / CachedEntities` — entity id cache refreshed every 20 ticks.
 - `GetEntity(id) → EntitySnapshot` — position, velocity, rotation, health,
   alive flag, name.
-- `GetBlock / SetBlock`, `GetTime / SetTime` — block access + time.
-- `SendMessage` — chat/console message.
-- `SetValue / GetValue / HasValue` — small per-module KV store.
+- `GetBlock`, `GetTime` — read-only block + time access.
+- `SetValue / GetValue / HasValue` — small per-module KV store (module-local,
+  not game state).
 
 ## `Berry::Combat` (`combat.h` / `core/modules/combat.cpp`)
 

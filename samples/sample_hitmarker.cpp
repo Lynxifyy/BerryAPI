@@ -73,7 +73,10 @@ class HitmarkerModule : public BerryModule {
     char msg[128];
     std::snprintf(msg, sizeof(msg), "[Berry] DPS %.1f (hits %llu)",
                   m.Dps(), (unsigned long long)m.hits);
-    world->SendMessage(msg);
+    // Read-only world API: report metrics into the module-local KV store
+    // instead of mutating the game via chat.
+    world->SetValue("hitmarker.dps", msg);
+    Log::Info("%s", msg);
   }
 
   // Optional per-frame draw: modules can call Renderer from their own frame

@@ -63,20 +63,22 @@ int main() {
   CHECK(snap.health == 20);
   CHECK(snap.name == "zombie");
 
-  // Time control
+  // Time: only readable through the public seam — mutate via the shim's
+  // test-only helper, read through WorldHandle (read-only API).
   LevelTime t;
   t.day = false;
   t.absolute = 13000;
-  world->SetTime(t);
+  shim->SetTime(t);          // shim state only; not part of LevelSeam
   CHECK(!world->GetTime().day);
 
-  // Block set/get
-  CHECK(world->SetBlock(Vec3(5, 40, -8), 1));
+  // Block get (read-only path); mutating is a shim-only test op.
+  shim->SetBlock(Vec3(5, 40, -8), 1);
   CHECK(world->GetBlock(Vec3(5, 40, -8)) == 1);
   CHECK(world->GetBlock(Vec3(99, 99, 99)) == 0);
 
-  // Messages
-  CHECK(world->SendMessage("hello from BerryAPI"));
+  // RecordMessage is a shim-only test hook; there is no game-facing
+  // SendMessage in the read-only world API.
+  shim->RecordMessage("hello from BerryAPI");
   CHECK(shim->Messages().size() == 1);
   CHECK(shim->Messages()[0] == "hello from BerryAPI");
 

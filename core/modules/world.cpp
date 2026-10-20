@@ -27,24 +27,14 @@ Vec3 ActorController::Position() const {
   return seam_.GetEntity(id_, &snap) ? snap.position : Vec3();
 }
 
-void ActorController::SetPosition(const Vec3& p) {
-  // The seam's SetPosition is reached through a virtual method registration.
-  // For now, entity position mutation is provided by the shim/on-device
-  // implementation; the module layer relies on the seam having a hook.
-  (void)p;
-}
-
 Vec3 ActorController::Velocity() const {
   EntitySnapshot snap;
   return seam_.GetEntity(id_, &snap) ? snap.velocity : Vec3();
 }
 
-void ActorController::SetVelocity(const Vec3& v) { (void)v; }
-void ActorController::AddVelocity(const Vec3& dv) { (void)dv; }
 f32 ActorController::Health() const {
   EntitySnapshot snap;
   return seam_.GetEntity(id_, &snap) ? snap.health : -1;
 }
-void ActorController::SetHealth(f32 h) { (void)h; }
 
 }  // namespace Berry

@@ -65,8 +65,10 @@ keeps module boundaries strict even in-process.
 
 The module-facing world is abstracted behind seams:
 
-- `LevelSeam` — entities, blocks, time, messages, damage application.
-- `DamageSeam` — the damage pipeline (`Apply`, `OnTick`).
+- `LevelSeam` — read-only entity/block/time access. World state through the
+  public API is never mutated (v2 rule 0.2); test shims keep their own
+  mutators for fake-state setup.
+- `DamageSeam` — the damage pipeline boundary (observation in v2).
 - `RenderSeam` — the draw batch consumer (device GLES or capture).
 
 On the host, `tests/shim_level.h` implements a `ShimLevel` + `CaptureRenderSeam`

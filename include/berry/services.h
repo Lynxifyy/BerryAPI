@@ -44,11 +44,9 @@ class BERRY_API WorldHandle {
   virtual void RefreshCache() = 0;
   virtual std::vector<EntityId> CachedEntities() const = 0;
   virtual EntitySnapshot GetEntity(EntityId id) const = 0;
-  virtual void SetTime(const LevelTime& t) = 0;
   virtual LevelTime GetTime() const = 0;
-  virtual bool SetBlock(const Vec3& p, u32 blockType) = 0;
   virtual u32 GetBlock(const Vec3& p) const = 0;
-  virtual bool SendMessage(const char* msg) = 0;
+  // Module-local KV store (not game state): read/write allowed.
   virtual void SetValue(const char* key, const char* value) = 0;
   virtual const char* GetValue(const char* key, const char* fallback) const = 0;
   virtual bool HasValue(const char* key) const = 0;
