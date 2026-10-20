@@ -1,3 +1,8 @@
+<p align="center">
+  <img src="
+    https://raw.githubusercontent.com/Lynxifyy/BerryAPI-Icon/main/icon-1024.png" width="150" height="150" alt="Profile Avatar">
+</p>
+
 # BerryAPI
 
 A dangerously-powerful **native injected C++ shared library** (`libBerryAPI.so`)
