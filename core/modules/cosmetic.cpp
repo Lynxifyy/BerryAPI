@@ -542,9 +542,81 @@ std::vector<CosmeticDrawItem> CosmeticService::ResolveLocked(
 std::vector<CosmeticDrawItem> CosmeticService::Resolve(
     EntityId entity, const CosmeticLoadout& loadout) const {
   u64 skipped = 0;
-  auto items = ResolveLocked(entity, loadout, skeleton_, &skipped);
+  bool hit = false;
+  auto items = ResolveWithCache(entity, loadout, skeleton_, &skipped, &hit);
   std::lock_guard<std::mutex> lk(mutex_);
   stats_.skippedNoBone += skipped;
+  if (hit) ++stats_.cacheHits; else ++stats_.cacheMisses;
+  return items;
+}
+
+void CosmeticService::EvictLruLocked() const {
+  auto victim = resolveCache_.begin();
+  for (auto it = resolveCache_.begin(); it != resolveCache_.end(); ++it) {
+    if (it->second.lastUse < victim->second.lastUse) victim = it;
+  }
+  if (victim != resolveCache_.end()) resolveCache_.erase(victim);
+}
+
+void CosmeticService::ClearResolveCache() {
+  std::lock_guard<std::mutex> lk(cacheMutex_);
+  resolveCache_.clear();
+}
+
+size_t CosmeticService::resolveCacheSize() const {
+  std::lock_guard<std::mutex> lk(cacheMutex_);
+  return resolveCache_.size();
+}
+
+std::vector<CosmeticDrawItem> CosmeticService::ResolveWithCache(
+    EntityId entity, const CosmeticLoadout& loadout,
+    const CosmeticSkeletonSource* skel, u64* skippedNoBone, bool* hit) const {
+  if (hit) *hit = false;
+  std::vector<CosmeticDrawItem> items;
+  if (!skel) return items;
+
+  // The loadout is part of the cache's identity: equipping or unequipping
+  // anything changes it, so the entry is invalidated. Canonical() is the same
+  // stable form the sync channel frames on.
+  const std::string loadoutKey = loadout.Canonical();
+
+  // A hit additionally requires the skeleton seam to PROVE the pose has not
+  // moved since the cached resolve. A seam that cannot report a revision always
+  // misses, so a stale attach transform is never reused — the cache can only
+  // make a correct resolve cheaper, never a wrong one appear.
+  const std::pair<u64, u16> key{entity.raw, entity.runtime};
+  // The injected local velocity feeds the trailing sway for any bone that does
+  // not report its own motion, so it is part of the cache identity: if the
+  // player sped up or slowed down, the sway changed and the entry is stale.
+  const Vec3 velocity = LocalVelocity();
+  u64 revision = 0;
+  const bool haveRevision = skel->PoseRevision(entity, &revision);
+  if (haveRevision) {
+    std::lock_guard<std::mutex> lk(cacheMutex_);
+    auto it = resolveCache_.find(key);
+    if (it != resolveCache_.end() && it->second.poseRevision == revision &&
+        it->second.loadoutKey == loadoutKey &&
+        it->second.localVelocity == velocity) {
+      it->second.lastUse = ++cacheClock_;
+      if (hit) *hit = true;
+      return it->second.items;
+    }
+  }
+
+  // Miss: resolve for real, then store the result under the pose revision so
+  // the next frame can reuse it.
+  items = ResolveLocked(entity, loadout, skel, skippedNoBone);
+  if (haveRevision) {
+    std::lock_guard<std::mutex> lk(cacheMutex_);
+    if (resolveCache_.size() >= kMaxResolveCacheEntries) EvictLruLocked();
+    ResolveCacheEntry entry;
+    entry.poseRevision = revision;
+    entry.localVelocity = velocity;
+    entry.loadoutKey = loadoutKey;
+    entry.items = items;
+    entry.lastUse = ++cacheClock_;
+    resolveCache_[key] = std::move(entry);
+  }
   return items;
 }
 
@@ -561,12 +633,14 @@ size_t CosmeticService::PresentLocal(EntityId localPlayer) {
     snapshot = local_;
   }
   u64 skipped = 0;
-  const auto items = ResolveLocked(localPlayer, snapshot, skel, &skipped);
+  bool hit = false;
+  const auto items = ResolveWithCache(localPlayer, snapshot, skel, &skipped, &hit);
   for (const auto& item : items) seam->SubmitGeometry(item);
   {
     std::lock_guard<std::mutex> lk(mutex_);
     stats_.submitted += items.size();
     stats_.skippedNoBone += skipped;
+    if (hit) ++stats_.cacheHits; else ++stats_.cacheMisses;
   }
   return items.size();
 }
@@ -585,12 +659,14 @@ size_t CosmeticService::PresentRemote(const std::string& playerId,
     snapshot = it->second;
   }
   u64 skipped = 0;
-  const auto items = ResolveLocked(entity, snapshot, skel, &skipped);
+  bool hit = false;
+  const auto items = ResolveWithCache(entity, snapshot, skel, &skipped, &hit);
   for (const auto& item : items) seam->SubmitGeometry(item);
   {
     std::lock_guard<std::mutex> lk(mutex_);
     stats_.submitted += items.size();
     stats_.skippedNoBone += skipped;
+    if (hit) ++stats_.cacheHits; else ++stats_.cacheMisses;
   }
   return items.size();
 }

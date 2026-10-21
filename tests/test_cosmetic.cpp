@@ -399,6 +399,86 @@ static void TestServiceVelocityInjection() {
   CHECK(Near(seam.items[0].rotation.x, 0.0f));
 }
 
+// The offset cache reuses a resolve only while the skeleton's pose revision,
+// the loadout and the injected velocity are all unchanged. A seam that cannot
+// report a revision never hits, so the cache is never a source of stale poses.
+static void TestOffsetCache() {
+  FreshRegistry();
+  Berry::Test::ShimSkeleton skel;
+  Berry::Test::CaptureCosmeticSeam seam;
+  CosmeticService svc;
+  svc.SetSkeletonSource(&skel);
+  svc.SetRenderSeam(&seam);
+  svc.Equip("builtin.cape.red");
+
+  const EntityId e{200, 7};
+  CHECK(svc.PresentLocal(e) == 1);
+  const Vec3 first = seam.items[0].position;
+  CHECK(svc.stats().cacheMisses == 1);
+  CHECK(svc.stats().cacheHits == 0);
+
+  // Same revision, same loadout, same velocity: the resolve is reused and the
+  // submitted item is byte-for-byte the one we cached.
+  seam.Clear();
+  CHECK(svc.PresentLocal(e) == 1);
+  CHECK(svc.stats().cacheHits == 1);
+  CHECK(seam.items[0].position == first);
+
+  // The skeleton moved: a new revision invalidates the entry.
+  skel.revision = 2;
+  seam.Clear();
+  CHECK(svc.PresentLocal(e) == 1);
+  CHECK(svc.stats().cacheMisses == 2);
+  CHECK(seam.items[0].position != first);   // recomposed at the new pose
+
+  // Equipping something else changes the loadout key.
+  svc.Equip("builtin.hat.top");
+  seam.Clear();
+  CHECK(svc.PresentLocal(e) == 2);
+  CHECK(svc.stats().cacheMisses == 3);
+
+  // The injected velocity is part of the identity too.
+  Berry::Test::ShimVelocity vel;
+  vel.value = Vec3(0, 0, 0);
+  svc.SetVelocitySource(&vel);
+  CHECK(svc.resolveCacheSize() == 0);   // a seam swap clears the cache
+  CHECK(svc.PresentLocal(e) == 2);
+  CHECK(svc.stats().cacheMisses == 4);
+  vel.value = Vec3(3, 0, 0);
+  seam.Clear();
+  CHECK(svc.PresentLocal(e) == 2);
+  CHECK(svc.stats().cacheMisses == 5);
+  // Holding the velocity steady now hits.
+  seam.Clear();
+  CHECK(svc.PresentLocal(e) == 2);
+  CHECK(svc.stats().cacheHits == 2);
+
+  // A seam with no revision always misses, even when nothing changed: it can
+  // never prove the pose is unchanged, so it must never reuse an entry. The
+  // already-stored entries stay put but are not consulted.
+  const size_t sizeBefore = svc.resolveCacheSize();
+  CHECK(sizeBefore == 1);
+  skel.noRevision = true;
+  seam.Clear();
+  CHECK(svc.PresentLocal(e) == 2);
+  seam.Clear();
+  CHECK(svc.PresentLocal(e) == 2);
+  CHECK(svc.resolveCacheSize() == sizeBefore);   // no new entries stored
+  CHECK(svc.stats().cacheHits == 2);             // unchanged by the two misses
+
+  // The cache is bounded: a crowd larger than the cap cannot grow it without
+  // limit, and the oldest entries are evicted.
+  skel.noRevision = false;
+  const CosmeticLoadout lo = svc.localLoadout();
+  for (u64 i = 0; i < CosmeticService::kMaxResolveCacheEntries + 10; ++i) {
+    svc.Resolve(EntityId{i, 1}, lo);
+  }
+  CHECK(svc.resolveCacheSize() <= CosmeticService::kMaxResolveCacheEntries);
+
+  svc.ClearResolveCache();
+  CHECK(svc.resolveCacheSize() == 0);
+}
+
 //----------------------------------------------------------------------------
 // Service: local present + remote gating
 //----------------------------------------------------------------------------
@@ -768,6 +848,7 @@ int main() {
   TestTrailingPose();
   TestComposeAttachTrailing();
   TestServiceVelocityInjection();
+  TestOffsetCache();
   TestServiceLocalPresent();
   TestServiceNoSeamOrBone();
   TestPresets();

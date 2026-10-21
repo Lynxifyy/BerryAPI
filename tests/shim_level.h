@@ -177,15 +177,34 @@ class ShimSkeleton final : public CosmeticSkeletonSource {
  public:
   /// When true, no bone resolves — the "asset's bone is gone" path.
   bool failAll = false;
+  /// When true, PoseRevision reports "unavailable", disabling the cache.
+  bool noRevision = false;
+  /// Bumped by the test to model a moving skeleton. The rig's pose below is
+  /// derived from it so a revision change always means a pose change.
+  u64 revision = 1;
+  /// Base position, moved by the test to model translation.
+  Vec3 base = Vec3(10.0f, 64.0f, 5.0f);
+  /// Velocity reported on every bone (empty by default, so the service's
+  /// velocity source is what drives trailing in most tests).
+  Vec3 velocity;
+
+  bool PoseRevision(EntityId entity, u64* out) const override {
+    (void)entity;
+    if (noRevision) return false;
+    if (out) *out = revision;
+    return true;
+  }
 
   bool BoneTransform(EntityId entity, Bone bone,
                      CosmeticBoneTransform* out) const override {
     (void)entity;
     if (failAll || bone == Bone::None) return false;
     // A fixed rig at a known spot with a 90-degree yaw, so the attach math is
-    // asserted against hand-computed values.
-    out->position = Vec3(10.0f, 64.0f, 5.0f);
+    // asserted against hand-computed values. A small per-revision jitter makes
+    // "revision changed" imply "pose changed".
+    out->position = base + Vec3(0.01f * (f32)revision, 0.0f, 0.0f);
     out->rotation = Vec3(0.0f, 90.0f, 0.0f);
+    out->velocity = velocity;
     out->scale = 1.0f;
     out->valid = true;
     return true;

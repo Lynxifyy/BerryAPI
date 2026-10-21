@@ -284,6 +284,19 @@ class BERRY_API CosmeticSkeletonSource {
   /// `out` invalid) when the skeleton or entity is not resolvable.
   virtual bool BoneTransform(EntityId entity, Bone bone,
                              CosmeticBoneTransform* out) const = 0;
+
+  /// A revision of `entity`'s skeleton pose, bumped whenever any bone moves.
+  /// The cosmetics offset cache reuses a resolve while the revision and the
+  /// loadout are unchanged, so a stationary player's attach math runs once.
+  ///
+  /// The default returns false ("no revision available"), which disables
+  /// caching entirely: a seam that cannot prove the pose is unchanged must
+  /// never have a stale resolve reused. Correctness over speed.
+  virtual bool PoseRevision(EntityId entity, u64* out) const {
+    (void)entity;
+    (void)out;
+    return false;
+  }
 };
 
 /// One geometry submission: a resolved asset placed at a world transform.
@@ -350,6 +363,12 @@ struct BERRY_API CosmeticStats {
   u64 submitted = 0;      // geometry submissions
   u64 skippedNoBone = 0;  // assets whose bone could not be resolved
   u64 skippedNotOwned = 0;
+  // Offset-cache counters. A "hit" is a resolve whose per-entity attachment
+  // offsets were reused because the player had not moved; a "miss" is a full
+  // resolve. The cache keeps high-density scenes (many players on screen) from
+  // recomputing identical attach math every frame.
+  u64 cacheHits = 0;
+  u64 cacheMisses = 0;
 };
 
 /// Owns the local player's loadout and wardrobe and renders it through the
@@ -363,11 +382,22 @@ class BERRY_API CosmeticService {
  public:
   CosmeticService() = default;
 
-  void SetSkeletonSource(CosmeticSkeletonSource* s) { skeleton_ = s; }
-  void SetRenderSeam(CosmeticRenderSeam* s) { seam_ = s; }
+  // Swapping a seam invalidates every cached resolve: the entries were
+  // composed against the old seam's poses and would be stale against the new.
+  void SetSkeletonSource(CosmeticSkeletonSource* s) {
+    skeleton_ = s;
+    ClearResolveCache();
+  }
+  void SetRenderSeam(CosmeticRenderSeam* s) {
+    seam_ = s;
+    ClearResolveCache();
+  }
   /// Local player velocity source, injected into every resolved bone transform
   /// so trailing sway works even when the skeleton seam does not report motion.
-  void SetVelocitySource(LocalVelocitySource* s) { velocitySource_ = s; }
+  void SetVelocitySource(LocalVelocitySource* s) {
+    velocitySource_ = s;
+    ClearResolveCache();
+  }
   const CosmeticSkeletonSource* skeletonSource() const { return skeleton_; }
   const CosmeticRenderSeam* renderSeam() const { return seam_; }
   const LocalVelocitySource* velocitySource() const { return velocitySource_; }
@@ -427,11 +457,35 @@ class BERRY_API CosmeticService {
 
   CosmeticStats stats() const;
 
+  //--- offset cache ---------------------------------------------------------
+  /// Resolved draw items are cached per entity and reused while the player's
+  /// root bone and loadout are unchanged, so a stationary crowd does not repeat
+  /// the same attach math every frame. Bounded; the least recently used entry
+  /// is evicted when full.
+  static constexpr size_t kMaxResolveCacheEntries = 256;
+
+  /// Drops every cached resolve (call when a seam, loadout or pack changes).
+  void ClearResolveCache();
+  /// Number of entities currently cached.
+  size_t resolveCacheSize() const;
+
  private:
   /// Resolves `loadout` without taking the lock. `skel` must be non-null.
   std::vector<CosmeticDrawItem> ResolveLocked(
       EntityId entity, const CosmeticLoadout& loadout,
       const CosmeticSkeletonSource* skel, u64* skippedNoBone) const;
+
+  /// ResolveLocked with the per-entity offset cache in front. Sets *hit when
+  /// the cached items were reused. A cache hit requires the skeleton seam to
+  /// report a pose revision for the entity AND the loadout to be unchanged; a
+  /// seam that cannot report one always misses, so a stale resolve is never
+  /// reused.
+  std::vector<CosmeticDrawItem> ResolveWithCache(
+      EntityId entity, const CosmeticLoadout& loadout,
+      const CosmeticSkeletonSource* skel, u64* skippedNoBone, bool* hit) const;
+
+  /// Drops the least recently used entry. Caller must hold cacheMutex_.
+  void EvictLruLocked() const;
 
   CosmeticSkeletonSource* skeleton_ = nullptr;
   CosmeticRenderSeam* seam_ = nullptr;
@@ -443,6 +497,20 @@ class BERRY_API CosmeticService {
   std::map<std::string, CosmeticLoadout> remote_;
   std::atomic<bool> localOnly_{true};
   mutable CosmeticStats stats_;
+
+  /// One cached resolve, keyed by (raw, runtime) entity id; invalidated when
+  /// the loadout key, the skeleton pose revision, or the injected local
+  /// velocity changes.
+  struct ResolveCacheEntry {
+    u64 poseRevision = 0;
+    Vec3 localVelocity;
+    std::string loadoutKey;
+    std::vector<CosmeticDrawItem> items;
+    u64 lastUse = 0;
+  };
+  mutable std::mutex cacheMutex_;
+  mutable std::map<std::pair<u64, u16>, ResolveCacheEntry> resolveCache_;
+  mutable u64 cacheClock_ = 0;
 };
 
 //----------------------------------------------------------------------------
