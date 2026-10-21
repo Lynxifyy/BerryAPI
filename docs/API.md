@@ -74,6 +74,21 @@ Capability: `input`.
 | `input.is_key_down(key: string) -> bool` | `input` | Client-side input state. Values a normal client could already see. |
 | `input.clicks_per_second() -> number` | `input` | - |
 
+## Cosmetic
+
+Capability: `cosmetic`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `cosmetic.list() -> string` | `cosmetic` | Local cosmetic loadouts. Renders on this screen only unless the sync channel is on. |
+| `cosmetic.equipped(slot: string) -> string` | `cosmetic` | - |
+| `cosmetic.equip(asset: string) -> bool` | `cosmetic` | - |
+| `cosmetic.unequip(slot: string) -> bool` | `cosmetic` | - |
+| `cosmetic.save_preset(name: string) -> bool` | `cosmetic` | - |
+| `cosmetic.apply_preset(name: string) -> bool` | `cosmetic` | - |
+| `cosmetic.presets() -> string` | `cosmetic` | - |
+| `cosmetic.set_local_only(enabled: bool) -> nil` | `cosmetic` | - |
+
 ## Events
 
 Capability: `events`.

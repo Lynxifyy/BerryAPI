@@ -63,6 +63,19 @@ export interface Input {
   clicks_per_second(): number;
 }
 
+/** Capability required: cosmetic. */
+export interface Cosmetic {
+  /** Local cosmetic loadouts. Renders on this screen only unless the sync channel is on. */
+  list(): string;
+  equipped(slot: string): string;
+  equip(asset: string): boolean;
+  unequip(slot: string): boolean;
+  save_preset(name: string): boolean;
+  apply_preset(name: string): boolean;
+  presets(): string;
+  set_local_only(enabled: boolean): void;
+}
+
 /** Coroutine-native async facade (Phase 4). */
 export interface AsyncFacade {
   /** Suspend until `ticks` game ticks have elapsed. */

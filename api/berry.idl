@@ -74,6 +74,19 @@ module Input {
   fn clicks_per_second() -> number
 }
 
+module Cosmetic {
+  capability cosmetic
+  doc "Local cosmetic loadouts. Renders on this screen only unless the sync channel is on."
+  fn list() -> string
+  fn equipped(slot: string) -> string
+  fn equip(asset: string) -> bool
+  fn unequip(slot: string) -> bool
+  fn save_preset(name: string) -> bool
+  fn apply_preset(name: string) -> bool
+  fn presets() -> string
+  fn set_local_only(enabled: bool) -> nil
+}
+
 module Events {
   capability events
   doc "Event channels scripts may await with Events.once."

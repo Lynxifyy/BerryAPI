@@ -475,6 +475,87 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Num(services_.input->clicksPerSecond(MouseButton::Left));
   });
 
+  //--- Cosmetic (local loadout; renders on this screen only) ---------------
+  //
+  // Cosmetics are client-side state a script may switch, exactly like the
+  // zoom factor: no world write, no other player is affected. `list` and
+  // `presets` return a newline-separated string so the surface needs no array
+  // type in the IDL.
+  install("cosmetic.list", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.cosmetics) { ctx.RaiseError("cosmetic.list: cosmetics unavailable"); return ScriptValue::Str(""); }
+    std::string out;
+    for (const auto& asset : CosmeticRegistry::Instance().All()) {
+      if (!out.empty()) out += '\n';
+      out += asset.id;
+    }
+    return ScriptValue::Str(out);
+  });
+
+  install("cosmetic.equipped", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.cosmetics) { ctx.RaiseError("cosmetic.equipped: cosmetics unavailable"); return ScriptValue::Str(""); }
+    const CosmeticSlot slot = CosmeticSlotFromName(Lower(args[0].ToDisplay()));
+    if (slot == CosmeticSlot::None) {
+      ctx.RaiseError("cosmetic.equipped: unknown slot '" + args[0].ToDisplay() + "'");
+      return ScriptValue::Str("");
+    }
+    return ScriptValue::Str(services_.cosmetics->Equipped(slot));
+  });
+
+  install("cosmetic.equip", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.cosmetics) { ctx.RaiseError("cosmetic.equip: cosmetics unavailable"); return ScriptValue::Bool(false); }
+    const std::string asset = args[0].ToDisplay();
+    CosmeticError err = CosmeticError::Ok;
+    if (!services_.cosmetics->Equip(asset, &err)) {
+      ctx.RaiseError("cosmetic.equip: " + std::string(CosmeticErrorName(err)) + " (" + asset + ")");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(true);
+  });
+
+  install("cosmetic.unequip", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.cosmetics) { ctx.RaiseError("cosmetic.unequip: cosmetics unavailable"); return ScriptValue::Bool(false); }
+    const CosmeticSlot slot = CosmeticSlotFromName(Lower(args[0].ToDisplay()));
+    if (slot == CosmeticSlot::None) {
+      ctx.RaiseError("cosmetic.unequip: unknown slot '" + args[0].ToDisplay() + "'");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(services_.cosmetics->Unequip(slot));
+  });
+
+  install("cosmetic.save_preset", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.cosmetics) { ctx.RaiseError("cosmetic.save_preset: cosmetics unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.cosmetics->SavePreset(args[0].ToDisplay()));
+  });
+
+  install("cosmetic.apply_preset", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.cosmetics) { ctx.RaiseError("cosmetic.apply_preset: cosmetics unavailable"); return ScriptValue::Bool(false); }
+    const std::string name = args[0].ToDisplay();
+    if (!services_.cosmetics->ApplyPreset(name)) {
+      ctx.RaiseError("cosmetic.apply_preset: unknown preset '" + name + "'");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(true);
+  });
+
+  install("cosmetic.presets", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.cosmetics) { ctx.RaiseError("cosmetic.presets: cosmetics unavailable"); return ScriptValue::Str(""); }
+    std::string out;
+    for (const auto& name : services_.cosmetics->PresetNames()) {
+      if (!out.empty()) out += '\n';
+      out += name;
+    }
+    return ScriptValue::Str(out);
+  });
+
+  install("cosmetic.set_local_only", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.cosmetics) { ctx.RaiseError("cosmetic.set_local_only: cosmetics unavailable"); return ScriptValue::Nil(); }
+    // Turning this off only enables rendering of REMOTE loadouts, and those are
+    // still gated on verified ownership; the sync channel is what supplies
+    // them. A script cannot widen what a peer owns by flipping this.
+    services_.cosmetics->SetLocalOnly(args[0].Truthy());
+    return ScriptValue::Nil();
+  });
+
   return installed_.size();
 }
 
