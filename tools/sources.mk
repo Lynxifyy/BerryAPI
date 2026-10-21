@@ -28,6 +28,7 @@ CORE_SRC := \
   core/lifecycle/engine.cpp \
   core/lifecycle/thread.cpp \
   core/net/net.cpp \
+  core/net/cosmetic_sync.cpp \
   core/script/crypto.cpp \
   core/script/ed25519.cpp \
   core/script/manifest.cpp \
