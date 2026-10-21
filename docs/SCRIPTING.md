@@ -267,6 +267,41 @@ throttling itself, so the governor clamps to a low ceiling on
 turns the current settings into the render hooks' cull/keep, animate/don't and
 spawn/don't decisions.
 
+### Cosmetics (`cosmetic.h`, `cosmetic_sync.h`)
+
+A cosmetic is data attached to a slot on the player skeleton: capes, wings,
+hats, backpacks, auras, trails, hit effects and emotes. `CosmeticSlot` says
+where an asset may sit and `Bone` says what it hangs from; a `CosmeticAsset`
+carries the geometry/texture ids and the attach transform. Assets live in the
+`CosmeticRegistry` (with a small built-in set from `RegisterBuiltins()`), and a
+`CosmeticLoadout` holds at most one asset per slot. `CosmeticWardrobe` keeps
+named presets so a player can switch loadouts.
+
+Rendering is local-only by default. `CosmeticService` resolves a loadout into
+draw items through a `CosmeticSkeletonSource` (a world transform per bone) and
+submits them to a `CosmeticRenderSeam`; `ComposeAttach` scales the asset offset
+by the bone and rotates it by the bone's yaw so a cape stays behind the back as
+the player turns. Nothing is drawn for a remote player until a verified loadout
+arrives.
+
+Seeing another player's cosmetics needs a channel, and that channel is the
+security boundary. `CosmeticSyncChannel` signs a canonical `(player, loadout)`
+payload (Ed25519 in production, HMAC for local development), frames it with a
+versioned envelope and hands it to a `CosmeticSyncTransport` (a WebSocket on
+device). Receiving fails closed at every step — bad framing, unknown or
+mismatched algorithm, a signature that does not verify over the exact bytes, or
+a loadout body that does not parse all drop the message with no state change.
+Even a validly signed loadout is applied through
+`CosmeticService::SetRemoteLoadout`, which keeps only assets the named player
+provably owns (`CosmeticOwnership`), so a compromised peer cannot wear someone
+else's cosmetics.
+
+Scripts reach the local loadout through the `cosmetic.*` bindings (see
+[API.md](API.md)): `equip`, `unequip`, `equipped`, `list`, `save_preset`,
+`apply_preset`, `presets` and `set_local_only`. All are client-side state — no
+world write and no other player affected — and gated on the `cosmetic`
+capability.
+
 ## The intent layer
 
 `World` and `Combat` are read-only. Writes go through intents that a policy

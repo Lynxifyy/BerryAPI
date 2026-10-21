@@ -1,6 +1,7 @@
 #pragma once
 #include "berry/game.h"
 #include "berry/render.h"
+#include "berry/cosmetic.h"
 #include <array>
 #include <cmath>
 #include <map>
@@ -165,6 +166,39 @@ class CaptureRenderSeam final : public RenderSeam {
     textContents.clear();
     for (auto& tx : t) textContents.push_back(tx.text);
   }
+};
+
+//----------------------------------------------------------------------------
+// Cosmetic shims: a synthetic skeleton rig and a capturing geometry sink, so
+// the cosmetics path runs headless like every other render seam.
+//----------------------------------------------------------------------------
+
+class ShimSkeleton final : public CosmeticSkeletonSource {
+ public:
+  /// When true, no bone resolves — the "asset's bone is gone" path.
+  bool failAll = false;
+
+  bool BoneTransform(EntityId entity, Bone bone,
+                     CosmeticBoneTransform* out) const override {
+    (void)entity;
+    if (failAll || bone == Bone::None) return false;
+    // A fixed rig at a known spot with a 90-degree yaw, so the attach math is
+    // asserted against hand-computed values.
+    out->position = Vec3(10.0f, 64.0f, 5.0f);
+    out->rotation = Vec3(0.0f, 90.0f, 0.0f);
+    out->scale = 1.0f;
+    out->valid = true;
+    return true;
+  }
+};
+
+class CaptureCosmeticSeam final : public CosmeticRenderSeam {
+ public:
+  std::vector<CosmeticDrawItem> items;
+  void SubmitGeometry(const CosmeticDrawItem& item) override {
+    items.push_back(item);
+  }
+  void Clear() { items.clear(); }
 };
 
 }  // namespace Berry::Test
