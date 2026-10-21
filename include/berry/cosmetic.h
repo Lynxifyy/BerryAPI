@@ -106,6 +106,11 @@ struct BERRY_API CosmeticAsset {
   std::string author;
   /// Free-form tags, for loadout presets and filtering.
   std::vector<std::string> tags;
+  /// How much this asset trails behind the player's motion, 0..1. 0 = rigid
+  /// (a hat), 1 = fully slack (a long cape). Applied by ComposeAttach from the
+  /// bone's velocity: the asset leans back and lags as the player moves, so a
+  /// cape is not welded stiffly to the back while sprinting or falling.
+  f32 trail = 0.0f;
 
   bool valid() const { return !id.empty() && slot != CosmeticSlot::None; }
   /// The bone to attach to, resolving None to the slot default.
@@ -250,8 +255,24 @@ class BERRY_API CosmeticWardrobe {
 struct BERRY_API CosmeticBoneTransform {
   Vec3 position;   // world position of the bone origin
   Vec3 rotation;   // degrees: pitch, yaw, roll
+  /// The owning entity's core velocity, in blocks/second, as reported by the
+  /// skeleton/render hook (the player's motionX/Y/Z). Drives the trailing sway
+  /// of slack assets; zero (the default) leaves them rigid.
+  Vec3 velocity;
   f32 scale = 1.0f;
   bool valid = false;
+};
+
+/// Reports the local player's core velocity (motionX/Y/Z, blocks/second).
+/// A seam so the device supplies the real motion vector while the host harness
+/// scripts one deterministically. Velocity is read-only local motion, the same
+/// thing a normal client already sees.
+class BERRY_API LocalVelocitySource {
+ public:
+  virtual ~LocalVelocitySource() = default;
+  /// Fills `out` with the local player's velocity. Returns false when it is not
+  /// known, in which case consumers must treat the player as stationary.
+  virtual bool LocalVelocity(Vec3* out) const = 0;
 };
 
 /// Reports bone transforms for an entity. On device this is filled from the
@@ -277,6 +298,9 @@ struct BERRY_API CosmeticDrawItem {
   f32 scale = 1.0f;
   Vec3 tint = Vec3(1, 1, 1);
   EntityId entity;           // whose cosmetic this is
+  /// The motion that produced this item's trailing pose (blocks/second), so a
+  /// shader or a replay can reproduce the sway without re-deriving it.
+  Vec3 velocity;
 };
 
 /// Receives resolved cosmetics for drawing. The device implementation binds
@@ -286,6 +310,30 @@ class BERRY_API CosmeticRenderSeam {
   virtual ~CosmeticRenderSeam() = default;
   virtual void SubmitGeometry(const CosmeticDrawItem& item) = 0;
 };
+
+/// The trailing pose a slack asset takes for a given motion. Pure, so the
+/// behaviour is testable and a replay reproduces it exactly.
+struct BERRY_API CosmeticTrailPose {
+  Vec3 offset;      // lag added to the attach position (world, pre-bone-yaw)
+  Vec3 rotation;    // degrees: extra pitch/roll from the sway
+  Vec3 velocity;    // the motion that produced it (echoed onto the draw item)
+};
+
+/// Speed, in blocks/second, at which a fully slack asset (trail == 1) reaches
+/// its maximum lean. Chosen so a sprint (~5.6 b/s) leans hard and a walk barely
+/// moves.
+BERRY_API f32 CosmeticTrailFullSpeed();
+/// Maximum lean, in degrees, for a fully slack asset at (or above) full speed.
+BERRY_API f32 CosmeticTrailMaxLeanDeg();
+/// Maximum positional lag, in blocks, for a fully slack asset at full speed.
+BERRY_API f32 CosmeticTrailMaxLag();
+
+/// Computes the trailing pose for `trail` (0..1) and `velocity`. `boneRotation`
+/// is the attach bone's rotation (degrees) so the horizontal component of the
+/// motion can be expressed in the bone's local frame. Returns an all-zero pose
+/// for a rigid asset, a non-positive trail, or a non-finite / zero velocity.
+BERRY_API CosmeticTrailPose CosmeticTrailingPose(f32 trail, const Vec3& velocity,
+                                                 const Vec3& boneRotation);
 
 /// Composes an asset's attach transform onto a bone transform. Exposed so the
 /// math is testable without a seam.
@@ -317,8 +365,19 @@ class BERRY_API CosmeticService {
 
   void SetSkeletonSource(CosmeticSkeletonSource* s) { skeleton_ = s; }
   void SetRenderSeam(CosmeticRenderSeam* s) { seam_ = s; }
+  /// Local player velocity source, injected into every resolved bone transform
+  /// so trailing sway works even when the skeleton seam does not report motion.
+  void SetVelocitySource(LocalVelocitySource* s) { velocitySource_ = s; }
   const CosmeticSkeletonSource* skeletonSource() const { return skeleton_; }
   const CosmeticRenderSeam* renderSeam() const { return seam_; }
+  const LocalVelocitySource* velocitySource() const { return velocitySource_; }
+
+  /// The local player's velocity (blocks/second), or zero when unknown.
+  Vec3 LocalVelocity() const {
+    Vec3 v;
+    if (velocitySource_ && velocitySource_->LocalVelocity(&v)) return v;
+    return Vec3(0, 0, 0);
+  }
 
   //--- local loadout --------------------------------------------------------
   /// A snapshot of the local loadout. Returned by value so a caller never
@@ -376,6 +435,7 @@ class BERRY_API CosmeticService {
 
   CosmeticSkeletonSource* skeleton_ = nullptr;
   CosmeticRenderSeam* seam_ = nullptr;
+  LocalVelocitySource* velocitySource_ = nullptr;
 
   mutable std::mutex mutex_;
   CosmeticLoadout local_;

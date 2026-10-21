@@ -73,6 +73,7 @@ Capability: `input`.
 | --- | --- | --- |
 | `input.is_key_down(key: string) -> bool` | `input` | Client-side input state. Values a normal client could already see. |
 | `input.clicks_per_second() -> number` | `input` | - |
+| `input.velocity() -> Vec3` | `input` | The local player's core velocity (motionX/Y/Z, blocks/second). Zero when stationary or unknown; drives trailing cosmetic sway. |
 
 ## Cosmetic
 

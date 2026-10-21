@@ -475,6 +475,21 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Num(services_.input->clicksPerSecond(MouseButton::Left));
   });
 
+  install("input.velocity", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    // Read-only local motion, exactly the value the client already renders
+    // with. Fail closed: no source (or an unknown velocity) reports zero, so a
+    // script sees "stationary" rather than a stale or fabricated vector.
+    Vec3 v;
+    if (!services_.velocity || !services_.velocity->LocalVelocity(&v)) {
+      v = Vec3(0, 0, 0);
+    }
+    ScriptTable t;
+    t["x"] = ScriptValue::Num((f64)v.x);
+    t["y"] = ScriptValue::Num((f64)v.y);
+    t["z"] = ScriptValue::Num((f64)v.z);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
   //--- Cosmetic (local loadout; renders on this screen only) ---------------
   //
   // Cosmetics are client-side state a script may switch, exactly like the

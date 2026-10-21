@@ -267,6 +267,138 @@ static void TestComposeAttach() {
   CHECK(Near(s.position.x, 9.95f));
 }
 
+// Trailing sway: a slack asset leans back and lags opposite its motion, in
+// proportion to speed and to its trail factor. A rigid asset, a still player
+// and an untrustworthy (non-finite) velocity all leave the pose untouched.
+static void TestTrailingPose() {
+  const f32 full = CosmeticTrailFullSpeed();
+  const f32 lean = CosmeticTrailMaxLeanDeg();
+  const f32 lag = CosmeticTrailMaxLag();
+
+  // Rigid asset: never moves, whatever the speed.
+  {
+    CosmeticTrailPose p = CosmeticTrailingPose(0.0f, Vec3(10, 0, 0), Vec3());
+    CHECK(Near(p.offset.x, 0.0f) && Near(p.offset.z, 0.0f));
+    CHECK(Near(p.rotation.x, 0.0f));
+  }
+  // Stationary player: no sway even for a fully slack asset.
+  {
+    CosmeticTrailPose p = CosmeticTrailingPose(1.0f, Vec3(0, 0, 0), Vec3());
+    CHECK(Near(p.offset.x, 0.0f) && Near(p.offset.z, 0.0f));
+    CHECK(Near(p.rotation.x, 0.0f));
+  }
+  // Non-finite velocity is refused (fail closed, no sway).
+  {
+    const f32 nan = std::nanf("");
+    CosmeticTrailPose p = CosmeticTrailingPose(1.0f, Vec3(nan, 0, 0), Vec3());
+    CHECK(Near(p.offset.x, 0.0f));
+    CHECK(Near(p.rotation.x, 0.0f));
+  }
+  // Half trail at full speed: half the maximum lean, lag opposite +x motion.
+  {
+    CosmeticTrailPose p = CosmeticTrailingPose(0.5f, Vec3(full, 0, 0), Vec3());
+    CHECK(Near(p.rotation.x, lean * 0.5f));
+    CHECK(Near(p.offset.x, -lag * 0.5f));   // opposite the motion
+    CHECK(Near(p.offset.z, 0.0f));
+    CHECK(Near(p.velocity.x, full));
+  }
+  // Full trail, exactly at full speed: the maxima, and the lag is a unit
+  // vector in -x scaled by the max lag.
+  {
+    CosmeticTrailPose p = CosmeticTrailingPose(1.0f, Vec3(full, 0, 0), Vec3());
+    CHECK(Near(p.rotation.x, lean));
+    CHECK(Near(p.offset.x, -lag));
+  }
+  // Above full speed the lean saturates (Clamp) rather than growing.
+  {
+    CosmeticTrailPose p =
+        CosmeticTrailingPose(1.0f, Vec3(full * 5.0f, 0, 0), Vec3());
+    CHECK(Near(p.rotation.x, lean));
+    CHECK(Near(p.offset.x, -lag));
+  }
+  // Vertical-only motion leans but does not drag sideways.
+  {
+    CosmeticTrailPose p = CosmeticTrailingPose(1.0f, Vec3(0, -full, 0), Vec3());
+    CHECK(Near(p.offset.x, 0.0f) && Near(p.offset.z, 0.0f));
+    CHECK(Near(p.rotation.x, lean));
+  }
+  // Diagonal motion: lag is the unit direction, so |offset| == lag.
+  {
+    CosmeticTrailPose p = CosmeticTrailingPose(1.0f, Vec3(full, 0, full), Vec3());
+    const f32 mag = std::sqrt(p.offset.x * p.offset.x + p.offset.z * p.offset.z);
+    CHECK(Near(mag, lag));
+  }
+}
+
+// ComposeAttach folds the trailing pose in: position shifts by the lag and the
+// pitch gains the lean, on top of the existing bone/offset math.
+static void TestComposeAttachTrailing() {
+  CosmeticAsset cape;
+  cape.id = "t.cape";
+  cape.slot = CosmeticSlot::Back;
+  cape.offset = Vec3(0, 0, -0.1f);
+  cape.trail = 1.0f;
+
+  CosmeticBoneTransform bone;
+  bone.position = Vec3(10, 64, 5);
+  bone.rotation = Vec3(0, 90, 0);
+  bone.velocity = Vec3(CosmeticTrailFullSpeed(), 0, 0);   // sprinting +x
+  bone.scale = 1.0f;
+  bone.valid = true;
+
+  const CosmeticDrawItem item = ComposeAttach(cape, bone, EntityId{7, 1});
+  // Base offset rotates to (-0.1, 0, 0); the lag adds -maxLag on x.
+  CHECK(Near(item.position.x, 9.9f - CosmeticTrailMaxLag()));
+  CHECK(Near(item.position.y, 64.0f));
+  CHECK(Near(item.position.z, 5.0f));
+  // Pitch gains the full lean; yaw is unchanged.
+  CHECK(Near(item.rotation.x, CosmeticTrailMaxLeanDeg()));
+  CHECK(Near(item.rotation.y, 90.0f));
+  CHECK(Near(item.velocity.x, CosmeticTrailFullSpeed()));
+
+  // A rigid asset ignores the same motion entirely.
+  CosmeticAsset hat = cape;
+  hat.trail = 0.0f;
+  const CosmeticDrawItem rigid = ComposeAttach(hat, bone, EntityId{7, 1});
+  CHECK(Near(rigid.position.x, 9.9f));
+  CHECK(Near(rigid.rotation.x, 0.0f));
+}
+
+// The service injects the local velocity source into bones that do not report
+// their own motion, so a skeleton-only seam still gets trailing sway.
+static void TestServiceVelocityInjection() {
+  FreshRegistry();
+  CosmeticService svc;
+  Berry::Test::ShimSkeleton skel;
+  Berry::Test::CaptureCosmeticSeam seam;
+  Berry::Test::ShimVelocity vel;
+  svc.SetSkeletonSource(&skel);
+  svc.SetRenderSeam(&seam);
+  svc.SetVelocitySource(&vel);
+
+  // The cape built-in carries a trail factor.
+  CHECK(svc.Equip("builtin.cape.red"));
+  vel.value = Vec3(CosmeticTrailFullSpeed(), 0, 0);
+
+  CHECK(svc.PresentLocal(EntityId{1, 1}) == 1);
+  CHECK(seam.items.size() == 1);
+  CHECK(seam.items[0].velocity.x > 0.0f);
+  CHECK(seam.items[0].rotation.x > 0.0f);   // leaning
+
+  // Unknown velocity reads as stationary: the cape sits flush.
+  vel.known = false;
+  seam.Clear();
+  CHECK(svc.PresentLocal(EntityId{1, 1}) == 1);
+  CHECK(Near(seam.items[0].velocity.x, 0.0f));
+  CHECK(Near(seam.items[0].rotation.x, 0.0f));
+
+  // No velocity source at all: same as unknown.
+  svc.SetVelocitySource(nullptr);
+  seam.Clear();
+  CHECK(svc.PresentLocal(EntityId{1, 1}) == 1);
+  CHECK(Near(seam.items[0].rotation.x, 0.0f));
+}
+
 //----------------------------------------------------------------------------
 // Service: local present + remote gating
 //----------------------------------------------------------------------------
@@ -588,6 +720,44 @@ static void TestCosmeticBindings() {
         ScriptStatus::Error);
 }
 
+// input.velocity returns the local player's core motion as a Vec3 table. It is
+// capability-gated like the rest of the module, and it fails closed: a missing
+// source reports a zero (stationary) vector, never a stale or fabricated one.
+static void TestVelocityBinding() {
+  Berry::Test::ShimVelocity vel;
+  vel.value = Vec3(1.5f, -0.25f, -3.0f);
+  ScriptApi::Services services;
+  services.velocity = &vel;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  // Denied without the input grant.
+  CHECK(CallBinding(bindings, "input.velocity", {}, {"render"}, &out) ==
+        ScriptStatus::CapabilityDenied);
+
+  CHECK(CallBinding(bindings, "input.velocity", {}, {"input"}, &out) ==
+        ScriptStatus::Ok);
+  const ScriptTable* t = out.AsTable();
+  CHECK(t != nullptr);
+  CHECK(t && Near((f32)t->at("x").AsNumber(), 1.5f));
+  CHECK(t && Near((f32)t->at("y").AsNumber(), -0.25f));
+  CHECK(t && Near((f32)t->at("z").AsNumber(), -3.0f));
+
+  // No source: zero vector (stationary), still a well-formed Vec3.
+  ScriptApi::Services none;
+  ScriptApi bare(none);
+  ScriptBindings bareBindings;
+  bare.InstallBindings(&bareBindings);
+  CHECK(CallBinding(bareBindings, "input.velocity", {}, {"input"}, &out) ==
+        ScriptStatus::Ok);
+  const ScriptTable* z = out.AsTable();
+  CHECK(z != nullptr);
+  CHECK(z && Near((f32)z->at("x").AsNumber(), 0.0f));
+  CHECK(z && Near((f32)z->at("z").AsNumber(), 0.0f));
+}
+
 int main() {
   TestRegistryFailClosed();
   TestBuiltins();
@@ -595,6 +765,9 @@ int main() {
   TestLoadoutCanonicalRoundTrip();
   TestWardrobe();
   TestComposeAttach();
+  TestTrailingPose();
+  TestComposeAttachTrailing();
+  TestServiceVelocityInjection();
   TestServiceLocalPresent();
   TestServiceNoSeamOrBone();
   TestPresets();
@@ -603,6 +776,7 @@ int main() {
   TestSyncRejections();
   TestSyncHmacAndAlgorithmConfusion();
   TestCosmeticBindings();
+  TestVelocityBinding();
   if (g_fail == 0) printf("test_cosmetic: ALL OK\n");
   return g_fail;
 }

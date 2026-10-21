@@ -61,6 +61,8 @@ export type Input = {
   -- Client-side input state. Values a normal client could already see.
   is_key_down: (key: string) -> boolean,
   clicks_per_second: () -> number,
+  -- The local player's core velocity (motionX/Y/Z, blocks/second). Zero when stationary or unknown; drives trailing cosmetic sway.
+  velocity: () -> Vec3,
 }
 
 -- Capability required: cosmetic.

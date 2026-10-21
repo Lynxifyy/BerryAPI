@@ -201,4 +201,17 @@ class CaptureCosmeticSeam final : public CosmeticRenderSeam {
   void Clear() { items.clear(); }
 };
 
+/// A scriptable local-velocity source. `known == false` models "the engine did
+/// not tell us", which consumers must read as stationary.
+class ShimVelocity final : public LocalVelocitySource {
+ public:
+  Vec3 value;
+  bool known = true;
+  bool LocalVelocity(Vec3* out) const override {
+    if (!known) return false;
+    if (out) *out = value;
+    return true;
+  }
+};
+
 }  // namespace Berry::Test

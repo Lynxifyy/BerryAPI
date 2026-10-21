@@ -104,6 +104,10 @@ bool ValidCosmeticTransform(const CosmeticAsset& a, CosmeticError* out) {
     if (out) *out = CosmeticError::BadScale;
     return false;
   }
+  if (!std::isfinite(a.trail) || a.trail < 0.0f || a.trail > 1.0f) {
+    if (out) *out = CosmeticError::BadTransform;
+    return false;
+  }
   if (out) *out = CosmeticError::Ok;
   return true;
 }
@@ -183,20 +187,22 @@ void CosmeticRegistry::Clear() {
 
 size_t CosmeticRegistry::RegisterBuiltins() {
   // A small starter set so a fresh client shows something. Idempotent: the
-  // duplicate-id rule makes a second call a no-op for each asset.
+  // duplicate-id rule makes a second call a no-op for each asset. Capes and
+  // wings carry a trail factor so they sway with motion; rigid pieces (a hat,
+  // an aura) do not.
   const CosmeticAsset builtins[] = {
       {"builtin.cape.red", CosmeticSlot::Back, Bone::Back, 1001, 2001,
        Vec3(0, 0, -0.1f), Vec3(0, 0, 0), 1.0f, Vec3(1, 1, 1), "builtin",
-       "BerryAPI", {"cape"}},
+       "BerryAPI", {"cape"}, 0.8f},
       {"builtin.wings.angel", CosmeticSlot::Shoulders, Bone::Torso, 1002, 2002,
        Vec3(0, 0.4f, -0.1f), Vec3(0, 0, 0), 1.0f, Vec3(1, 1, 1), "builtin",
-       "BerryAPI", {"wings"}},
+       "BerryAPI", {"wings"}, 0.6f},
       {"builtin.hat.top", CosmeticSlot::Head, Bone::Head, 1003, 2003,
        Vec3(0, 0.25f, 0), Vec3(0, 0, 0), 1.0f, Vec3(1, 1, 1), "builtin",
-       "BerryAPI", {"hat"}},
+       "BerryAPI", {"hat"}, 0.0f},
       {"builtin.aura.spark", CosmeticSlot::Body, Bone::Torso, 1004, 2004,
        Vec3(0, 0.5f, 0), Vec3(0, 0, 0), 1.0f, Vec3(1, 1, 1), "builtin",
-       "BerryAPI", {"aura"}},
+       "BerryAPI", {"aura"}, 0.2f},
   };
   size_t added = 0;
   for (const auto& a : builtins) {
@@ -333,6 +339,50 @@ size_t CosmeticWardrobe::Count() const { return presets_.size(); }
 void CosmeticWardrobe::Clear() { presets_.clear(); }
 
 //----------------------------------------------------------------------------
+// Trailing sway
+//----------------------------------------------------------------------------
+
+f32 CosmeticTrailFullSpeed() { return 6.0f; }
+f32 CosmeticTrailMaxLeanDeg() { return 45.0f; }
+f32 CosmeticTrailMaxLag() { return 0.15f; }
+
+CosmeticTrailPose CosmeticTrailingPose(f32 trail, const Vec3& velocity,
+                                       const Vec3& boneRotation) {
+  CosmeticTrailPose pose;
+  (void)boneRotation;   // the lag is applied in world space, so yaw is implicit
+  // A rigid asset, a non-positive trail, or a motion we cannot trust yields no
+  // sway at all: the asset stays exactly where the bone puts it.
+  if (!(trail > 0.0f)) return pose;
+  if (trail > 1.0f) trail = 1.0f;
+  if (!std::isfinite(velocity.x) || !std::isfinite(velocity.y) ||
+      !std::isfinite(velocity.z)) {
+    return pose;
+  }
+
+  // Speed drives the sway. Vertical motion counts too, so a falling player's
+  // cape flares the same way a sprinting one's trails.
+  const f32 speed = std::sqrt(velocity.x * velocity.x + velocity.y * velocity.y +
+                              velocity.z * velocity.z);
+  if (!(speed > 0.0f)) return pose;
+  const f32 k = Mathf::Clamp(speed / CosmeticTrailFullSpeed(), 0.0f, 1.0f);
+  const f32 t = trail * k;
+
+  // Lean back by an extra pitch, scaled by how slack and how fast.
+  pose.rotation = Vec3(CosmeticTrailMaxLeanDeg() * t, 0, 0);
+
+  // Lag opposite the horizontal motion. A purely vertical motion has no
+  // horizontal component, so it leans without dragging sideways.
+  const f32 hx = velocity.x, hz = velocity.z;
+  const f32 hs = std::sqrt(hx * hx + hz * hz);
+  if (hs > 1e-4f) {
+    const f32 lag = CosmeticTrailMaxLag() * t;
+    pose.offset = Vec3(-(hx / hs) * lag, 0, -(hz / hs) * lag);
+  }
+  pose.velocity = velocity;
+  return pose;
+}
+
+//----------------------------------------------------------------------------
 // Attach composition
 //----------------------------------------------------------------------------
 
@@ -355,12 +405,19 @@ CosmeticDrawItem ComposeAttach(const CosmeticAsset& asset,
   const Vec3 off = asset.offset * bone.scale;
   const Vec3 rotated(off.x * c + off.z * s, off.y, -off.x * s + off.z * c);
 
-  item.position = bone.position + rotated;
-  item.rotation = Vec3(bone.rotation.x + asset.rotation.x,
-                       bone.rotation.y + asset.rotation.y,
-                       bone.rotation.z + asset.rotation.z);
+  // Slack assets lag and lean with the player's motion, so a cape is not welded
+  // stiffly to the back while sprinting or falling. A rigid asset (trail == 0)
+  // or a still player contributes nothing.
+  const CosmeticTrailPose trail =
+      CosmeticTrailingPose(asset.trail, bone.velocity, bone.rotation);
+
+  item.position = bone.position + rotated + trail.offset;
+  item.rotation = Vec3(bone.rotation.x + asset.rotation.x + trail.rotation.x,
+                       bone.rotation.y + asset.rotation.y + trail.rotation.y,
+                       bone.rotation.z + asset.rotation.z + trail.rotation.z);
   item.scale = bone.scale * asset.scale;
   item.tint = asset.tint;
+  item.velocity = trail.velocity;
   return item;
 }
 
@@ -461,12 +518,21 @@ std::vector<CosmeticDrawItem> CosmeticService::ResolveLocked(
     const CosmeticSkeletonSource* skel, u64* skippedNoBone) const {
   std::vector<CosmeticDrawItem> items;
   if (!skel) return items;
+  // The velocity source is read once per resolve and applied to any bone that
+  // did not report its own motion, so a skeleton seam that only knows bone
+  // positions still produces trailing sway.
+  const Vec3 velocity = LocalVelocity();
   for (const auto& asset : loadout.Resolved()) {
     CosmeticBoneTransform bone;
     if (!skel->BoneTransform(entity, asset.ResolvedBone(), &bone) ||
         !bone.valid) {
       if (skippedNoBone) ++*skippedNoBone;
       continue;
+    }
+    // A bone that reports no motion of its own inherits the local player's.
+    if (bone.velocity.x == 0 && bone.velocity.y == 0 &&
+        bone.velocity.z == 0) {
+      bone.velocity = velocity;
     }
     items.push_back(ComposeAttach(asset, bone, entity));
   }

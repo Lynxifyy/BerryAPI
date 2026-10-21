@@ -41,6 +41,7 @@ inline const BindingSpec* BindingSpecs() {
       {"perf.set_thermal_mode", CapKind::Perf, 1, "Perf"},
       {"input.is_key_down", CapKind::Input, 1, "Input"},
       {"input.clicks_per_second", CapKind::Input, 0, "Input"},
+      {"input.velocity", CapKind::Input, 0, "Input"},
       {"cosmetic.list", CapKind::Cosmetic, 0, "Cosmetic"},
       {"cosmetic.equipped", CapKind::Cosmetic, 1, "Cosmetic"},
       {"cosmetic.equip", CapKind::Cosmetic, 1, "Cosmetic"},
@@ -53,7 +54,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 28; }
+inline size_t BindingSpecCount() { return 29; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -105,6 +106,7 @@ inline const char* const kPerfNames[] = {
 inline const char* const kInputNames[] = {
     "input.is_key_down",
     "input.clicks_per_second",
+    "input.velocity",
 };
 inline const char* const kCosmeticNames[] = {
     "cosmetic.list",
@@ -125,7 +127,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Network", kNetworkNames, 1},
       {"Hud", kHudNames, 5},
       {"Perf", kPerfNames, 3},
-      {"Input", kInputNames, 2},
+      {"Input", kInputNames, 3},
       {"Cosmetic", kCosmeticNames, 8},
   };
   return kModules;
