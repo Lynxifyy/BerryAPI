@@ -70,6 +70,7 @@ TEST_SRC := \
   tests/test_script.cpp \
   tests/test_reload.cpp \
   tests/test_async.cpp \
+  tests/test_luau.cpp \
   tests/test_idl.cpp \
   tests/test_hud.cpp \
   tests/test_governor.cpp \
