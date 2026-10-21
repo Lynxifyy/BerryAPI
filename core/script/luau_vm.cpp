@@ -11,12 +11,22 @@
 // exports table and resumes it, so a yield inside a binding is legal and a hook
 // call is an ordinary Luau call.
 //
+// Step / budgets
+// --------------
+// Luau runs a call to completion (or suspension) inside one lua_resume; there is
+// no single-instruction step API exposed to embedders. Budgets are enforced at
+// safepoints through the interrupt callback: it counts VM instructions and
+// wall-clock time and raises a Luau error when a limit is crossed. A memory cap
+// is enforced by the allocator, which refuses an allocation that would exceed
+// the limit. Each abort maps back to ScriptStatus::BudgetExceeded / Timeout /
+// MemoryExceeded.
+//
 // Bindings
 // --------
 // A binding named "render.draw_text" is exposed to scripts both as the global
 // `render.draw_text` and as the nested call `render.draw_text(...)`, matching
-// the IDL and the generated .luau types. (Budgets and the async suspension
-// bridge are added in later phases.)
+// the IDL and the generated .luau types. (Suspending a binding for the async
+// layer is added in Phase D.)
 //
 // Sandbox
 // -------
@@ -45,13 +55,28 @@ namespace Berry {
 
 class LuauVm;
 
+static u64 SteadyMs() {
+  using namespace std::chrono;
+  return (u64)duration_cast<milliseconds>(steady_clock::now().time_since_epoch())
+      .count();
+}
 
 /// Per-coroutine bookkeeping, reached from the interrupt callback (which only
 /// receives a lua_State*) via lua_getthreaddata. One instance serves every
 /// coroutine of a VM: only one runs at a time.
 struct VmContext {
   LuauVm* vm = nullptr;
+  u64 startMs = 0;
+  bool aborting = false;
 };
+
+/// Hand-off of the abort reason from the interrupt callback to the status
+/// mapping. A safepoint runs on the executing thread, so a thread_local is safe.
+struct AbortInfo {
+  ScriptStatus status = ScriptStatus::Ok;
+  std::string message;
+};
+thread_local AbortInfo g_abort;
 
 static void PushString(lua_State* L, const std::string& s) {
   lua_pushlstring(L, s.data(), s.size());
@@ -160,6 +185,7 @@ class LuauVm final : public IScriptVm {
   LuauVm() {
     L_ = lua_newstate(&LuauVm::Alloc, this);
     if (!L_) return;
+    lua_callbacks(L_)->interrupt = &Interrupt;
     luaL_openlibs(L_);
     StripDangerous();
     Sandbox();
@@ -203,6 +229,10 @@ class LuauVm final : public IScriptVm {
     chunk_ = chunkName;
     lua_setthreaddata(loader, &vmctx_);
     vmctx_.vm = this;
+    vmctx_.startMs = SteadyMs();
+    vmctx_.aborting = false;
+    instructions_ = 0;
+    interrupt_ = false;
 
     ScriptError cerr;
     if (!MapResume(lua_resume(loader, nullptr, 0), &cerr)) {
@@ -233,6 +263,8 @@ class LuauVm final : public IScriptVm {
     exportsRef_ = LUA_REFNIL;
     inCall_ = false;
     suspended_ = false;
+    instructions_ = 0;
+    interrupt_ = false;
     loaded_ = false;
     result_.clear();
     lastError_ = ScriptError::None();
@@ -270,6 +302,10 @@ class LuauVm final : public IScriptVm {
 
     lua_setthreaddata(call_, &vmctx_);
     vmctx_.vm = this;
+    vmctx_.startMs = SteadyMs();
+    vmctx_.aborting = false;
+    instructions_ = 0;
+    interrupt_ = false;
     inCall_ = true;
     suspended_ = false;
 
@@ -298,6 +334,9 @@ class LuauVm final : public IScriptVm {
     // The resume value is delivered as the result of the suspended binding.
     lua_settop(call_, 0);
     PushScriptValue(call_, value, 0);
+    vmctx_.startMs = SteadyMs();
+    vmctx_.aborting = false;
+    instructions_ = 0;
     inCall_ = true;
     Categorize(lua_resume(call_, nullptr, 1));
     // The host resumes through its Step-driven loop, so leave the call open for
@@ -326,10 +365,14 @@ class LuauVm final : public IScriptVm {
   u64 InstructionsExecuted() const override { return instructions_; }
   size_t MemoryUsed() const override { return liveBytes_; }
 
-  void ResetInstructionCount() override {}
-  void RequestInterrupt() override {}
-  bool interrupted() const override { return false; }
-  void ClearInterrupt() override {}
+  void ResetInstructionCount() override {
+    instructions_ = 0;
+    vmctx_.startMs = SteadyMs();
+  }
+
+  void RequestInterrupt() override { interrupt_ = true; }
+  bool interrupted() const override { return interrupt_; }
+  void ClearInterrupt() override { interrupt_ = false; }
 
   //-- state handoff --------------------------------------------------------
 
@@ -368,6 +411,11 @@ class LuauVm final : public IScriptVm {
     lua_pop(L_, 1);
     return true;
   }
+
+  //-- used by the free helpers + interrupt callback ------------------------
+
+  void NoteInstruction() { ++instructions_; }
+  bool InterruptRequested() const { return interrupt_; }
 
   int InvokeBound(lua_State* L, const std::string& name) {
     if (!bindings_ || !ctx_) {
@@ -409,7 +457,40 @@ class LuauVm final : public IScriptVm {
     return bf->vm->InvokeBound(L, bf->name);
   }
 
-  // Allocator with byte accounting (a hard cap is enforced from Phase C on).
+  static void Interrupt(lua_State* L, int gc) {
+    if (gc >= 0) return;   // a GC-step notification, not our safepoint
+    VmContext* vc = (VmContext*)lua_getthreaddata(L);
+    if (!vc || !vc->vm) return;
+    LuauVm* vm = vc->vm;
+    vm->NoteInstruction();
+    if (vc->aborting) return;
+
+    ScriptStatus status = ScriptStatus::Ok;
+    std::string message;
+    if (vm->interrupt_) {
+      status = ScriptStatus::Interrupted;
+      message = "interrupted";
+    } else if (vm->instructions_ > vm->limits_.instructionBudget) {
+      status = ScriptStatus::BudgetExceeded;
+      message = "instruction budget exceeded";
+    } else if (SteadyMs() - vc->startMs > vm->limits_.wallClockMs) {
+      status = ScriptStatus::Timeout;
+      message = "wall-clock timeout";
+    }
+    if (status == ScriptStatus::Ok) return;
+
+    vc->aborting = true;
+    g_abort.status = status;
+    g_abort.message = message;
+    // The safepoint runs with the VM mid-instruction; reserve room for the
+    // error object before luaL_error longjmps (Luau's own interrupt users do
+    // the same).
+    lua_rawcheckstack(L, 1);
+    luaL_error(L, "%s", message.c_str());   // longjmps out of the resume
+  }
+
+  // Allocator with a hard byte cap. Refusing an allocation makes Luau raise an
+  // out-of-memory error, which the resume maps onto MemoryExceeded.
   static void* Alloc(void* ud, void* ptr, size_t osize, size_t nsize) {
     LuauVm* self = (LuauVm*)ud;
     if (nsize == 0) {
@@ -418,6 +499,13 @@ class LuauVm final : public IScriptVm {
         self->liveBytes_ = self->liveBytes_ >= osize ? self->liveBytes_ - osize : 0;
       }
       return nullptr;
+    }
+    if (self) {
+      const size_t delta = nsize > osize ? nsize - osize : 0;
+      if (self->liveBytes_ + delta > self->limits_.memoryLimitBytes) {
+        self->memoryDenied_ = true;
+        return nullptr;
+      }
     }
     void* p = std::realloc(ptr, nsize);
     if (self && p) {
@@ -455,10 +543,18 @@ class LuauVm final : public IScriptVm {
       for (int i = 2; i <= n; ++i)
         result_.push_back(FromLua(call_, i, 0, &seen()));
       status_ = ScriptStatus::Ok;
+    } else if (g_abort.status != ScriptStatus::Ok) {
+      lastError_ = ScriptError::Make(g_abort.message, chunk_, 0);
+      status_ = g_abort.status;
+      g_abort = AbortInfo{};
+    } else if (memoryDenied_) {
+      lastError_ = ScriptError::Make("memory limit exceeded", chunk_, 0);
+      status_ = ScriptStatus::MemoryExceeded;
     } else {
       lastError_ = ScriptError::Make(ToString(call_, -1), chunk_, 0);
       status_ = ScriptStatus::Error;
     }
+    memoryDenied_ = false;
     inCall_ = false;
     suspended_ = false;
     DropCall();
@@ -469,7 +565,15 @@ class LuauVm final : public IScriptVm {
   // Maps a raw lua_resume status during Load; returns true on success.
   bool MapResume(int luaStatus, ScriptError* err) {
     if (luaStatus == 0) return true;
-    if (err) *err = ScriptError::Make(ToString(L_, -1), chunk_, 0);
+    if (g_abort.status != ScriptStatus::Ok) {
+      if (err) *err = ScriptError::Make(g_abort.message, chunk_, 0);
+      g_abort = AbortInfo{};
+    } else if (memoryDenied_) {
+      if (err) *err = ScriptError::Make("memory limit exceeded", chunk_, 0);
+    } else {
+      if (err) *err = ScriptError::Make(ToString(L_, -1), chunk_, 0);
+    }
+    memoryDenied_ = false;
     return false;
   }
 
@@ -586,11 +690,13 @@ class LuauVm final : public IScriptVm {
   std::vector<ScriptValue> result_;
   ScriptError lastError_;
   ScriptStatus status_ = ScriptStatus::Ok;
-  u64 instructions_ = 0;   // populated from Phase C on
+  u64 instructions_ = 0;
   size_t liveBytes_ = 0;
+  bool memoryDenied_ = false;
   bool loaded_ = false;
   bool inCall_ = false;
   bool suspended_ = false;
+  bool interrupt_ = false;
   std::string chunk_;
   const ScriptBindings* installedFrom_ = nullptr;
   std::vector<BoundFn*> boundFns_;   // retained for the VM's lifetime
