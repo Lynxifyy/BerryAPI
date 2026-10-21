@@ -23,6 +23,7 @@ CORE_SRC := \
   core/modules/hud.cpp \
   core/modules/input.cpp \
   core/modules/pvp.cpp \
+  core/modules/cosmetic.cpp \
   core/modules/governor.cpp \
   core/lifecycle/engine.cpp \
   core/lifecycle/thread.cpp \
