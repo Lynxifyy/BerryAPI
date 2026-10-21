@@ -19,6 +19,7 @@ Targets:
 | Target | Output |
 |---|---|
 | `make test` | `build/test_test_*` + `build/dlopen_test` |
+| `make check-sources` | fails if a `core/`/`util/` unit is missing from `tools/sources.mk` |
 | `make test-sanitize` | `build/san/test_test_*` (`-fsanitize=address,undefined`) |
 | `make lib` | `build/libBerryAPI.so` |
 
@@ -29,6 +30,18 @@ Flags used for the shared lib:
 ```
 
 Only the C ABI symbols are visible (see README).
+
+## Source manifest
+
+`tools/sources.mk` is the single source of truth for the translation units:
+`CORE_SRC` (portable units, built for both the host tests and the injectable
+library), `ANDROID_EXTRA_SRC` (device-only units such as the Dobby glue) and
+`TEST_SRC`. The host `Makefile` includes it, and `tools/build-android.sh` parses
+it, so the two builds cannot drift apart — a unit added for tests is
+automatically in the `.so`.
+
+`make check-sources` (part of `make test`) fails when a `.cpp` under `core/` or
+`util/` is not listed.
 
 ## Android cross build
 
@@ -73,13 +86,14 @@ Test binaries:
 | `test_thread` | ThreadModel role routing + assertions |
 | `test_fuzz` | deterministic fuzzers: WS `ParseWsFrame` + `SigScanner` |
 
-Add a new suite by adding to `TEST_SRC` + the `test:` loop + the
-`test-sanitize` prerequisites (it shares `$(TEST_SRC)`).
+Add a new suite by adding it to `TEST_SRC` in `tools/sources.mk` and to the
+`test:` loop; `test-sanitize` picks it up automatically (it derives from
+`$(TEST_SRC)`).
 
 `dlopen_test` ensures the `.so` auto-attaches on load, that Inject/Detach are
 idempotent, and re-inject works.
 
-## Expoerted symbols
+## Exported symbols
 
 Verify the on-device export surface stays minimal:
 

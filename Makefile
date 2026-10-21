@@ -11,49 +11,7 @@ SHARED_CXXFLAGS ?= -std=c++17 -O2 -fPIC -fvisibility=hidden -DBERRY_BUILD_SHARED
 SHARED_LDFLAGS  ?= -shared -pthread -ldl
 SHARED_NAME     ?= libBerryAPI.so
 
-CORE_SRC := \
-  core/events/event.cpp \
-  core/hooks/sigscan.cpp \
-  core/hooks/backend_shim.cpp \
-  core/modules/module.cpp \
-  core/modules/combat.cpp \
-  core/modules/render.cpp \
-  core/modules/render_backend.cpp \
-  core/modules/services.cpp \
-  core/modules/world.cpp \
-  core/modules/hud.cpp \
-  core/modules/input.cpp \
-  core/modules/pvp.cpp \
-  core/modules/governor.cpp \
-  core/lifecycle/engine.cpp \
-  core/lifecycle/thread.cpp \
-  core/net/net.cpp \
-  core/script/crypto.cpp \
-  core/script/manifest.cpp \
-  core/script/runtime.cpp \
-  core/script/vm_ref.cpp \
-  core/script/host.cpp \
-  core/script/reload.cpp \
-  core/script/async.cpp \
-  util/logger.cpp \
-  util/mem.cpp
-
-TEST_SRC := \
-  tests/test_math.cpp \
-  tests/test_modules.cpp \
-  tests/test_net.cpp \
-  tests/test_render.cpp \
-  tests/test_sample.cpp \
-  tests/test_sigscan.cpp \
-  tests/test_thread.cpp \
-  tests/test_fuzz.cpp \
-  tests/test_manifest.cpp \
-  tests/test_script.cpp \
-  tests/test_reload.cpp \
-  tests/test_async.cpp \
-  tests/test_idl.cpp \
-  tests/test_hud.cpp \
-  tests/test_governor.cpp
+include tools/sources.mk
 
 CORE_OBJ := $(CORE_SRC:.cpp=.o)
 TEST_OBJ := $(TEST_SRC:.cpp=.o)
@@ -88,7 +46,7 @@ check-samples: samples/sample_hitmarker.o
 	@echo "== samples compile OK =="
 	@rm -f samples/sample_hitmarker.o
 
-test: idl-check $(TEST_BINS) build/$(SHARED_NAME) check-samples
+test: idl-check check-sources $(TEST_BINS) build/$(SHARED_NAME) check-samples
 	@for b in build/test_test_math build/test_test_modules build/test_test_net build/test_test_render build/test_test_sample build/test_test_sigscan build/test_test_thread build/test_test_fuzz build/test_test_manifest build/test_test_script build/test_test_reload build/test_test_async build/test_test_idl build/test_test_hud build/test_test_governor; do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
@@ -161,6 +119,17 @@ idl:
 idl-check:
 	@python3 tools/idlgen.py --self-test
 	@python3 tools/idlgen.py --check
+
+# Every .cpp under core/ and util/ must be in tools/sources.mk, so the host
+# build and the Android build cannot silently drift apart.
+.PHONY: check-sources
+check-sources:
+	@missing=0; \
+	for f in $$(find core util -name '*.cpp' | sort); do \
+	  grep -qE "(^| )$$f( \\\\|$$)" tools/sources.mk || { echo "check-sources: $$f is not in tools/sources.mk"; missing=1; }; \
+	done; \
+	[ $$missing -eq 0 ] || exit 1; \
+	echo "== source manifest complete =="
 
 clean:
 	rm -rf build core/events/*.o core/hooks/*.o core/modules/*.o core/lifecycle/*.o \

@@ -110,22 +110,38 @@ fi
 # ---------------------------------------------------------------------------
 # Compile BerryAPI core.
 # ---------------------------------------------------------------------------
-SRCS=(
-  core/events/event.cpp
-  core/hooks/sigscan.cpp
-  core/hooks/backend_shim.cpp
-  core/hooks/backend_dobby.cpp
-  core/modules/module.cpp
-  core/modules/combat.cpp
-  core/modules/render.cpp
-  core/modules/render_backend.cpp
-  core/modules/services.cpp
-  core/modules/world.cpp
-  core/lifecycle/engine.cpp
-  core/net/net.cpp
-  util/logger.cpp
-  util/mem.cpp
-)
+# ---------------------------------------------------------------------------
+# Source list.
+#
+# The list lives in tools/sources.mk, shared with the host Makefile, so the two
+# builds cannot drift apart. CORE_SRC holds every portable unit (script runtime
+# and client modules included); ANDROID_EXTRA_SRC adds the device-only Dobby
+# glue.
+# ---------------------------------------------------------------------------
+read_sources() {
+  # Prints the entries of a "NAME := \ ..." continuation list, one per line.
+  awk -v want="$1" '
+    $0 ~ "^" want "[ \t]*:?=" { sub(/^[^=]*=[ \t]*/, ""); started = 1 }
+    started {
+      line = $0
+      cont = (line ~ /\\$/)
+      sub(/\\[ \t]*$/, "", line)
+      gsub(/^[ \t]+|[ \t]+$/, "", line)
+      if (line != "") print line
+      if (!cont) exit
+    }
+  ' "$ROOT/tools/sources.mk"
+}
+
+mapfile -t SRCS < <(read_sources CORE_SRC)
+mapfile -t ANDROID_SRCS < <(read_sources ANDROID_EXTRA_SRC)
+SRCS+=(${ANDROID_SRCS[@]+"${ANDROID_SRCS[@]}"})
+
+if [[ ${#SRCS[@]} -eq 0 ]]; then
+  echo "build-android: no sources read from tools/sources.mk" >&2
+  exit 2
+fi
+echo "build-android: ${#SRCS[@]} translation units from tools/sources.mk"
 
 OBJS=()
 for s in "${SRCS[@]}"; do
