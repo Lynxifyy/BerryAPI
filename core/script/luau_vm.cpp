@@ -25,8 +25,10 @@
 // --------
 // A binding named "render.draw_text" is exposed to scripts both as the global
 // `render.draw_text` and as the nested call `render.draw_text(...)`, matching
-// the IDL and the generated .luau types. (Suspending a binding for the async
-// layer is added in Phase D.)
+// the IDL and the generated .luau types. When a binding calls
+// ScriptContext::RequestYield the native function yields the coroutine; the
+// resume value becomes the binding's return value (Luau does not re-enter the C
+// function on resume), which is exactly what the async layer expects.
 //
 // Sandbox
 // -------
@@ -437,6 +439,12 @@ class LuauVm final : public IScriptVm {
       ctx_->ClearError();
       luaL_error(L, "%s", msg.c_str());
       return 0;
+    }
+    if (ctx_->yieldRequested()) {
+      // The async layer asked to suspend. The resume value becomes this call's
+      // result, because Luau does not re-enter the C function on resume.
+      lua_pushnil(L);
+      return lua_yield(L, 1);
     }
     PushScriptValue(L, r, 0);
     return 1;
