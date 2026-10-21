@@ -44,12 +44,23 @@ class BERRY_API IScriptFileSystem {
   virtual ~IScriptFileSystem() = default;
   /// Reads a whole file. Returns false when it is missing or unreadable.
   virtual bool ReadFile(const std::string& path, std::string* out) = 0;
+  /// Reports a directory listing. The pack loader uses it to discover pack
+  /// files under a root without knowing the host's directory API. Default
+  /// returns an empty list ("no listing available"), which makes a pack load
+  /// find nothing rather than fail: a seam that cannot enumerate is simply a
+  /// directory with no packs in it.
+  virtual std::vector<std::string> ListDir(const std::string& path) {
+    (void)path;
+    return {};
+  }
 };
 
 /// Reads from the host filesystem. Paths are used as given.
 class BERRY_API RealScriptFileSystem : public IScriptFileSystem {
  public:
   bool ReadFile(const std::string& path, std::string* out) override;
+  /// Lists regular file names (not directories) directly under `path`.
+  std::vector<std::string> ListDir(const std::string& path) override;
 };
 
 /// In-memory filesystem for tests and for scripts delivered over the RPC
@@ -59,6 +70,8 @@ class BERRY_API MemoryScriptFileSystem : public IScriptFileSystem {
   void Write(const std::string& path, std::string contents);
   void Erase(const std::string& path);
   bool ReadFile(const std::string& path, std::string* out) override;
+  /// Lists stored paths directly under `path` (one level, files only).
+  std::vector<std::string> ListDir(const std::string& path) override;
 
  private:
   mutable std::mutex mutex_;

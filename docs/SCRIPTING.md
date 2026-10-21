@@ -267,7 +267,7 @@ throttling itself, so the governor clamps to a low ceiling on
 turns the current settings into the render hooks' cull/keep, animate/don't and
 spawn/don't decisions.
 
-### Cosmetics (`cosmetic.h`, `cosmetic_sync.h`)
+### Cosmetics (`cosmetic.h`, `cosmetic_sync.h`, `pack.h`)
 
 A cosmetic is data attached to a slot on the player skeleton: capes, wings,
 hats, backpacks, auras, trails, hit effects and emotes. `CosmeticSlot` says
@@ -316,6 +316,19 @@ Scripts reach the local loadout through the `cosmetic.*` bindings (see
 `apply_preset`, `presets` and `set_local_only`. All are client-side state — no
 world write and no other player affected — and gated on the `cosmetic`
 capability.
+
+Assets can also be authored as data. A **model pack** (`pack.h`) is a JSON
+document — `format`, `name`, `assets` — that describes assets (id, slot, bone,
+geometry/texture handles, offset, rotation, scale, tint, trail, tags); the
+`CosmeticPackLoader` parses one through the loader's `IScriptFileSystem` seam
+(never the host filesystem directly) and registers it. Loading is atomic: a pack
+whose document is malformed, names an unknown key/slot/bone, or repeats an id
+registers nothing, because the whole document is validated before any asset is
+applied (`CosmeticRegistry::RegisterAll`). `LoadDirectory()` reads only
+`*.pack.json` files, one failed pack does not stop the others, and the counts
+are capped so a runaway directory cannot exhaust memory. The
+`cosmetic.reload_packs()` binding triggers a directory load and returns how many
+packs loaded cleanly.
 
 ## The intent layer
 

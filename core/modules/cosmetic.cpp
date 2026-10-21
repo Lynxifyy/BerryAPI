@@ -147,6 +147,51 @@ bool CosmeticRegistry::Register(const CosmeticAsset& asset, CosmeticError* out) 
   return true;
 }
 
+bool CosmeticRegistry::RegisterAll(const std::vector<CosmeticAsset>& assets,
+                                   CosmeticError* out) {
+  // Validate the whole batch first, so a failure registers nothing. The batch
+  // is also checked against itself, so a pack cannot smuggle a duplicate past
+  // the per-asset rule by listing the id twice in one document.
+  std::vector<std::string> seen;
+  seen.reserve(assets.size());
+  for (const auto& a : assets) {
+    if (a.id.empty()) {
+      if (out) *out = CosmeticError::EmptyId;
+      return false;
+    }
+    if (a.slot == CosmeticSlot::None) {
+      if (out) *out = CosmeticError::UnknownSlot;
+      return false;
+    }
+    if (!ValidCosmeticTransform(a, out)) return false;
+    for (const auto& id : seen) {
+      if (id == a.id) {
+        if (out) *out = CosmeticError::DuplicateId;
+        return false;
+      }
+    }
+    seen.push_back(a.id);
+  }
+
+  std::lock_guard<std::mutex> lk(mutex_);
+  for (const auto& a : assets) {
+    if (index_.find(a.id) != index_.end()) {
+      if (out) *out = CosmeticError::DuplicateId;
+      return false;
+    }
+  }
+  if (assets_.size() + assets.size() > kMaxAssets) {
+    if (out) *out = CosmeticError::TooManyAssets;
+    return false;
+  }
+  for (const auto& a : assets) {
+    index_[a.id] = assets_.size();
+    assets_.push_back(a);
+  }
+  if (out) *out = CosmeticError::Ok;
+  return true;
+}
+
 bool CosmeticRegistry::Contains(const std::string& id) const {
   std::lock_guard<std::mutex> lk(mutex_);
   return index_.find(id) != index_.end();

@@ -571,6 +571,14 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Nil();
   });
 
+  install("cosmetic.reload_packs", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.packs) { ctx.RaiseError("cosmetic.reload_packs: pack loader unavailable"); return ScriptValue::Num(0); }
+    // A failed pack does not stop the others, and every pack is applied
+    // atomically; the return value is how many packs loaded cleanly.
+    const PackLoadReport report = services_.packs->LoadDirectory();
+    return ScriptValue::Num((f64)report.packsLoaded);
+  });
+
   return installed_.size();
 }
 

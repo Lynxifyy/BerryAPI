@@ -152,6 +152,12 @@ class BERRY_API CosmeticRegistry {
   /// a non-finite transform, a non-positive scale, and a full registry.
   bool Register(const CosmeticAsset& asset, CosmeticError* out = nullptr);
 
+  /// Registers a whole batch atomically: either every asset registers or none
+  /// does. Used by the model-pack loader so a pack never leaves the catalog
+  /// half-applied. Also rejects a batch that repeats an id internally.
+  bool RegisterAll(const std::vector<CosmeticAsset>& assets,
+                   CosmeticError* out = nullptr);
+
   bool Contains(const std::string& id) const;
   bool Find(const std::string& id, CosmeticAsset* out) const;
 

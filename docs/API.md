@@ -89,6 +89,7 @@ Capability: `cosmetic`.
 | `cosmetic.apply_preset(name: string) -> bool` | `cosmetic` | - |
 | `cosmetic.presets() -> string` | `cosmetic` | - |
 | `cosmetic.set_local_only(enabled: bool) -> nil` | `cosmetic` | - |
+| `cosmetic.reload_packs() -> number` | `cosmetic` | Reload local model packs from the pack directory, registering every valid *.pack.json. Returns the number of packs loaded; each pack is applied atomically (all its assets or none). |
 
 ## Events
 

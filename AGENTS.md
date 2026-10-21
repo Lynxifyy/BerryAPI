@@ -60,6 +60,18 @@ make lib             # builds build/libBerryAPI.so
 - `Hud::Present` re-lays out only dirty subtrees; call `SetText`/`SetSize`/
   `SetOffset` (which dirty the right nodes) rather than poking resolved
   geometry.
+- `CosmeticService` resolves a loadout into draw items through the
+  `CosmeticSkeletonSource`/`CosmeticRenderSeam` seams; never assume engine
+  pointers in the core. A resolve is cached per entity and only reused while the
+  skeleton seam reports an unchanged pose revision — a seam that cannot report
+  one (`noRevision`) disables the cache so a stale attach transform is never
+  reused. A seam swap clears the cache.
+- Cosmetic model packs (`pack.h`) are data, loaded through the loader's
+  `IScriptFileSystem` seam, and applied atomically via
+  `CosmeticRegistry::RegisterAll`: a pack that is malformed, names an unknown
+  key/slot/bone, or repeats an id registers nothing. `LoadDirectory()` reads only
+  `*.pack.json`. `RealScriptFileSystem`/`MemoryScriptFileSystem` both implement
+  `ListDir`; a seam without a listing simply finds no packs.
 
 ## Conventions
 

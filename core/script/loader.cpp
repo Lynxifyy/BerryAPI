@@ -3,8 +3,16 @@
 #include "berry/loader.h"
 #include "berry/logger.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
+
+#if defined(_WIN32)
+  #include <windows.h>
+#else
+  #include <dirent.h>
+  #include <sys/stat.h>
+#endif
 
 namespace Berry {
 
@@ -67,6 +75,38 @@ bool RealScriptFileSystem::ReadFile(const std::string& path, std::string* out) {
   return true;
 }
 
+std::vector<std::string> RealScriptFileSystem::ListDir(const std::string& path) {
+  std::vector<std::string> names;
+#if defined(_WIN32)
+  const std::string pattern = path.empty() ? std::string("*") : path + "\\*";
+  WIN32_FIND_DATAA fd;
+  HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
+  if (h == INVALID_HANDLE_VALUE) return names;
+  do {
+    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+    names.emplace_back(fd.cFileName);
+  } while (FindNextFileA(h, &fd));
+  FindClose(h);
+#else
+  DIR* d = opendir(path.empty() ? "." : path.c_str());
+  if (!d) return names;
+  while (struct dirent* e = readdir(d)) {
+    const std::string name = e->d_name;
+    if (name == "." || name == "..") continue;
+    // Only regular files: a subdirectory (or a device) is not a pack file.
+    const std::string full =
+        path.empty() ? name : (path + "/" + name);
+    struct stat st;
+    if (::stat(full.c_str(), &st) != 0) continue;
+    if (!S_ISREG(st.st_mode)) continue;
+    names.push_back(name);
+  }
+  closedir(d);
+#endif
+  std::sort(names.begin(), names.end());
+  return names;
+}
+
 //----------------------------------------------------------------------------
 // MemoryScriptFileSystem
 //----------------------------------------------------------------------------
@@ -106,7 +146,22 @@ bool MemoryScriptFileSystem::ReadFile(const std::string& path,
   return false;
 }
 
-
+std::vector<std::string> MemoryScriptFileSystem::ListDir(
+    const std::string& path) {
+  std::vector<std::string> names;
+  const std::string prefix = path.empty() ? std::string() : path + "/";
+  std::lock_guard<std::mutex> lk(mutex_);
+  for (const auto& entry : files_) {
+    if (entry.first.size() <= prefix.size()) continue;
+    if (entry.first.compare(0, prefix.size(), prefix) != 0) continue;
+    const std::string rest = entry.first.substr(prefix.size());
+    // One level only: a nested path is a directory, not a file here.
+    if (rest.find('/') != std::string::npos) continue;
+    names.push_back(rest);
+  }
+  std::sort(names.begin(), names.end());
+  return names;
+}
 
 //----------------------------------------------------------------------------
 // Verification

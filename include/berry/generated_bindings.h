@@ -50,11 +50,12 @@ inline const BindingSpec* BindingSpecs() {
       {"cosmetic.apply_preset", CapKind::Cosmetic, 1, "Cosmetic"},
       {"cosmetic.presets", CapKind::Cosmetic, 0, "Cosmetic"},
       {"cosmetic.set_local_only", CapKind::Cosmetic, 1, "Cosmetic"},
+      {"cosmetic.reload_packs", CapKind::Cosmetic, 0, "Cosmetic"},
   };
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 29; }
+inline size_t BindingSpecCount() { return 30; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -117,6 +118,7 @@ inline const char* const kCosmeticNames[] = {
     "cosmetic.apply_preset",
     "cosmetic.presets",
     "cosmetic.set_local_only",
+    "cosmetic.reload_packs",
 };
 
 inline const ModuleBindings* ModuleBindingTable() {
@@ -128,7 +130,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Hud", kHudNames, 5},
       {"Perf", kPerfNames, 3},
       {"Input", kInputNames, 3},
-      {"Cosmetic", kCosmeticNames, 8},
+      {"Cosmetic", kCosmeticNames, 9},
   };
   return kModules;
 }

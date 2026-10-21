@@ -76,6 +76,8 @@ export interface Cosmetic {
   apply_preset(name: string): boolean;
   presets(): string;
   set_local_only(enabled: boolean): void;
+  /** Reload local model packs from the pack directory, registering every valid *.pack.json. Returns the number of packs loaded; each pack is applied atomically (all its assets or none). */
+  reload_packs(): number;
 }
 
 /** Coroutine-native async facade (Phase 4). */
