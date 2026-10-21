@@ -112,6 +112,13 @@ bool CapabilitySet::Covers(const CapabilitySet& needed) const {
   return true;
 }
 
+bool CapabilitySet::CoversCap(const Capability& cap) const {
+  for (const auto& have : caps_) {
+    if (have.Covers(cap)) return true;
+  }
+  return false;
+}
+
 bool CapabilitySet::Has(CapKind kind) const {
   for (const auto& c : caps_) {
     if (c.kind == kind) return true;

@@ -78,6 +78,9 @@ class BERRY_API CapabilitySet {
   /// True when every capability in `needed` is covered by this set.
   bool Covers(const CapabilitySet& needed) const;
 
+  /// True when a single capability is covered by this set.
+  bool CoversCap(const Capability& cap) const;
+
   bool Has(CapKind kind) const;
   const std::vector<Capability>& All() const { return caps_; }
   size_t Count() const { return caps_.size(); }
