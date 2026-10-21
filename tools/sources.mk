@@ -28,11 +28,13 @@ CORE_SRC := \
   core/lifecycle/thread.cpp \
   core/net/net.cpp \
   core/script/crypto.cpp \
+  core/script/ed25519.cpp \
   core/script/manifest.cpp \
   core/script/runtime.cpp \
   core/script/vm_ref.cpp \
   core/script/host.cpp \
   core/script/reload.cpp \
+  core/script/loader.cpp \
   core/script/async.cpp \
   core/script/url.cpp \
   util/logger.cpp \
@@ -40,6 +42,17 @@ CORE_SRC := \
 
 ANDROID_EXTRA_SRC := \
   core/hooks/backend_dobby.cpp
+
+# Vendored Ed25519 (C). Compiled into the same objects as everything else, so
+# the injectable library keeps its no-external-deps property.
+ED25519_SRC := \
+  third_party/ed25519/fe.c \
+  third_party/ed25519/ge.c \
+  third_party/ed25519/sc.c \
+  third_party/ed25519/sha512.c \
+  third_party/ed25519/keypair.c \
+  third_party/ed25519/sign.c \
+  third_party/ed25519/verify.c
 
 TEST_SRC := \
   tests/test_math.cpp \
@@ -57,4 +70,5 @@ TEST_SRC := \
   tests/test_idl.cpp \
   tests/test_hud.cpp \
   tests/test_governor.cpp \
-  tests/test_url.cpp
+  tests/test_url.cpp \
+  tests/test_loader.cpp

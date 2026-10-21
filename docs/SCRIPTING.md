@@ -9,7 +9,8 @@ hot-reloadable and coroutine-native, and the whole surface is described once in
 
 | Layer | Header / source | What it does |
 |---|---|---|
-| Manifests | `manifest.h`, `core/script/manifest.cpp` | Declared capabilities, SHA-256 script signing, grants |
+| Manifests | `manifest.h`, `core/script/manifest.cpp` | Declared capabilities, Ed25519 signing, grants |
+| Loader | `loader.h`, `core/script/loader.cpp` | The one path from a script directory to a running host: verify, then load |
 | Runtime host | `script.h`, `core/script/{runtime,vm_ref,host}.cpp` | One script → one VM → one grant, with budgets and error isolation |
 | Hot reload | `reload.h`, `core/script/reload.cpp` | Reload with state handoff and an in-game error overlay |
 | Async | `async.h`, `core/script/async.cpp` | `await` over ticks, events and HTTP, resuming on the right thread |
@@ -20,14 +21,20 @@ hot-reloadable and coroutine-native, and the whole surface is described once in
 A script declares what it needs; the user approves once; the host enforces it
 per call.
 
-```cpp
-ScriptManifest m;
-m.name = "my-mod";
-m.capabilities = {
-  Capability{CapKind::Render, "", "render"},
-  Capability{CapKind::Network, "api.example.com", "network:api.example.com"},
-};
-m.signature = Sha256Hex(scriptBytes);   // script signing
+A manifest is a `manifest.json` next to the script:
+
+```json
+{
+  "name": "my-mod",
+  "version": "1.0.0",
+  "entry": "main.luau",
+  "author": "Lynxifyy",
+  "capabilities": ["render", "network:api.example.com"],
+  "source_sha256": "<hex sha256 of main.luau>",
+  "payload_hash": "<hex sha256 of the canonical payload>",
+  "signature_algo": "ed25519",
+  "signature": "<hex ed25519 signature over the payload hash>"
+}
 ```
 
 - Capabilities are `(kind, scope)` pairs. A network grant scoped to a host only
@@ -35,6 +42,74 @@ m.signature = Sha256Hex(scriptBytes);   // script signing
 - The runtime refuses a call whose binding needs a capability the script was not
   granted (`ScriptStatus::CapabilityDenied`). It fails closed: an unknown
   binding and an ungranted binding are both denials, never an allow.
+
+### What a signature covers
+
+`ScriptManifest::CanonicalPayload` is the signed document: name, version,
+entry, author, the sorted capability list and `source_sha256`. Description and
+the signature itself are excluded, so cosmetic edits do not invalidate a
+signature, and capability order does not change the hash.
+
+`source_sha256` is the part that matters. Signing a capability list alone would
+attest to what a script *says it needs* while leaving the code free to change,
+so the loader refuses any manifest that does not bind a source hash and refuses
+any entry file that does not match it. Swapping the script while keeping the
+manifest is caught at load time.
+
+Ed25519 is asymmetric, which is the point: the publisher holds the secret key,
+the device is provisioned with the public key only, so a compromised client can
+verify a script but cannot mint one. HMAC-SHA256 is still available as
+`Sign`/`Verify` for local development, and the two algorithms are kept strictly
+separate — an HMAC signature is never accepted where Ed25519 is required, or the
+shared secret would let any verifier forge a signature.
+
+The private half of the signing flow lives in `tools/berry-sign.py`:
+
+```sh
+python3 tools/berry-sign.py keygen --out berry-signing.key
+python3 tools/berry-sign.py sign   --key berry-signing.key --dir scripts/my-mod
+python3 tools/berry-sign.py verify --pub <hex> --dir scripts/my-mod
+```
+
+The canonical payload is implemented twice — in C++ (the verifier) and in Python
+(the signer) — so a drift between them would reject every real script.
+`tests/test_loader.cpp` pins a manifest that `tools/berry-sign.py` produced, and
+`make check-signer` (part of `make test`) regenerates that vector and fails the
+build if the two sides no longer agree.
+
+### The loader
+
+`ScriptLoader` is the only host factory. Nothing else constructs a `ScriptHost`,
+which is what keeps "was this verified?" from depending on the call site:
+
+```cpp
+ScriptLoaderConfig cfg;
+cfg.anchor = TrustAnchor::Ed25519Key(pubHex);
+cfg.requireSignature = true;     // production
+cfg.requireSourceHash = true;
+
+ScriptLoader loader(cfg, &fileSystem);
+LoadedScript script;
+LoadOutcome outcome;
+if (!loader.Load("scripts/my-mod", &script, &outcome, &ManifestStore::Instance())) {
+  // outcome.error says why: bad-signature, source-hash-mismatch, not-approved, ...
+}
+```
+
+- **Order of checks.** Parse, then the source binding, then the signature, then
+  the approval gate. A manifest that carries no source hash reports
+  `source-hash-missing` rather than a generic signature failure, so the two
+  causes stay distinguishable.
+- **The approval gate.** With a `ManifestStore`, a script runs with the
+  *intersection* of what it declared and what the user granted, and a grant made
+  for one version never applies to another — new code cannot ride an old
+  approval.
+- **Reload re-verifies.** The reloader re-reads and re-verifies on every poll,
+  so an edited file that no longer matches its signed hash is refused and the
+  last verified revision stays live.
+- **Dev mode.** `ScriptLoaderConfig::DevMode()` turns both checks off for
+  `make test` and for local iteration. It is a named constructor precisely so
+  that the unsafe configuration is greppable.
 
 ### Network scope and the egress policy
 

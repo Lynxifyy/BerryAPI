@@ -235,6 +235,9 @@ const char* ManifestErrorName(ManifestError e) {
     case ManifestError::Unsigned: return "unsigned";
     case ManifestError::BadSignature: return "bad-signature";
     case ManifestError::HashMismatch: return "hash-mismatch";
+    case ManifestError::UnsupportedAlgorithm: return "unsupported-algorithm";
+    case ManifestError::MissingSourceHash: return "missing-source-hash";
+    case ManifestError::SourceHashMismatch: return "source-hash-mismatch";
   }
   return "unknown";
 }
@@ -357,6 +360,9 @@ bool ScriptManifest::Parse(const std::string& json, ScriptManifest* out,
   if (const detail::json::Value* hash = root.Get("payload_hash")) {
     if (hash->IsString()) m.payloadHash = hash->str;
   }
+  if (const detail::json::Value* src = root.Get("source_sha256")) {
+    if (src->IsString()) m.sourceSha256 = src->str;
+  }
 
   *out = m;
   if (outError) *outError = ManifestError::Ok;
@@ -378,8 +384,14 @@ std::string ScriptManifest::CanonicalPayload() const {
   s += author;
   s += "\ncapabilities=";
   s += capabilities.Canonical();
+  s += "\nsource_sha256=";
+  s += sourceSha256;
   s += "\n";
   return s;
+}
+
+std::string ScriptManifest::SourceHash(const std::string& source) {
+  return crypto::Sha256Hex(source);
 }
 
 std::string ScriptManifest::ComputeHash() const {
@@ -389,7 +401,62 @@ std::string ScriptManifest::ComputeHash() const {
 bool ScriptManifest::Sign(const std::string& keyHex) {
   payloadHash = ComputeHash();
   signature = crypto::HmacSha256Hex(keyHex, payloadHash);
-  signatureAlgo = "hmac-sha256";
+  signatureAlgo = signature_algo::HmacSha256();
+  return true;
+}
+
+bool ScriptManifest::SignEd25519(const std::string& secretKey64) {
+  payloadHash = ComputeHash();
+  // The signature covers the raw 32-byte digest, not its hex spelling, so the
+  // same payload hashes and signs identically here and in the Python signer.
+  std::string digest;
+  if (!crypto::FromHex(payloadHash, &digest, 32)) return false;
+  std::string sig;
+  if (!crypto::Ed25519Sign(digest, secretKey64, &sig)) return false;
+  signature = crypto::ToHexLower(sig);
+  signatureAlgo = signature_algo::Ed25519();
+  return true;
+}
+
+bool ScriptManifest::VerifyEd25519(const std::string& publicKeyHex,
+                                   ManifestError* outError,
+                                   bool requireSourceHash) const {
+  auto fail = [&](ManifestError code) {
+    if (outError) *outError = code;
+    return false;
+  };
+  if (signature.empty() || signatureAlgo.empty()) {
+    return fail(ManifestError::Unsigned);
+  }
+  if (signatureAlgo != signature_algo::Ed25519()) {
+    return fail(ManifestError::UnsupportedAlgorithm);
+  }
+  // A signed payload that does not bind the code is only a capability claim,
+  // so the source hash is mandatory on this path.
+  if (requireSourceHash && sourceSha256.empty()) {
+    return fail(ManifestError::MissingSourceHash);
+  }
+  std::string sig, pk;
+  if (!crypto::FromHex(signature, &sig, 64)) {
+    return fail(ManifestError::BadSignature);
+  }
+  if (!crypto::Ed25519PublicKeyFromHex(publicKeyHex, &pk)) {
+    return fail(ManifestError::BadSignature);
+  }
+  // Re-derive the payload hash: a tampered capability list or a swapped source
+  // hash fails here even before the signature is checked.
+  const std::string expectHash = ComputeHash();
+  if (!payloadHash.empty() && !crypto::ConstantTimeEquals(payloadHash, expectHash)) {
+    return fail(ManifestError::HashMismatch);
+  }
+  std::string digest;
+  if (!crypto::FromHex(expectHash, &digest, 32)) {
+    return fail(ManifestError::BadSignature);
+  }
+  if (!crypto::Ed25519Verify(digest, sig, pk)) {
+    return fail(ManifestError::BadSignature);
+  }
+  if (outError) *outError = ManifestError::Ok;
   return true;
 }
 
@@ -402,8 +469,8 @@ bool ScriptManifest::Verify(const std::string& keyHex,
   if (signature.empty() || signatureAlgo.empty()) {
     return fail(ManifestError::Unsigned);
   }
-  if (signatureAlgo != "hmac-sha256") {
-    return fail(ManifestError::BadSignature);
+  if (signatureAlgo != signature_algo::HmacSha256()) {
+    return fail(ManifestError::UnsupportedAlgorithm);
   }
   if (!crypto::IsHex(signature) || signature.size() != 64) {
     return fail(ManifestError::BadSignature);
@@ -423,6 +490,52 @@ bool ScriptManifest::Verify(const std::string& keyHex,
 }
 
 //----------------------------------------------------------------------------
+// TrustAnchor
+//----------------------------------------------------------------------------
+
+TrustAnchor TrustAnchor::Ed25519Key(std::string hex) {
+  TrustAnchor a;
+  a.kind = Kind::Ed25519;
+  a.keyHex = std::move(hex);
+  return a;
+}
+
+TrustAnchor TrustAnchor::HmacSecret(std::string secret) {
+  TrustAnchor a;
+  a.kind = Kind::Hmac;
+  a.keyHex = std::move(secret);
+  return a;
+}
+
+bool TrustAnchor::Valid() const {
+  switch (kind) {
+    case Kind::Ed25519: {
+      std::string pk;
+      return crypto::Ed25519PublicKeyFromHex(keyHex, &pk);
+    }
+    case Kind::Hmac:
+      return !keyHex.empty();
+  }
+  return false;
+}
+
+bool TrustAnchor::Verify(const ScriptManifest& manifest,
+                         ManifestError* outError, bool requireSourceHash) const {
+  if (!Valid()) {
+    if (outError) *outError = ManifestError::BadSignature;
+    return false;
+  }
+  switch (kind) {
+    case Kind::Ed25519:
+      return manifest.VerifyEd25519(keyHex, outError, requireSourceHash);
+    case Kind::Hmac:
+      return manifest.Verify(keyHex, outError);
+  }
+  if (outError) *outError = ManifestError::BadSignature;
+  return false;
+}
+
+//----------------------------------------------------------------------------
 // ManifestStore
 //----------------------------------------------------------------------------
 
@@ -432,10 +545,16 @@ ManifestStore& ManifestStore::Instance() {
 }
 
 bool ManifestStore::Register(const ScriptManifest& manifest,
-                             const std::string& keyHex,
+                             const std::string& hmacSecret,
+                             ManifestError* outError) {
+  return Register(manifest, TrustAnchor::HmacSecret(hmacSecret), outError);
+}
+
+bool ManifestStore::Register(const ScriptManifest& manifest,
+                             const TrustAnchor& anchor,
                              ManifestError* outError) {
   ManifestError verr = ManifestError::Ok;
-  if (!manifest.Verify(keyHex, &verr)) {
+  if (!anchor.Verify(manifest, &verr)) {
     Log::Error("ManifestStore: rejecting '%s': %s", manifest.name.c_str(),
                ManifestErrorName(verr));
     if (outError) *outError = verr;
