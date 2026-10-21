@@ -50,6 +50,7 @@ struct Insn {
   enum class Op {
     PushNil, PushBool, PushNum, PushStr,
     Pop, Dup, Load, Store,
+    NewTable, Put, Get,
     Add, Sub, Mul, Div, Mod, Neg, Not,
     Eq, Ne, Lt, Le, Gt, Ge, And, Or,
     Jmp, Jz, Jnz,
@@ -226,7 +227,8 @@ class RefVm final : public IScriptVm {
   size_t MemoryUsed() const override {
     size_t bytes = 0;
     for (const auto& kv : globals_) {
-      bytes += kv.first.size() + kv.second.string.size() + sizeof(ScriptValue);
+      bytes += kv.first.size() + sizeof(ScriptValue);
+      bytes += ValueBytes(kv.second);
     }
     return bytes;
   }
@@ -238,39 +240,31 @@ class RefVm final : public IScriptVm {
   void ClearInterrupt() override { interrupt_ = false; }
 
   std::string SerializeState() const override {
-    // Deterministic key order (std::map) so the snapshot is byte-stable.
+    // Deterministic key order (std::map) so the snapshot is byte-stable. The
+    // body is a single length-prefixed table, so string values (and keys) that
+    // contain newlines round-trip exactly.
     std::ostringstream os;
-    os << "berry-ref-state-v1\n";
-    std::map<std::string, ScriptValue> ordered(globals_.begin(), globals_.end());
-    for (const auto& kv : ordered) {
-      os << kv.first << "=" << EncodeValue(kv.second) << "\n";
-    }
+    os << "berry-ref-state-v2\n";
+    ScriptTable body;
+    for (const auto& kv : globals_) body[kv.first] = kv.second;
+    os << EncodeValue(ScriptValue::Tbl(std::move(body)));
     return os.str();
   }
 
   bool RestoreState(const std::string& state, ScriptError* err) override {
-    std::istringstream is(state);
-    std::string header;
-    if (!std::getline(is, header) || header != "berry-ref-state-v1") {
+    const std::string header = "berry-ref-state-v2\n";
+    if (state.compare(0, header.size(), header) != 0) {
       if (err) *err = ScriptError::Make("bad state header", chunk_, 0);
       return false;
     }
-    std::unordered_map<std::string, ScriptValue> restored;
-    std::string line;
-    while (std::getline(is, line)) {
-      if (line.empty()) continue;
-      size_t eq = line.find('=');
-      if (eq == std::string::npos) {
-        if (err) *err = ScriptError::Make("bad state line: " + line, chunk_, 0);
-        return false;
-      }
-      ScriptValue v;
-      if (!DecodeValue(line.substr(eq + 1), &v)) {
-        if (err) *err = ScriptError::Make("bad state value: " + line, chunk_, 0);
-        return false;
-      }
-      restored[line.substr(0, eq)] = v;
+    ScriptValue root;
+    size_t pos = header.size();
+    if (!DecodeValueAt(state, &pos, &root) || !root.IsTable() || !root.table) {
+      if (err) *err = ScriptError::Make("bad state body", chunk_, 0);
+      return false;
     }
+    std::unordered_map<std::string, ScriptValue> restored(
+        root.table->begin(), root.table->end());
     globals_ = std::move(restored);
     return true;
   }
@@ -287,37 +281,110 @@ class RefVm final : public IScriptVm {
     return 0;
   }
 
+  /// Recursive byte estimate for one value, so a table counts against the
+  /// memory budget instead of hiding behind a shared pointer.
+  static size_t ValueBytes(const ScriptValue& v) {
+    size_t bytes = v.string.size();
+    if (v.type == ScriptValue::Type::Table && v.table) {
+      for (const auto& kv : *v.table) {
+        bytes += kv.first.size() + sizeof(ScriptValue) + ValueBytes(kv.second);
+      }
+    }
+    return bytes;
+  }
+
   static std::string EncodeValue(const ScriptValue& v) {
     switch (v.type) {
       case ScriptValue::Type::Nil: return "nil";
       case ScriptValue::Type::Bool: return v.boolean ? "true" : "false";
-      case ScriptValue::Type::Number: return "n:" + v.ToDisplay();
+      case ScriptValue::Type::Number: {
+        // Length-prefixed like strings/tables so a number nested inside a
+        // table decodes without relying on a line terminator.
+        const std::string d = v.ToDisplay();
+        return "n:" + std::to_string(d.size()) + ":" + d;
+      }
       case ScriptValue::Type::String: {
         // Length-prefixed so embedded newlines/commas survive round-trip.
         return "s:" + std::to_string(v.string.size()) + ":" + v.string;
+      }
+      case ScriptValue::Type::Table: {
+        // Length-prefixed recursive framing: "<klen>:<key><encvalue>".
+        // A table's encoded length is written first so a nested value that
+        // itself contains colons still decodes unambiguously.
+        std::string body;
+        if (v.table) {
+          for (const auto& kv : *v.table) {
+            const std::string ev = EncodeValue(kv.second);
+            body += std::to_string(kv.first.size()) + ":" + kv.first + ev;
+          }
+        }
+        return "t:" + std::to_string(body.size()) + ":" + body;
       }
     }
     return "nil";
   }
 
-  static bool DecodeValue(const std::string& s, ScriptValue* out) {
-    if (s == "nil") { *out = ScriptValue::Nil(); return true; }
-    if (s == "true") { *out = ScriptValue::Bool(true); return true; }
-    if (s == "false") { *out = ScriptValue::Bool(false); return true; }
-    if (s.rfind("n:", 0) == 0) {
-      *out = ScriptValue::Num(std::strtod(s.c_str() + 2, nullptr));
+  /// Decodes one value starting at `pos`, advancing it past the consumed
+  /// bytes. Framing is length-prefixed throughout so nested tables round-trip
+  /// byte-for-byte.
+  static bool DecodeValueAt(const std::string& s, size_t* pos, ScriptValue* out) {
+    size_t& p = *pos;
+    if (p >= s.size()) return false;
+    if (s.compare(p, 3, "nil") == 0) { *out = ScriptValue::Nil(); p += 3; return true; }
+    if (s.compare(p, 4, "true") == 0) { *out = ScriptValue::Bool(true); p += 4; return true; }
+    if (s.compare(p, 5, "false") == 0) { *out = ScriptValue::Bool(false); p += 5; return true; }
+    if (s.compare(p, 2, "n:") == 0) {
+      size_t len = 0;
+      int adv = 0;
+      if (std::sscanf(s.c_str() + p + 2, "%zu:%n", &len, &adv) != 1) return false;
+      const size_t bodyStart = p + 2 + (size_t)adv;
+      if (bodyStart + len > s.size()) return false;
+      // Parse from a NUL-terminated copy: strtod would otherwise read on past
+      // the length-prefixed slice into the following key.
+      *out = ScriptValue::Num(std::strtod(s.substr(bodyStart, len).c_str(), nullptr));
+      p = bodyStart + len;
       return true;
     }
-    if (s.rfind("s:", 0) == 0) {
-      size_t colon = s.find(':', 2);
-      if (colon == std::string::npos) return false;
-      size_t len = (size_t)std::strtoull(s.c_str() + 2, nullptr, 10);
-      std::string body = s.substr(colon + 1);
-      if (body.size() != len) return false;
-      *out = ScriptValue::Str(body);
+    if (s.compare(p, 2, "s:") == 0) {
+      size_t len = 0;
+      int adv = 0;
+      if (std::sscanf(s.c_str() + p + 2, "%zu:%n", &len, &adv) != 1) return false;
+      const size_t bodyStart = p + 2 + (size_t)adv;
+      if (bodyStart + len > s.size()) return false;
+      *out = ScriptValue::Str(s.substr(bodyStart, len));
+      p = bodyStart + len;
+      return true;
+    }
+    if (s.compare(p, 2, "t:") == 0) {
+      size_t len = 0;
+      int adv = 0;
+      if (std::sscanf(s.c_str() + p + 2, "%zu:%n", &len, &adv) != 1) return false;
+      const size_t bodyStart = p + 2 + (size_t)adv;
+      if (bodyStart + len > s.size()) return false;
+      ScriptTable tbl;
+      size_t q = bodyStart;
+      while (q < bodyStart + len) {
+        size_t klen = 0;
+        int kadv = 0;
+        if (std::sscanf(s.c_str() + q, "%zu:%n", &klen, &kadv) != 1) return false;
+        const size_t keyStart = q + (size_t)kadv;
+        if (keyStart + klen > bodyStart + len) return false;
+        const std::string key = s.substr(keyStart, klen);
+        q = keyStart + klen;
+        ScriptValue child;
+        if (!DecodeValueAt(s, &q, &child)) return false;
+        tbl[key] = std::move(child);
+      }
+      *out = ScriptValue::Tbl(std::move(tbl));
+      p = bodyStart + len;
       return true;
     }
     return false;
+  }
+
+  static bool DecodeValue(const std::string& s, ScriptValue* out) {
+    size_t pos = 0;
+    return DecodeValueAt(s, &pos, out);
   }
 
   //----------------------------------------------------------------------------
@@ -493,6 +560,9 @@ class RefVm final : public IScriptVm {
         }
       } else if (op == "pop") { insn.op = Insn::Op::Pop; }
       else if (op == "dup") { insn.op = Insn::Op::Dup; }
+      else if (op == "newtable") { insn.op = Insn::Op::NewTable; }
+      else if (op == "put") { if (!need(2, "key")) return false; insn.op = Insn::Op::Put; insn.name = toks[1]; }
+      else if (op == "get") { if (!need(2, "key")) return false; insn.op = Insn::Op::Get; insn.name = toks[1]; }
       else if (op == "load") { if (!need(2, "name")) return false; insn.op = Insn::Op::Load; insn.name = toks[1]; }
       else if (op == "store") { if (!need(2, "name")) return false; insn.op = Insn::Op::Store; insn.name = toks[1]; }
       else if (op == "add") { insn.op = Insn::Op::Add; }
@@ -658,6 +728,38 @@ class RefVm final : public IScriptVm {
       case Insn::Op::Not: {
         if (stack_.empty()) return Underflow(err);
         stack_.back() = ScriptValue::Bool(!stack_.back().Truthy());
+        ++pc_;
+        break;
+      }
+      case Insn::Op::NewTable: {
+        stack_.push_back(ScriptValue::Tbl(ScriptTable{}));
+        ++pc_;
+        break;
+      }
+      case Insn::Op::Put: {
+        // Stack layout: [ ... table, value ] -> sets table[key] = value and
+        // leaves the table on top, so fields can be chained.
+        if (stack_.size() < 2) return Underflow(err);
+        ScriptValue value = stack_.back();
+        stack_.pop_back();
+        ScriptValue& tbl = stack_.back();
+        if (!tbl.IsTable() || !tbl.table) {
+          if (err) *err = ScriptError::Make("put on a non-table value", chunk_, in.line);
+          Abort();
+          return ScriptStatus::Error;
+        }
+        (*tbl.table)[in.name] = std::move(value);
+        ++pc_;
+        break;
+      }
+      case Insn::Op::Get: {
+        if (stack_.empty()) return Underflow(err);
+        ScriptValue& tbl = stack_.back();
+        // Reading a field of a non-table (or a missing key) yields nil rather
+        // than faulting, matching table semantics in Luau.
+        const ScriptValue* f = tbl.Field(in.name.c_str());
+        ScriptValue out = f ? *f : ScriptValue::Nil();
+        stack_.back() = std::move(out);
         ++pc_;
         break;
       }
