@@ -241,6 +241,13 @@ ScriptValue ScriptBindings::Invoke(ScriptContext& ctx, const std::string& name,
 
 size_t ScriptBindings::Count() const { return entries_.size(); }
 
+std::vector<std::string> ScriptBindings::Names() const {
+  std::vector<std::string> names;
+  names.reserve(entries_.size());
+  for (const auto& e : entries_) names.push_back(e.first);
+  return names;
+}
+
 void ScriptBindings::Clear() { entries_.clear(); }
 
 //----------------------------------------------------------------------------

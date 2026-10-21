@@ -176,6 +176,10 @@ class BERRY_API ScriptBindings {
   size_t Count() const;
   void Clear();
 
+  /// Registered binding names, in registration order. Used by a VM that must
+  /// expose the bindings to scripts under their canonical names.
+  std::vector<std::string> Names() const;
+
  private:
   struct Entry {
     Capability required;
@@ -315,6 +319,13 @@ class BERRY_API IScriptVm {
 /// exists so the whole runtime is exercisable with no game and no third-party
 /// engine. On device, Luau/QuickJS-ng are plugged in behind this same seam.
 BERRY_API IScriptVm* CreateReferenceVm();
+
+/// Creates the Luau VM (the device backend). It speaks real Luau: scripts
+/// return a table of exported functions, bindings are exposed as globals under
+/// their IDL names (render.draw_text), and budgets are enforced through Luau's
+/// safepoint interrupt plus a memory-capping allocator. Sandboxed: no require,
+/// dofile, loadstring, os filesystem/process calls or debug library.
+BERRY_API IScriptVm* CreateLuauVm();
 
 //----------------------------------------------------------------------------
 // Script host — one script, one VM, one grant.

@@ -32,6 +32,7 @@ CORE_SRC := \
   core/script/manifest.cpp \
   core/script/runtime.cpp \
   core/script/vm_ref.cpp \
+  core/script/value_codec.cpp \
   core/script/host.cpp \
   core/script/reload.cpp \
   core/script/loader.cpp \
