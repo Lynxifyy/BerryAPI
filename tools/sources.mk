@@ -34,6 +34,7 @@ CORE_SRC := \
   core/script/host.cpp \
   core/script/reload.cpp \
   core/script/async.cpp \
+  core/script/url.cpp \
   util/logger.cpp \
   util/mem.cpp
 
@@ -55,4 +56,5 @@ TEST_SRC := \
   tests/test_async.cpp \
   tests/test_idl.cpp \
   tests/test_hud.cpp \
-  tests/test_governor.cpp
+  tests/test_governor.cpp \
+  tests/test_url.cpp

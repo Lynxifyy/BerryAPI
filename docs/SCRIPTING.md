@@ -36,6 +36,32 @@ m.signature = Sha256Hex(scriptBytes);   // script signing
   granted (`ScriptStatus::CapabilityDenied`). It fails closed: an unknown
   binding and an ungranted binding are both denials, never an allow.
 
+### Network scope and the egress policy
+
+A network grant names a host, and the host is enforced on every request:
+
+```json
+"capabilities": ["network:api.example.com"]
+```
+
+- The scope is a host, never a URL, a wildcard or a subdomain rule.
+  `network:api.example.com` does not cover `evil.example.com`, does not cover
+  `sub.api.example.com`, and a bare `network` (no scope) grants nothing.
+  `network:*` is the only wildcard.
+- The legacy `network:domain=api.example.com` spelling is accepted and
+  normalized to the same host, so grants written either way behave the same.
+- `http_get` only reaches **https** hosts, never an IP literal, and never a
+  loopback, link-local, private, CGNAT or otherwise reserved address — the
+  addresses an SSRF probe looks for, including cloud metadata
+  (`169.254.169.254`). Internal names (`localhost`, `intranet`, `box.local`)
+  are refused as names.
+- Redirects are followed by the caller, not the client, and every hop is
+  re-checked against both the policy and the grant. A granted host cannot
+  bounce a request to a host the script was never granted.
+
+The policy is a pure function (`UrlPolicy::Check`), so it is unit-testable and
+reproducible; the harness relaxes it for loopback only.
+
 ## Runtime host, budgets and error isolation
 
 `ScriptHost` owns one VM and one grant. Every hook invocation runs under

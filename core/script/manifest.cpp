@@ -5,6 +5,7 @@
 #include "json_min.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 
 namespace Berry {
@@ -42,6 +43,36 @@ CapKind CapKindFromName(const std::string& name) {
   return CapKind::Unknown;
 }
 
+std::string NormalizeNetworkScope(const std::string& scope) {
+  std::string s = scope;
+  // Tolerate the historical "domain=host" spelling so a grant written either
+  // way covers a request built from the other.
+  size_t eq = s.find('=');
+  if (eq != std::string::npos) {
+    std::string key = s.substr(0, eq);
+    std::transform(key.begin(), key.end(), key.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    if (key == "domain" || key == "host") {
+      s = s.substr(eq + 1);
+    } else {
+      return std::string();   // unknown qualifier: covers nothing
+    }
+  }
+  // A scope is a host, never a URL: reject anything that tries to smuggle a
+  // scheme, path, port or userinfo into the comparison.
+  if (s.empty()) return std::string();
+  if (s.find("://") != std::string::npos) return std::string();
+  if (s.find('/') != std::string::npos) return std::string();
+  if (s.find('@') != std::string::npos) return std::string();
+  if (s.find('*') != std::string::npos) return std::string();   // "*" is not a host
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return (char)std::tolower(c); });
+  while (!s.empty() && s.back() == '.') s.pop_back();   // "host." == "host"
+  if (s.empty()) return std::string();
+  if (s.front() == '[' && s.back() == ']') s = s.substr(1, s.size() - 2);
+  return s;
+}
+
 bool Capability::Parse(const std::string& text, Capability* out) {
   if (!out) return false;
   out->scope.clear();
@@ -66,6 +97,23 @@ bool Capability::Covers(const Capability& requested) const {
   if (kind != requested.kind) return false;
   // A wildcard grant covers any scope of the same kind.
   if (scope == "*") return true;
+  // A wildcard REQUEST is a kind-level requirement: "this binding needs some
+  // capability of this kind, and it narrows the check to the concrete host
+  // itself" (see HttpGetBlocking). Any grant of the same kind satisfies it.
+  // Note this must come before the empty-scope rule below, so that even a
+  // legacy unscoped grant reaches the binding and gets a precise
+  // "host not granted" refusal instead of a bare gate denial.
+  if (requested.scope == "*") return true;
+  // An unscoped grant is unscoped: it must not silently cover a scoped request
+  // (that is how a bare `network` grant ended up reaching every host).
+  if (scope.empty()) return requested.scope.empty();
+  // Network scopes name a host, and both sides may be spelled with the legacy
+  // "domain=" qualifier, so compare the normalized host.
+  if (kind == CapKind::Network) {
+    const std::string have = NormalizeNetworkScope(scope);
+    const std::string want = NormalizeNetworkScope(requested.scope);
+    return !have.empty() && have == want;
+  }
   return scope == requested.scope;
 }
 

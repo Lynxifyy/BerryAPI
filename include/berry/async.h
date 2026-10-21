@@ -22,6 +22,7 @@
 #include "berry/types.h"
 #include "berry/event.h"
 #include "berry/script.h"
+#include "berry/url.h"
 
 #include <atomic>
 #include <functional>
@@ -150,8 +151,14 @@ class BERRY_API AsyncRuntime {
   /// Registers the async bindings on `bindings`, each requiring `cap`.
   /// - async.wait:        requires no capability (pure scheduling).
   /// - async.events_once: requires kCapEvents.
-  /// - async.http_get:    requires kCapNetwork.
-  void InstallBindings(ScriptBindings* bindings) const;
+  /// - async.http_get:    requires a kCapNetwork grant scoped to the URL host.
+  ///
+  /// `policy` is the egress policy applied to the destination and re-applied
+  /// to every redirect hop. The default is the safe policy (https only, no IP
+  /// literals, no private ranges); the host harness relaxes it to reach its
+  /// loopback server.
+  void InstallBindings(ScriptBindings* bindings,
+                       const UrlPolicy& policy = UrlPolicy()) const;
 
   /// Suspends the current binding invocation until `ready` fires, returning
   /// true when the script should be suspended (the caller returns from the
@@ -174,6 +181,7 @@ class BERRY_API AsyncRuntime {
  private:
   std::function<GameTick()> currentTick_;
   std::function<u64()> nowMs_;
+  UrlPolicy policy_;
   mutable std::mutex mutex_;
   u64 pendingTaskId_ = 0;      // task created by the most recent Await
   std::string pendingScript_;
@@ -185,7 +193,13 @@ class BERRY_API AsyncRuntime {
 
 /// Issues a GET and returns the body, or raises a script error on failure.
 /// Runs on the script worker, so blocking IO here is expected and allowed.
+///
+/// Before the first request — and again after every redirect — the destination
+/// is checked against `policy` and against the host the script was granted. A
+/// redirect to a host outside the grant, or to a private address, fails the
+/// call instead of being followed. `timeoutMs` is clamped to a safe range.
 BERRY_API ScriptValue HttpGetBlocking(ScriptContext& ctx, const std::string& url,
-                                      long timeoutMs = 8000);
+                                      long timeoutMs = 8000,
+                                      const UrlPolicy& policy = UrlPolicy());
 
 }  // namespace Berry

@@ -48,6 +48,15 @@ enum class CapKind : u32 {
 const char* CapKindName(CapKind k);
 CapKind CapKindFromName(const std::string& name);
 
+/// Normalizes a network capability scope to the bare host it names.
+///
+/// Manifests are written as `network:api.example.com`, but also historically
+/// as `network:domain=api.example.com`. Both forms must mean the same host, or
+/// a grant written one way would fail to cover a request built the other way.
+/// Returns the lower-cased host, or an empty string when the scope names no
+/// usable host (fail closed: an empty result covers nothing).
+BERRY_API std::string NormalizeNetworkScope(const std::string& scope);
+
 /// A single declared capability: a kind plus an optional scope qualifier.
 /// `raw` preserves the original string for diagnostics and display.
 struct BERRY_API Capability {

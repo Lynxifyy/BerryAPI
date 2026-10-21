@@ -9,10 +9,13 @@
 // order, which is what makes script async deterministic and replay-safe.
 #include "berry/async.h"
 #include "berry/logger.h"
+#include "berry/manifest.h"
 #include "berry/module.h"
 #include "berry/net.h"
+#include "berry/url.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 
 namespace Berry {
@@ -235,10 +238,12 @@ std::string AsyncRuntime::suspendedScript() const {
   return pendingScript_;
 }
 
-void AsyncRuntime::InstallBindings(ScriptBindings* bindings) const {
+void AsyncRuntime::InstallBindings(ScriptBindings* bindings,
+                                   const UrlPolicy& policy) const {
   if (!bindings) return;
   // The bindings close over `this`, so the runtime must outlive the bindings.
   AsyncRuntime* self = const_cast<AsyncRuntime*>(this);
+  self->policy_ = policy;
 
   Capability none;   // async.wait needs no capability: pure scheduling
   bindings->Register(AsyncBindings::Wait(), none,
@@ -296,20 +301,25 @@ void AsyncRuntime::InstallBindings(ScriptBindings* bindings) const {
                        return ScriptValue::Nil();
                      });
 
+  // A grant must name a host: an unscoped `network` grant is not a licence to
+  // reach everything. The requirement is therefore kind-level (`network:*`) so
+  // the gate answers "does this script hold any network capability at all?";
+  // HttpGetBlocking then narrows it to the concrete host it is about to
+  // contact, which is the only place the URL is known.
   Capability netCap;
-  Capability::Parse("network", &netCap);
+  Capability::Parse("network:*", &netCap);
   bindings->Register(AsyncBindings::HttpGet(), netCap,
                      [self](ScriptContext& ctx,
                             const std::vector<ScriptValue>& args) {
                        const std::string url =
                            args.empty() ? std::string() : args[0].ToDisplay();
-                       const long timeout =
-                           args.size() >= 2 ? (long)args[1].AsNumber() : 8000;
+                       const f64 rawTimeout =
+                           args.size() >= 2 ? args[1].AsNumber() : 8000.0;
                        // Blocking HTTP on the script worker is intended: this
                        // thread exists for exactly this and is never the
                        // render thread.
-                       ScriptValue body = HttpGetBlocking(ctx, url, timeout);
-                       (void)self;
+                       ScriptValue body =
+                           HttpGetBlocking(ctx, url, (long)rawTimeout, self->policy_);
                        return body;
                      });
 }
@@ -345,23 +355,129 @@ size_t AsyncRuntime::Pump(ScriptHost& host, GameTick currentTick,
 }
 
 //----------------------------------------------------------------------------
+// http_get destination helpers
+//----------------------------------------------------------------------------
+
+namespace {
+
+/// Redirects are followed by hand so each hop is re-checked; this bounds the
+/// chain so a redirect loop cannot spin the script worker forever.
+constexpr int kMaxRedirects = 5;
+
+/// True when the script's granted set covers `host`. A wildcard grant
+/// (`network:*`) covers any host; a scoped grant covers exactly the host it
+/// names, normalized so `network:api.example.com` and
+/// `network:domain=api.example.com` behave the same. An unscoped `network`
+/// grant covers nothing — it is not a licence to reach every host.
+bool HostGranted(const ScriptContext& ctx, const std::string& host) {
+  const std::string want = NormalizeNetworkScope(host);
+  if (want.empty()) return false;
+  for (const Capability& have : ctx.granted().All()) {
+    if (have.kind != CapKind::Network) continue;
+    if (have.scope == "*") return true;
+    if (have.scope.empty()) continue;
+    const std::string granted = NormalizeNetworkScope(have.scope);
+    if (!granted.empty() && granted == want) return true;
+  }
+  return false;
+}
+
+/// Resolves a Location header against the URL it came from. Only absolute
+/// URLs and absolute paths are supported: a scheme-relative ("//host/path")
+/// or relative Location is rejected rather than guessed at, because guessing is
+/// where a redirect bypass would live.
+std::string ResolveRedirect(const std::string& base, const Url& baseParsed,
+                            const std::string& location) {
+  if (location.find("://") != std::string::npos) return location;
+  if (!location.empty() && location.front() == '/') {
+    if (location.size() >= 2 && location[1] == '/') return std::string();
+    std::string authority = baseParsed.host;
+    if (!baseParsed.port.empty()) authority += ":" + baseParsed.port;
+    return baseParsed.scheme + "://" + authority + location;
+  }
+  (void)base;
+  return std::string();
+}
+
+}  // namespace
+
+//----------------------------------------------------------------------------
 // HttpGetBlocking
 //----------------------------------------------------------------------------
 
 ScriptValue HttpGetBlocking(ScriptContext& ctx, const std::string& url,
-                            long timeoutMs) {
-  HttpRequest req(url.c_str());
-  req.Method("GET").Timeout((int)timeoutMs);
-  HttpResponse resp = req.Do();
-  if (resp.status == 0) {
-    ctx.RaiseError("http request failed: " + url);
-    return ScriptValue::Nil();
+                            long timeoutMs, const UrlPolicy& policy) {
+  // Clamp before any conversion: NaN or a huge value cast to long is
+  // undefined behaviour, and a negative timeout would make the socket wait
+  // forever. 1s..60s keeps a hostile script from parking the worker thread.
+  long timeout = 8000;
+  if (std::isfinite((double)timeoutMs)) {
+    timeout = (long)timeoutMs;
   }
-  if (!resp.ok()) {
-    ctx.RaiseError("http " + std::to_string(resp.status) + " for " + url);
-    return ScriptValue::Nil();
-  }
-  return ScriptValue::Str(resp.body);
-}
+  if (timeout < 1000) timeout = 1000;
+  if (timeout > 60000) timeout = 60000;
 
+  // The capability gate already ran (the binding is registered with a network
+  // requirement). This is the per-request part: the URL must parse, must pass
+  // the egress policy, and its host must be one the script was actually
+  // granted. Re-run on every hop below.
+  std::string current = url;
+  for (int hop = 0; hop <= kMaxRedirects; ++hop) {
+    Url parsed;
+    std::string parseErr;
+    if (!parsed.Parse(current, &parseErr)) {
+      ctx.RaiseError("http: bad url: " + parseErr);
+      return ScriptValue::Nil();
+    }
+    const UrlReject reject = policy.Check(parsed);
+    if (reject != UrlReject::None) {
+      ctx.RaiseError(std::string("http: destination refused (") +
+                     UrlRejectName(reject) + "): " + parsed.host);
+      return ScriptValue::Nil();
+    }
+    // Scope: the grant must name this host (or be a wildcard). The binding's
+    // registered capability is a placeholder, so the check is done here against
+    // the parsed host rather than through the generic gate.
+    if (!HostGranted(ctx, parsed.host)) {
+      ctx.RaiseError("http: host not granted: " + parsed.host);
+      return ScriptValue::Nil();
+    }
+
+    HttpRequest req(current.c_str());
+    req.Method("GET").Timeout((int)timeout);
+    HttpResponse resp = req.Do();
+    if (resp.status == 0) {
+      ctx.RaiseError("http request failed: " + current);
+      return ScriptValue::Nil();
+    }
+    // Redirects are followed explicitly so every hop is re-checked. Following
+    // them inside the client would let a granted host bounce the request to
+    // loopback or to a host outside the grant.
+    if (resp.status >= 300 && resp.status < 400) {
+      const char* loc = resp.Header("Location");
+      if (!loc || !*loc) {
+        ctx.RaiseError("http redirect without Location");
+        return ScriptValue::Nil();
+      }
+      if (hop == kMaxRedirects) {
+        ctx.RaiseError("http: too many redirects");
+        return ScriptValue::Nil();
+      }
+      std::string next = ResolveRedirect(current, parsed, loc);
+      if (next.empty()) {
+        ctx.RaiseError("http: unresolvable redirect");
+        return ScriptValue::Nil();
+      }
+      current = next;
+      continue;
+    }
+    if (!resp.ok()) {
+      ctx.RaiseError("http " + std::to_string(resp.status) + " for " + current);
+      return ScriptValue::Nil();
+    }
+    return ScriptValue::Str(resp.body);
+  }
+  ctx.RaiseError("http: too many redirects");
+  return ScriptValue::Nil();
+}
 }  // namespace Berry
