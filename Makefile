@@ -46,7 +46,8 @@ TEST_SRC := \
   tests/test_manifest.cpp \
   tests/test_script.cpp \
   tests/test_reload.cpp \
-  tests/test_async.cpp
+  tests/test_async.cpp \
+  tests/test_idl.cpp
 
 CORE_OBJ := $(CORE_SRC:.cpp=.o)
 TEST_OBJ := $(TEST_SRC:.cpp=.o)
@@ -81,8 +82,8 @@ check-samples: samples/sample_hitmarker.o
 	@echo "== samples compile OK =="
 	@rm -f samples/sample_hitmarker.o
 
-test: $(TEST_BINS) build/$(SHARED_NAME) check-samples
-	@for b in build/test_test_math build/test_test_modules build/test_test_net build/test_test_render build/test_test_sample build/test_test_sigscan build/test_test_thread build/test_test_fuzz build/test_test_manifest build/test_test_script build/test_test_reload build/test_test_async; do \
+test: idl-check $(TEST_BINS) build/$(SHARED_NAME) check-samples
+	@for b in build/test_test_math build/test_test_modules build/test_test_net build/test_test_render build/test_test_sample build/test_test_sigscan build/test_test_thread build/test_test_fuzz build/test_test_manifest build/test_test_script build/test_test_reload build/test_test_async build/test_test_idl; do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
 	@echo "-- dlopen ABI --"
@@ -144,6 +145,16 @@ build/$(SHARED_NAME): $(SHARED_OBJ)
 
 lib: build/$(SHARED_NAME)
 	@echo "== built $(SHARED_NAME) =="
+
+# IDL codegen: one description generates the C++ binding table, the TS/Luau
+# type definitions and the API docs. `idl-check` fails when they drift.
+.PHONY: idl idl-check
+idl:
+	@python3 tools/idlgen.py
+
+idl-check:
+	@python3 tools/idlgen.py --self-test
+	@python3 tools/idlgen.py --check
 
 clean:
 	rm -rf build core/events/*.o core/hooks/*.o core/modules/*.o core/lifecycle/*.o \

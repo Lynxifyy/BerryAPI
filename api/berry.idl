@@ -1,0 +1,83 @@
+# BerryAPI script API definition (single source of truth).
+#
+# One IDL drives everything: the C++ binding table, TypeScript and Luau type
+# definitions, and the reference docs. Editing this file and running
+#
+#     make idl
+#
+# regenerates include/berry/generated_bindings.h and generated/*. Editing the
+# generated files by hand is a mistake: `make idl-check` fails the build when
+# they drift from this description.
+#
+# Grammar (line oriented):
+#   module <Name> {            open a module; functions inherit its capability
+#   capability <cap>           default capability for the module's functions
+#   doc "..."                  documentation for the next declaration
+#   fn <name>(a: t, ...) -> t  a native binding
+#   event <name>(a: t, ...)    an event channel scripts may await
+#   struct <Name> { f: t ... } a value shape
+#
+# Types: nil, bool, number, string, Actor, Vec3, Rgba, Widget, Task, HttpResult
+
+module Combat {
+  capability combat
+  doc "Read-only combat telemetry. Writes go through the intent layer."
+  fn recent_kills() -> number
+  fn last_hit_damage() -> number
+  fn observe(ticks: number) -> number
+}
+
+module Render {
+  capability render
+  doc "Client-side drawing. Everything here is local to this screen."
+  fn draw_text(x: number, y: number, text: string, color: Rgba) -> nil
+  fn draw_rect(x: number, y: number, w: number, h: number, color: Rgba) -> nil
+  fn screen_size() -> Vec3
+  fn set_zoom(factor: number) -> nil
+}
+
+module World {
+  capability world
+  doc "Read-only world queries. The core never hands out raw pointers."
+  fn query(within: number) -> number
+  fn block_at(x: number, y: number, z: number) -> string
+}
+
+module Network {
+  capability network
+  doc "Outbound requests. Requires a network grant scoped to the host."
+  fn get(url: string, timeout_ms: number) -> HttpResult
+}
+
+module Hud {
+  capability hud
+  doc "Retained-mode HUD widget tree."
+  fn create_label(text: string) -> Widget
+  fn create_panel(x: number, y: number) -> Widget
+  fn attach(widget: Widget) -> nil
+  fn set_visible(widget: Widget, visible: bool) -> nil
+  fn tween(widget: Widget, prop: string, to: number, ms: number) -> nil
+}
+
+module Perf {
+  capability perf
+  doc "Frame timing and quality controls."
+  fn frame_time_ms() -> number
+  fn set_target_fps(fps: number) -> nil
+  fn set_thermal_mode(enabled: bool) -> nil
+}
+
+module Input {
+  capability input
+  doc "Client-side input state. Values a normal client could already see."
+  fn is_key_down(key: string) -> bool
+  fn clicks_per_second() -> number
+}
+
+module Events {
+  capability events
+  doc "Event channels scripts may await with Events.once."
+  event hit(damage: number)
+  event kill(victim: string)
+  event tick_count(count: number)
+}
