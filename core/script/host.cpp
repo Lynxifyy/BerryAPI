@@ -160,12 +160,22 @@ ScriptStatus ScriptHost::CallBinding(const std::string& binding,
   const ScriptBindings* b = bindings_ ? bindings_ : &ownedBindings_;
   if (!b) return ScriptStatus::Error;
   bool ok = false, denied = false;
+  // A stale error from a previous call must not fail this one.
+  if (ctx_.hasError()) ctx_.ClearError();
   ScriptValue v = b->Invoke(ctx_, binding, args, &ok, &denied);
   if (!ok) {
     ScriptError err = ScriptError::Make(
         denied ? ("capability denied for binding: " + binding)
                : ("no such binding: " + binding));
     return Fail(denied ? ScriptStatus::CapabilityDenied : ScriptStatus::Error, err);
+  }
+  // A binding that raised a script error (bad argument, service unavailable)
+  // fails the call, exactly as it does when invoked from script code through
+  // the VM's DoNative path.
+  if (ctx_.hasError()) {
+    ScriptError err = ScriptError::Make(ctx_.errorMessage());
+    ctx_.ClearError();
+    return Fail(ScriptStatus::Error, err);
   }
   if (ret) *ret = v;
   return ScriptStatus::Ok;
