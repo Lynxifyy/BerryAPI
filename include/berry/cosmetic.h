@@ -237,6 +237,153 @@ class BERRY_API CosmeticWardrobe {
 };
 
 //----------------------------------------------------------------------------
+// Skeleton + render seams.
+//
+// Cosmetics need two things the core must not assume: a world transform per
+// bone (the player-actor render hook) and a way to submit geometry attached to
+// it. Both are seams, so the host harness can exercise the whole path headless
+// and the device supplies the real GLES path.
+//----------------------------------------------------------------------------
+
+/// A bone's world transform, as reported by the skeleton seam.
+struct BERRY_API CosmeticBoneTransform {
+  Vec3 position;   // world position of the bone origin
+  Vec3 rotation;   // degrees: pitch, yaw, roll
+  f32 scale = 1.0f;
+  bool valid = false;
+};
+
+/// Reports bone transforms for an entity. On device this is filled from the
+/// actor's rendered skeleton; the host shim provides a synthetic rig.
+class BERRY_API CosmeticSkeletonSource {
+ public:
+  virtual ~CosmeticSkeletonSource() = default;
+  /// Fills the transform for `bone` on `entity`. Returns false (and leaves
+  /// `out` invalid) when the skeleton or entity is not resolvable.
+  virtual bool BoneTransform(EntityId entity, Bone bone,
+                             CosmeticBoneTransform* out) const = 0;
+};
+
+/// One geometry submission: a resolved asset placed at a world transform.
+struct BERRY_API CosmeticDrawItem {
+  std::string assetId;
+  CosmeticSlot slot = CosmeticSlot::None;
+  Bone bone = Bone::None;
+  GeometryId geometry = 0;
+  TextureId texture = 0;
+  Vec3 position;             // world attach position
+  Vec3 rotation;             // degrees
+  f32 scale = 1.0f;
+  Vec3 tint = Vec3(1, 1, 1);
+  EntityId entity;           // whose cosmetic this is
+};
+
+/// Receives resolved cosmetics for drawing. The device implementation binds
+/// the geometry/texture ids to GLES programs; the host captures them.
+class BERRY_API CosmeticRenderSeam {
+ public:
+  virtual ~CosmeticRenderSeam() = default;
+  virtual void SubmitGeometry(const CosmeticDrawItem& item) = 0;
+};
+
+/// Composes an asset's attach transform onto a bone transform. Exposed so the
+/// math is testable without a seam.
+BERRY_API CosmeticDrawItem ComposeAttach(const CosmeticAsset& asset,
+                                         const CosmeticBoneTransform& bone,
+                                         EntityId entity);
+
+//----------------------------------------------------------------------------
+// CosmeticService — the local render path.
+//----------------------------------------------------------------------------
+
+struct BERRY_API CosmeticStats {
+  u64 frames = 0;
+  u64 submitted = 0;      // geometry submissions
+  u64 skippedNoBone = 0;  // assets whose bone could not be resolved
+  u64 skippedNotOwned = 0;
+};
+
+/// Owns the local player's loadout and wardrobe and renders it through the
+/// seams. Local-only by default: nothing is drawn for a remote player unless a
+/// verified loadout is supplied (the sync channel does that in Phase 4).
+///
+/// Thread-safe: script bindings read and mutate the loadout from the script
+/// worker while the render thread resolves and submits it. The critical
+/// sections are short map operations, and submission happens outside the lock.
+class BERRY_API CosmeticService {
+ public:
+  CosmeticService() = default;
+
+  void SetSkeletonSource(CosmeticSkeletonSource* s) { skeleton_ = s; }
+  void SetRenderSeam(CosmeticRenderSeam* s) { seam_ = s; }
+  const CosmeticSkeletonSource* skeletonSource() const { return skeleton_; }
+  const CosmeticRenderSeam* renderSeam() const { return seam_; }
+
+  //--- local loadout --------------------------------------------------------
+  /// A snapshot of the local loadout. Returned by value so a caller never
+  /// holds a reference into state the render thread may mutate.
+  CosmeticLoadout localLoadout() const;
+
+  /// Equips an asset on the local player. Refuses an unknown asset.
+  bool Equip(const std::string& assetId, CosmeticError* out = nullptr);
+  bool Unequip(CosmeticSlot slot);
+  /// The asset id equipped in `slot` on the local player, or "".
+  std::string Equipped(CosmeticSlot slot) const;
+
+  /// Saves the current local loadout as preset `name`.
+  bool SavePreset(const std::string& name);
+  /// Replaces the local loadout with preset `name`. False when it is unknown.
+  bool ApplyPreset(const std::string& name);
+  bool HasPreset(const std::string& name) const;
+  std::vector<std::string> PresetNames() const;
+
+  //--- remote loadouts (sync) ----------------------------------------------
+  /// Installs a loadout for a remote player, but only for assets that player
+  /// provably owns; unowned entries are dropped. This is the gate the sync
+  /// channel goes through, so a forged loadout cannot render someone else's
+  /// cosmetics.
+  size_t SetRemoteLoadout(const std::string& playerId,
+                          const CosmeticLoadout& loadout);
+  bool ClearRemoteLoadout(const std::string& playerId);
+  std::vector<std::string> RemotePlayers() const;
+
+  /// When false, remote loadouts are ignored and only the local player renders.
+  bool localOnly() const { return localOnly_; }
+  void SetLocalOnly(bool v) { localOnly_ = v; }
+
+  //--- resolution + present -------------------------------------------------
+  /// Resolves a loadout into draw items for `entity`, using the skeleton seam.
+  /// Assets whose bone cannot be resolved are skipped.
+  std::vector<CosmeticDrawItem> Resolve(EntityId entity,
+                                        const CosmeticLoadout& loadout) const;
+
+  /// Resolves and submits the local player's loadout. Returns how many items
+  /// were submitted. Safe to call with no seam (returns 0).
+  size_t PresentLocal(EntityId localPlayer);
+
+  /// Submits a remote player's verified loadout (no-op when localOnly).
+  size_t PresentRemote(const std::string& playerId, EntityId entity);
+
+  CosmeticStats stats() const;
+
+ private:
+  /// Resolves `loadout` without taking the lock. `skel` must be non-null.
+  std::vector<CosmeticDrawItem> ResolveLocked(
+      EntityId entity, const CosmeticLoadout& loadout,
+      const CosmeticSkeletonSource* skel, u64* skippedNoBone) const;
+
+  CosmeticSkeletonSource* skeleton_ = nullptr;
+  CosmeticRenderSeam* seam_ = nullptr;
+
+  mutable std::mutex mutex_;
+  CosmeticLoadout local_;
+  CosmeticWardrobe wardrobe_;
+  std::map<std::string, CosmeticLoadout> remote_;
+  bool localOnly_ = true;
+  mutable CosmeticStats stats_;
+};
+
+//----------------------------------------------------------------------------
 // Ownership.
 //----------------------------------------------------------------------------
 

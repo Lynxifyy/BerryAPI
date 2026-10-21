@@ -333,6 +333,208 @@ size_t CosmeticWardrobe::Count() const { return presets_.size(); }
 void CosmeticWardrobe::Clear() { presets_.clear(); }
 
 //----------------------------------------------------------------------------
+// Attach composition
+//----------------------------------------------------------------------------
+
+CosmeticDrawItem ComposeAttach(const CosmeticAsset& asset,
+                               const CosmeticBoneTransform& bone,
+                               EntityId entity) {
+  CosmeticDrawItem item;
+  item.assetId = asset.id;
+  item.slot = asset.slot;
+  item.bone = asset.ResolvedBone();
+  item.geometry = asset.geometry;
+  item.texture = asset.texture;
+  item.entity = entity;
+
+  // The bone transform places the attachment point in the world; the asset's
+  // offset is scaled by the bone's scale and rotated by the bone's yaw, so a
+  // cape stays behind the back as the player turns.
+  const f32 yaw = bone.rotation.y * Mathf::DEG2RAD;
+  const f32 c = std::cos(yaw), s = std::sin(yaw);
+  const Vec3 off = asset.offset * bone.scale;
+  const Vec3 rotated(off.x * c + off.z * s, off.y, -off.x * s + off.z * c);
+
+  item.position = bone.position + rotated;
+  item.rotation = Vec3(bone.rotation.x + asset.rotation.x,
+                       bone.rotation.y + asset.rotation.y,
+                       bone.rotation.z + asset.rotation.z);
+  item.scale = bone.scale * asset.scale;
+  item.tint = asset.tint;
+  return item;
+}
+
+//----------------------------------------------------------------------------
+// CosmeticService
+//----------------------------------------------------------------------------
+
+CosmeticLoadout CosmeticService::localLoadout() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return local_;
+}
+
+bool CosmeticService::Equip(const std::string& assetId, CosmeticError* out) {
+  // Resolve outside the lock: the registry has its own.
+  CosmeticAsset asset;
+  if (!CosmeticRegistry::Instance().Find(assetId, &asset)) {
+    if (out) *out = CosmeticError::UnknownAsset;
+    return false;
+  }
+  std::lock_guard<std::mutex> lk(mutex_);
+  return local_.Equip(asset, out);
+}
+
+bool CosmeticService::Unequip(CosmeticSlot slot) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return local_.Unequip(slot);
+}
+
+std::string CosmeticService::Equipped(CosmeticSlot slot) const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return local_.Equipped(slot);
+}
+
+bool CosmeticService::SavePreset(const std::string& name) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return wardrobe_.Save(name, local_);
+}
+
+bool CosmeticService::ApplyPreset(const std::string& name) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  CosmeticLoadout loaded;
+  if (!wardrobe_.Load(name, &loaded)) return false;
+  local_ = loaded;
+  return true;
+}
+
+bool CosmeticService::HasPreset(const std::string& name) const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return wardrobe_.Has(name);
+}
+
+std::vector<std::string> CosmeticService::PresetNames() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return wardrobe_.Names();
+}
+
+size_t CosmeticService::SetRemoteLoadout(const std::string& playerId,
+                                         const CosmeticLoadout& loadout) {
+  if (playerId.empty()) return 0;
+  // Ownership has its own lock; check it before taking ours so the two are
+  // never held at once.
+  auto& ownership = CosmeticOwnership::Instance();
+  CosmeticLoadout filtered;
+  u64 notOwned = 0;
+  for (const auto& kv : loadout.slots()) {
+    // Only assets the player provably owns survive; a forged loadout renders
+    // nothing it does not own.
+    if (!ownership.Owns(playerId, kv.second)) {
+      ++notOwned;
+      continue;
+    }
+    CosmeticAsset asset;
+    if (CosmeticRegistry::Instance().Find(kv.second, &asset)) {
+      filtered.Equip(asset);
+    }
+  }
+  std::lock_guard<std::mutex> lk(mutex_);
+  remote_[playerId] = filtered;
+  stats_.skippedNotOwned += notOwned;
+  return filtered.Count();
+}
+
+bool CosmeticService::ClearRemoteLoadout(const std::string& playerId) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return remote_.erase(playerId) > 0;
+}
+
+std::vector<std::string> CosmeticService::RemotePlayers() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  std::vector<std::string> out;
+  out.reserve(remote_.size());
+  for (const auto& kv : remote_) out.push_back(kv.first);
+  return out;
+}
+
+std::vector<CosmeticDrawItem> CosmeticService::ResolveLocked(
+    EntityId entity, const CosmeticLoadout& loadout,
+    const CosmeticSkeletonSource* skel, u64* skippedNoBone) const {
+  std::vector<CosmeticDrawItem> items;
+  if (!skel) return items;
+  for (const auto& asset : loadout.Resolved()) {
+    CosmeticBoneTransform bone;
+    if (!skel->BoneTransform(entity, asset.ResolvedBone(), &bone) ||
+        !bone.valid) {
+      if (skippedNoBone) ++*skippedNoBone;
+      continue;
+    }
+    items.push_back(ComposeAttach(asset, bone, entity));
+  }
+  return items;
+}
+
+std::vector<CosmeticDrawItem> CosmeticService::Resolve(
+    EntityId entity, const CosmeticLoadout& loadout) const {
+  u64 skipped = 0;
+  auto items = ResolveLocked(entity, loadout, skeleton_, &skipped);
+  std::lock_guard<std::mutex> lk(mutex_);
+  stats_.skippedNoBone += skipped;
+  return items;
+}
+
+size_t CosmeticService::PresentLocal(EntityId localPlayer) {
+  // Copy the loadout under the lock, then resolve and submit unlocked: the
+  // seam callback must not run while the script worker waits on this mutex.
+  CosmeticSkeletonSource* skel = skeleton_;
+  CosmeticRenderSeam* seam = seam_;
+  if (!seam || !skel) return 0;
+  CosmeticLoadout snapshot;
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    ++stats_.frames;
+    snapshot = local_;
+  }
+  u64 skipped = 0;
+  const auto items = ResolveLocked(localPlayer, snapshot, skel, &skipped);
+  for (const auto& item : items) seam->SubmitGeometry(item);
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    stats_.submitted += items.size();
+    stats_.skippedNoBone += skipped;
+  }
+  return items.size();
+}
+
+size_t CosmeticService::PresentRemote(const std::string& playerId,
+                                      EntityId entity) {
+  CosmeticSkeletonSource* skel = skeleton_;
+  CosmeticRenderSeam* seam = seam_;
+  if (!seam || !skel) return 0;
+  CosmeticLoadout snapshot;
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (localOnly_) return 0;
+    auto it = remote_.find(playerId);
+    if (it == remote_.end()) return 0;
+    snapshot = it->second;
+  }
+  u64 skipped = 0;
+  const auto items = ResolveLocked(entity, snapshot, skel, &skipped);
+  for (const auto& item : items) seam->SubmitGeometry(item);
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    stats_.submitted += items.size();
+    stats_.skippedNoBone += skipped;
+  }
+  return items.size();
+}
+
+CosmeticStats CosmeticService::stats() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return stats_;
+}
+
+//----------------------------------------------------------------------------
 // Ownership
 //----------------------------------------------------------------------------
 
