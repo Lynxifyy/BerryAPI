@@ -202,6 +202,31 @@ local res = await async.http_get("https://api.example.com/state", 2000)
 the build when the generated files drift from the IDL, so the code and the docs
 cannot disagree.
 
+### Binding the surface to services (`api_bindings.h`)
+
+The table lists what scripts may call; `ScriptApi` is what makes it callable.
+`InstallBindings` walks the generated table and registers one handler per
+function, taking the capability and arity from the spec — a name that is not in
+the table is refused, so an undocumented (and therefore ungated) binding cannot
+be added by accident. The runtime still enforces the capability on every call;
+`ScriptApi` only supplies the implementation.
+
+Two threads are involved, and the split is deliberate. Scripts run on the
+script worker (see `docs/THREADING.md`); the `Renderer`, `Hud` and governor run
+on the render thread. A binding that draws, mutates a widget or reconfigures the
+governor posts a command to a bounded `RenderCommandQueue` and returns
+immediately; the queue is drained on the render thread, once per frame, by the
+`berry:frame` listener (the same event `Engine::OnFrame` emits). A full queue
+drops the newest command and counts it rather than growing without bound, so a
+runaway script cannot exhaust memory. Reads that the render thread publishes —
+screen size and frame time — are answered from atomics, so a script never
+touches render state directly. Widget creation returns a script-side handle at
+once; the real `WidgetId` is filled in when the create command drains, and every
+later call resolves handle to id at drain time so the script's call order is the
+order they execute. Invalid arguments (a non-positive zoom, an out-of-range
+target FPS, an unknown tween property) fail the call instead of silently
+clamping.
+
 ## Client modules
 
 The client-facing modules are services that draw through `Berry::Render`, not

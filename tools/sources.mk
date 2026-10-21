@@ -37,6 +37,7 @@ CORE_SRC := \
   core/script/loader.cpp \
   core/script/async.cpp \
   core/script/url.cpp \
+  core/script/api_bindings.cpp \
   util/logger.cpp \
   util/mem.cpp
 
@@ -71,4 +72,5 @@ TEST_SRC := \
   tests/test_hud.cpp \
   tests/test_governor.cpp \
   tests/test_url.cpp \
-  tests/test_loader.cpp
+  tests/test_loader.cpp \
+  tests/test_api_bindings.cpp

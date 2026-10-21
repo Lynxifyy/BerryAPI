@@ -197,6 +197,9 @@ class BERRY_API Hud {
   const HudStats& stats() const { return stats_; }
   u64 revision() const { return revision_; }
 
+  /// Read-only view of the whole tree, for the inspector and the tests.
+  const std::map<WidgetId, Widget>& widgets() const { return widgets_; }
+
  private:
   WidgetId AllocId();
   void MarkLayoutDirty(WidgetId id);

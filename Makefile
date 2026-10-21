@@ -55,7 +55,7 @@ check-samples: samples/sample_hitmarker.o
 	@rm -f samples/sample_hitmarker.o
 
 test: idl-check check-signer check-sources $(TEST_BINS) build/$(SHARED_NAME) check-samples
-	@for b in build/test_test_math build/test_test_modules build/test_test_net build/test_test_render build/test_test_sample build/test_test_sigscan build/test_test_thread build/test_test_fuzz build/test_test_manifest build/test_test_script build/test_test_reload build/test_test_async build/test_test_idl build/test_test_hud build/test_test_governor build/test_test_url build/test_test_loader; do \
+	@for b in $(TEST_BINS); do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
 	@echo "-- dlopen ABI --"
