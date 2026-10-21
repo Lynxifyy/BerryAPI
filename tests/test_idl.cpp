@@ -36,7 +36,7 @@ static void TestSpecTableWellFormed() {
     CHECK(s.arity >= 0);
     // Fail closed: every generated binding must name a real capability, so the
     // runtime gate can never mistake it for "no capability required".
-    CHECK(s.capability != CapKind::Unknown);
+    CHECK(IsGrantableKind(s.capability));
     CHECK(names.insert(s.name).second);   // no duplicates
     // Names are "<module>.<fn>", lower-case module.
     const std::string full(s.name);

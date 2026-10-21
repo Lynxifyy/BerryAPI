@@ -222,9 +222,12 @@ ScriptValue ScriptBindings::Invoke(ScriptContext& ctx, const std::string& name,
   if (denied) *denied = false;
   for (const auto& e : entries_) {
     if (e.first != name) continue;
-    // Capability gate: a binding whose capability was not granted is denied,
-    // never silently allowed.
-    if (e.second.required.kind != CapKind::Unknown &&
+    // Capability gate. A binding is reachable only when it EXPLICITLY declares
+    // that it needs no capability, or when the script holds the capability it
+    // asks for. An unset requirement (Unknown) is denied: treating "unset" as
+    // "no capability required" is precisely the inversion that let a binding
+    // be left silently unrestricted. NoCap must be named on purpose.
+    if (e.second.required.kind != CapKind::NoCap &&
         !ctx.CanUse(e.second.required)) {
       if (denied) *denied = true;
       return ScriptValue::Nil();

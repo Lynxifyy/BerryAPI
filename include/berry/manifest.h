@@ -31,7 +31,10 @@ namespace Berry {
 //----------------------------------------------------------------------------
 
 enum class CapKind : u32 {
-  Unknown = 0,
+  Unknown = 0,   // unset / absent: NOT a capability-free binding. See NoCap.
+  NoCap,         // explicitly requires no capability (e.g. pure scheduling).
+                 // Declared on purpose so a binding cannot be left ungated by
+                 // accident: the gate denies Unknown and allows only NoCap.
   Network,   // outbound sockets; scope = allowed host/domain (or "*")
   Render,    // draw to the overlay; scope = unused
   FileIO,    // file access; scope = "own-dir" (script data dir) or a path
@@ -47,6 +50,14 @@ enum class CapKind : u32 {
 
 const char* CapKindName(CapKind k);
 CapKind CapKindFromName(const std::string& name);
+
+/// True for a real, grantable capability kind. Unknown (unset) and NoCap
+/// (explicitly capability-free) are both "not grantable", and the two are
+/// deliberately distinct: an unset kind must never be treated as capability-
+/// free, or a forgotten capability would silently become an open binding.
+inline bool IsGrantableKind(CapKind k) {
+  return k != CapKind::Unknown && k != CapKind::NoCap;
+}
 
 /// Normalizes a network capability scope to the bare host it names.
 ///
@@ -68,8 +79,19 @@ struct BERRY_API Capability {
   /// "network:domain=host"). Returns false for an unknown kind (fail closed).
   static bool Parse(const std::string& text, Capability* out);
 
+  /// The explicit "requires no capability" requirement. A binding must name
+  /// this (not an unset Capability) to be reachable without a grant; the gate
+  /// treats Unknown as "deny".
+  static Capability NoCap() {
+    Capability c;
+    c.kind = CapKind::NoCap;
+    c.raw = "nocap";
+    return c;
+  }
+
   /// True when this capability (a GRANT) covers `requested`. A scope of "*"
   /// covers any scope of the same kind; otherwise scopes must match exactly.
+  /// An Unknown kind covers nothing.
   bool Covers(const Capability& requested) const;
 
   /// Canonical text form used in the signed payload.

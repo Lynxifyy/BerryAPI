@@ -27,9 +27,14 @@ const KindRow kKinds[] = {
     {"events", CapKind::Events},     {"audio", CapKind::Audio},
     {"cosmetic", CapKind::Cosmetic},
 };
+// "nocap" is deliberately NOT in the table above: it is a binding REQUIREMENT,
+// never a manifest grant, so a manifest must not be able to write it and a
+// script must never be granted it. It is still nameable for diagnostics.
+const char* kNoCapName = "nocap";
 }  // namespace
 
 const char* CapKindName(CapKind k) {
+  if (k == CapKind::NoCap) return kNoCapName;
   for (const auto& row : kKinds) {
     if (row.kind == k) return row.name;
   }
@@ -95,6 +100,10 @@ bool Capability::Parse(const std::string& text, Capability* out) {
 
 bool Capability::Covers(const Capability& requested) const {
   if (kind != requested.kind) return false;
+  // Neither unset (Unknown) nor capability-free (NoCap) is a grantable
+  // capability, so neither may ever act as a grant: a capability-free binding
+  // is allowed by the gate's explicit NoCap check, never by "covering" it.
+  if (!IsGrantableKind(kind)) return false;
   // A wildcard grant covers any scope of the same kind.
   if (scope == "*") return true;
   // A wildcard REQUEST is a kind-level requirement: "this binding needs some
@@ -137,7 +146,9 @@ bool CapabilitySet::Add(const std::string& text) {
 }
 
 bool CapabilitySet::Add(const Capability& cap) {
-  if (cap.kind == CapKind::Unknown) return false;
+  // Only real, grantable kinds may enter a grant set: an unset kind (Unknown)
+  // would be meaningless and NoCap is a binding requirement, never a grant.
+  if (!IsGrantableKind(cap.kind)) return false;
   const std::string canon = cap.Canonical();
   for (const auto& existing : caps_) {
     if (existing.Canonical() == canon) return false;  // duplicate
