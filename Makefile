@@ -21,6 +21,9 @@ CORE_SRC := \
   core/modules/render_backend.cpp \
   core/modules/services.cpp \
   core/modules/world.cpp \
+  core/modules/hud.cpp \
+  core/modules/input.cpp \
+  core/modules/pvp.cpp \
   core/lifecycle/engine.cpp \
   core/lifecycle/thread.cpp \
   core/net/net.cpp \
@@ -47,7 +50,8 @@ TEST_SRC := \
   tests/test_script.cpp \
   tests/test_reload.cpp \
   tests/test_async.cpp \
-  tests/test_idl.cpp
+  tests/test_idl.cpp \
+  tests/test_hud.cpp
 
 CORE_OBJ := $(CORE_SRC:.cpp=.o)
 TEST_OBJ := $(TEST_SRC:.cpp=.o)
@@ -83,7 +87,7 @@ check-samples: samples/sample_hitmarker.o
 	@rm -f samples/sample_hitmarker.o
 
 test: idl-check $(TEST_BINS) build/$(SHARED_NAME) check-samples
-	@for b in build/test_test_math build/test_test_modules build/test_test_net build/test_test_render build/test_test_sample build/test_test_sigscan build/test_test_thread build/test_test_fuzz build/test_test_manifest build/test_test_script build/test_test_reload build/test_test_async build/test_test_idl; do \
+	@for b in build/test_test_math build/test_test_modules build/test_test_net build/test_test_render build/test_test_sample build/test_test_sigscan build/test_test_thread build/test_test_fuzz build/test_test_manifest build/test_test_script build/test_test_reload build/test_test_async build/test_test_idl build/test_test_hud; do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
 	@echo "-- dlopen ABI --"
