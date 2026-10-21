@@ -66,7 +66,20 @@ echo "build-android: ABI=$ABI out=$OUT"
 
 COMMON_FLAGS=(-std=c++17 -O2 -fPIC -fvisibility=hidden -fno-exceptions -fno-rtti
               "-DBERRY_BUILD_SHARED" "-DBERRY_PLATFORM_ANDROID=1"
-              "-I$ROOT/include" "-I$ROOT/third_party/ed25519")
+              "-I$ROOT/include" "-I$ROOT/third_party/ed25519"
+              "-I$ROOT/third_party/luau/Common/include"
+              "-I$ROOT/third_party/luau/Ast/include"
+              "-I$ROOT/third_party/luau/Compiler/include"
+              "-I$ROOT/third_party/luau/VM/include")
+
+# Vendored Luau is upstream code that is warning-clean only under its own flag
+# set; it is compiled with -w and its own include roots, and it does not use C++
+# exceptions (it uses setjmp/longjmp), so -fno-exceptions is fine.
+LUAU_FLAGS=(-std=c++17 -O2 -fPIC -fvisibility=hidden -w
+            "-I$ROOT/third_party/luau/Common/include"
+            "-I$ROOT/third_party/luau/Ast/include"
+            "-I$ROOT/third_party/luau/Compiler/include"
+            "-I$ROOT/third_party/luau/VM/include")
 
 # Vendored Ed25519 is C99, so it is compiled by $CC with its own flags and no
 # seed source (key generation is caller-supplied, as on the host build).
@@ -141,19 +154,32 @@ read_sources() {
 mapfile -t SRCS < <(read_sources CORE_SRC)
 mapfile -t ANDROID_SRCS < <(read_sources ANDROID_EXTRA_SRC)
 mapfile -t C_SRCS < <(read_sources ED25519_SRC)
+# LUAU_SRC is a variable reference in sources.mk, so read the three concrete
+# lists it is built from; the awk reader above does not expand Make variables.
+mapfile -t LUAU_SRCS < <(read_sources LUAU_AST_SRC; read_sources LUAU_COMPILER_SRC; read_sources LUAU_VM_SRC)
 SRCS+=(${ANDROID_SRCS[@]+"${ANDROID_SRCS[@]}"})
 
 if [[ ${#SRCS[@]} -eq 0 ]]; then
   echo "build-android: no sources read from tools/sources.mk" >&2
   exit 2
 fi
-echo "build-android: ${#SRCS[@]} C++ units and ${#C_SRCS[@]} C units from tools/sources.mk"
+if [[ ${#LUAU_SRCS[@]} -eq 0 ]]; then
+  echo "build-android: LUAU_SRC empty in tools/sources.mk" >&2
+  exit 2
+fi
+echo "build-android: ${#SRCS[@]} C++ units, ${#C_SRCS[@]} C units and ${#LUAU_SRCS[@]} Luau units from tools/sources.mk"
 
 OBJS=()
 for s in "${SRCS[@]}"; do
   obj="$OUT/${s//\//_}.o"
   echo "  CXX $s"
   "$CXX" "${COMMON_FLAGS[@]}" -c "$ROOT/$s" -o "$obj"
+  OBJS+=("$obj")
+done
+for s in "${LUAU_SRCS[@]}"; do
+  obj="$OUT/${s//\//_}.o"
+  echo "  LUAU $s"
+  "$CXX" "${LUAU_FLAGS[@]}" -c "$ROOT/$s" -o "$obj"
   OBJS+=("$obj")
 done
 for s in "${C_SRCS[@]}"; do

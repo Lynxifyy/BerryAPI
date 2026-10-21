@@ -74,3 +74,65 @@ TEST_SRC := \
   tests/test_url.cpp \
   tests/test_loader.cpp \
   tests/test_api_bindings.cpp
+# Vendored Luau (MIT). See third_party/luau/PROVENANCE.md for the pinned
+# version and why these units and not the CLI. Compiled with -w because upstream
+# is only warning-clean under its own flag set; our code stays -Wall -Wextra clean.
+LUAU_AST_SRC := \
+  third_party/luau/Ast/src/Ast.cpp \
+  third_party/luau/Ast/src/Confusables.cpp \
+  third_party/luau/Ast/src/Lexer.cpp \
+  third_party/luau/Ast/src/Location.cpp \
+  third_party/luau/Ast/src/Parser.cpp \
+  third_party/luau/Ast/src/StringUtils.cpp \
+  third_party/luau/Ast/src/TimeTrace.cpp
+
+LUAU_COMPILER_SRC := \
+  third_party/luau/Compiler/src/BuiltinFolding.cpp \
+  third_party/luau/Compiler/src/Builtins.cpp \
+  third_party/luau/Compiler/src/BytecodeBuilder.cpp \
+  third_party/luau/Compiler/src/Compiler.cpp \
+  third_party/luau/Compiler/src/ConstantFolding.cpp \
+  third_party/luau/Compiler/src/CostModel.cpp \
+  third_party/luau/Compiler/src/TableShape.cpp \
+  third_party/luau/Compiler/src/Types.cpp \
+  third_party/luau/Compiler/src/ValueTracking.cpp \
+  third_party/luau/Compiler/src/lcode.cpp
+
+LUAU_VM_SRC := \
+  third_party/luau/VM/src/lapi.cpp \
+  third_party/luau/VM/src/laux.cpp \
+  third_party/luau/VM/src/lbaselib.cpp \
+  third_party/luau/VM/src/lbitlib.cpp \
+  third_party/luau/VM/src/lbuffer.cpp \
+  third_party/luau/VM/src/lbuflib.cpp \
+  third_party/luau/VM/src/lbuiltins.cpp \
+  third_party/luau/VM/src/lcorolib.cpp \
+  third_party/luau/VM/src/ldblib.cpp \
+  third_party/luau/VM/src/ldebug.cpp \
+  third_party/luau/VM/src/ldo.cpp \
+  third_party/luau/VM/src/lfunc.cpp \
+  third_party/luau/VM/src/lgc.cpp \
+  third_party/luau/VM/src/lgcdebug.cpp \
+  third_party/luau/VM/src/linit.cpp \
+  third_party/luau/VM/src/lmathlib.cpp \
+  third_party/luau/VM/src/lmem.cpp \
+  third_party/luau/VM/src/lnumprint.cpp \
+  third_party/luau/VM/src/lobject.cpp \
+  third_party/luau/VM/src/loslib.cpp \
+  third_party/luau/VM/src/lperf.cpp \
+  third_party/luau/VM/src/lstate.cpp \
+  third_party/luau/VM/src/lstring.cpp \
+  third_party/luau/VM/src/lstrlib.cpp \
+  third_party/luau/VM/src/ltable.cpp \
+  third_party/luau/VM/src/ltablib.cpp \
+  third_party/luau/VM/src/ltm.cpp \
+  third_party/luau/VM/src/ludata.cpp \
+  third_party/luau/VM/src/lutf8lib.cpp \
+  third_party/luau/VM/src/lvmexecute.cpp \
+  third_party/luau/VM/src/lvmload.cpp \
+  third_party/luau/VM/src/lvmutils.cpp
+
+LUAU_SRC := $(LUAU_AST_SRC) $(LUAU_COMPILER_SRC) $(LUAU_VM_SRC)
+
+# Include roots Luau expects (Common is header-only).
+LUAU_INCLUDES := -Ithird_party/luau/Common/include -Ithird_party/luau/Ast/include -Ithird_party/luau/Compiler/include -Ithird_party/luau/VM/include
