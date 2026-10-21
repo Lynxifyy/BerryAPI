@@ -513,7 +513,7 @@ size_t CosmeticService::PresentRemote(const std::string& playerId,
   CosmeticLoadout snapshot;
   {
     std::lock_guard<std::mutex> lk(mutex_);
-    if (localOnly_) return 0;
+    if (localOnly_.load()) return 0;
     auto it = remote_.find(playerId);
     if (it == remote_.end()) return 0;
     snapshot = it->second;

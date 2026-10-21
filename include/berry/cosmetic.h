@@ -26,6 +26,7 @@
 #include "berry/math.h"
 #include "berry/game.h"
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -348,8 +349,9 @@ class BERRY_API CosmeticService {
   std::vector<std::string> RemotePlayers() const;
 
   /// When false, remote loadouts are ignored and only the local player renders.
-  bool localOnly() const { return localOnly_; }
-  void SetLocalOnly(bool v) { localOnly_ = v; }
+  /// Atomic: flipped from the script worker, read on the render thread.
+  bool localOnly() const { return localOnly_.load(); }
+  void SetLocalOnly(bool v) { localOnly_.store(v); }
 
   //--- resolution + present -------------------------------------------------
   /// Resolves a loadout into draw items for `entity`, using the skeleton seam.
@@ -379,7 +381,7 @@ class BERRY_API CosmeticService {
   CosmeticLoadout local_;
   CosmeticWardrobe wardrobe_;
   std::map<std::string, CosmeticLoadout> remote_;
-  bool localOnly_ = true;
+  std::atomic<bool> localOnly_{true};
   mutable CosmeticStats stats_;
 };
 
