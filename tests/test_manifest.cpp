@@ -308,6 +308,202 @@ static void TestStore() {
   store.Clear();
 }
 
+
+//----------------------------------------------------------------------------
+// Ed25519 signing + the source binding.
+//----------------------------------------------------------------------------
+
+// RFC 8032 §7.1 test vector 1: seed, public key and the empty-message
+// signature. Pins the vendored implementation to the standard.
+static const char* kRfcSeed1 =
+    "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+static const char* kRfcPub1 =
+    "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+static const char* kRfcSig1 =
+    "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb882159"
+    "0a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b";
+
+static void TestEd25519Vectors() {
+  std::string seed, pub, sec;
+  CHECK(crypto::FromHex(kRfcSeed1, &seed, 32));
+  CHECK(crypto::Ed25519KeypairFromSeed(seed, &pub, &sec));
+  CHECK(sec.size() == 64);
+  CHECK(crypto::ToHexLower(pub) == kRfcPub1);
+
+  std::string sig;
+  CHECK(crypto::Ed25519Sign("", sec, &sig));
+  CHECK(crypto::ToHexLower(sig) == kRfcSig1);
+
+  // Verify accepts the vector, rejects a flipped bit, and refuses bad sizes.
+  CHECK(crypto::Ed25519Verify("", sig, pub));
+  std::string tampered = sig;
+  tampered[0] = (char)(tampered[0] ^ 1);
+  CHECK(!crypto::Ed25519Verify("", tampered, pub));
+  CHECK(!crypto::Ed25519Verify("x", sig, pub));
+  CHECK(!crypto::Ed25519Verify("", sig.substr(0, 63), pub));
+  CHECK(!crypto::Ed25519Verify("", sig, pub.substr(0, 31)));
+  CHECK(!crypto::Ed25519Sign("", sec.substr(0, 63), &sig));
+
+  // A malformed hex public key never verifies.
+  std::string pk;
+  CHECK(!crypto::Ed25519PublicKeyFromHex("not-hex", &pk));
+  CHECK(!crypto::Ed25519PublicKeyFromHex(std::string(kRfcPub1) + "00", &pk));
+  CHECK(crypto::Ed25519PublicKeyFromHex(kRfcPub1, &pk));
+}
+
+static void TestEd25519Manifest() {
+  std::string seed, pub, sec;
+  CHECK(crypto::FromHex(kRfcSeed1, &seed, 32));
+  CHECK(crypto::Ed25519KeypairFromSeed(seed, &pub, &sec));
+  const std::string pubHex = crypto::ToHexLower(pub);
+
+  ScriptManifest m;
+  ManifestError err = ManifestError::Ok;
+  CHECK(ScriptManifest::Parse(kManifestJson, &m, &err, nullptr));
+  m.sourceSha256 = ScriptManifest::SourceHash("func on_load\nend\n");
+
+  // Signing fills the algorithm and the payload hash, and verification needs
+  // no secret at all.
+  CHECK(m.SignEd25519(sec));
+  CHECK(m.signatureAlgo == "ed25519");
+  CHECK(m.signature.size() == 128);
+  CHECK(m.payloadHash == m.ComputeHash());
+  CHECK(m.VerifyEd25519(pubHex, &err));
+  CHECK(err == ManifestError::Ok);
+
+  // A different key is rejected.
+  std::string otherPub, otherSec, otherSeed = std::string(32, 'z');
+  CHECK(crypto::Ed25519KeypairFromSeed(otherSeed, &otherPub, &otherSec));
+  CHECK(!m.VerifyEd25519(crypto::ToHexLower(otherPub), &err));
+  CHECK(err == ManifestError::BadSignature);
+
+  // The HMAC verifier must not accept an Ed25519 signature, and vice versa:
+  // an algorithm confusion here would let a forged HMAC pass as Ed25519.
+  CHECK(!m.Verify("deadbeef", &err));
+  CHECK(err == ManifestError::UnsupportedAlgorithm);
+
+  ScriptManifest hmac;
+  CHECK(ScriptManifest::Parse(kManifestJson, &hmac, &err, nullptr));
+  hmac.sourceSha256 = ScriptManifest::SourceHash("x");
+  CHECK(hmac.Sign("shared-secret"));
+  CHECK(!hmac.VerifyEd25519(pubHex, &err));
+  CHECK(err == ManifestError::UnsupportedAlgorithm);
+
+  // A widened capability list invalidates both the hash and the signature.
+  ScriptManifest widened = m;
+  CapabilitySet caps;
+  CHECK(caps.Add("render"));
+  CHECK(caps.Add("hud"));
+  CHECK(caps.Add("input"));
+  CHECK(caps.Add("network:*"));
+  widened.capabilities = caps;
+  CHECK(!widened.VerifyEd25519(pubHex, &err));
+  CHECK(err == ManifestError::HashMismatch);
+
+  // Swapping the source while keeping the manifest fails the payload hash:
+  // this is the whole point of binding source_sha256.
+  ScriptManifest swapped = m;
+  swapped.sourceSha256 = ScriptManifest::SourceHash("func evil\nend\n");
+  CHECK(!swapped.VerifyEd25519(pubHex, &err));
+  CHECK(err == ManifestError::HashMismatch);
+
+  // The source binding is mandatory on the Ed25519 path: a manifest that signs
+  // only a capability list proves nothing about the code.
+  ScriptManifest unsignedCode = m;
+  unsignedCode.sourceSha256.clear();
+  CHECK(unsignedCode.SignEd25519(sec));
+  CHECK(!unsignedCode.VerifyEd25519(pubHex, &err));
+  CHECK(err == ManifestError::MissingSourceHash);
+  // ...but can still be checked when the caller explicitly waives it.
+  CHECK(unsignedCode.VerifyEd25519(pubHex, &err, /*requireSourceHash=*/false));
+
+  // An unsigned manifest reports Unsigned, never a signature failure.
+  ScriptManifest blank;
+  CHECK(ScriptManifest::Parse(kManifestJson, &blank, &err, nullptr));
+  CHECK(!blank.VerifyEd25519(pubHex, &err));
+  CHECK(err == ManifestError::Unsigned);
+
+  // Signature must be valid hex of the right length.
+  ScriptManifest badSig = m;
+  badSig.signature = std::string("zz") + badSig.signature.substr(2);
+  CHECK(!badSig.VerifyEd25519(pubHex, &err));
+  CHECK(err == ManifestError::BadSignature);
+}
+
+static void TestTrustAnchor() {
+  std::string seed, pub, sec;
+  CHECK(crypto::FromHex(kRfcSeed1, &seed, 32));
+  CHECK(crypto::Ed25519KeypairFromSeed(seed, &pub, &sec));
+  const std::string pubHex = crypto::ToHexLower(pub);
+
+  // An anchor is only usable when its key is well formed for its kind.
+  CHECK(TrustAnchor::Ed25519Key(pubHex).Valid());
+  CHECK(!TrustAnchor::Ed25519Key("short").Valid());
+  CHECK(!TrustAnchor::Ed25519Key("").Valid());
+  CHECK(TrustAnchor::HmacSecret("s").Valid());
+  CHECK(!TrustAnchor::HmacSecret("").Valid());
+
+  ScriptManifest m;
+  CHECK(ScriptManifest::Parse(kManifestJson, &m, nullptr, nullptr));
+  m.sourceSha256 = ScriptManifest::SourceHash("src");
+  CHECK(m.SignEd25519(sec));
+
+  ManifestError err = ManifestError::Ok;
+  CHECK(TrustAnchor::Ed25519Key(pubHex).Verify(m, &err));
+  CHECK(err == ManifestError::Ok);
+
+  // A bad anchor fails closed rather than skipping the check.
+  CHECK(!TrustAnchor::Ed25519Key("garbage").Verify(m, &err));
+  CHECK(err == ManifestError::BadSignature);
+
+  // The anchor kind must match the signature algorithm.
+  CHECK(!TrustAnchor::HmacSecret("anything").Verify(m, &err));
+  CHECK(err == ManifestError::UnsupportedAlgorithm);
+
+  ScriptManifest hmacManifest;
+  CHECK(ScriptManifest::Parse(kManifestJson, &hmacManifest, nullptr, nullptr));
+  hmacManifest.sourceSha256 = ScriptManifest::SourceHash("src");
+  CHECK(hmacManifest.Sign("dev-secret"));
+  CHECK(TrustAnchor::HmacSecret("dev-secret").Verify(hmacManifest, &err));
+  CHECK(err == ManifestError::Ok);
+  CHECK(!TrustAnchor::HmacSecret("wrong").Verify(hmacManifest, &err));
+  CHECK(!TrustAnchor::Ed25519Key(pubHex).Verify(hmacManifest, &err));
+  CHECK(err == ManifestError::UnsupportedAlgorithm);
+}
+
+static void TestStoreRequiresVerifiedSource() {
+  std::string seed, pub, sec;
+  CHECK(crypto::FromHex(kRfcSeed1, &seed, 32));
+  CHECK(crypto::Ed25519KeypairFromSeed(seed, &pub, &sec));
+  const TrustAnchor anchor = TrustAnchor::Ed25519Key(crypto::ToHexLower(pub));
+
+  ManifestStore& store = ManifestStore::Instance();
+  store.Clear();
+
+  ScriptManifest m;
+  CHECK(ScriptManifest::Parse(kManifestJson, &m, nullptr, nullptr));
+  m.sourceSha256 = ScriptManifest::SourceHash("code");
+  CHECK(m.SignEd25519(sec));
+
+  ManifestError err = ManifestError::Ok;
+  CHECK(store.Register(m, anchor, &err));
+  CHECK(err == ManifestError::Ok);
+
+  // Registering through the wrong anchor is refused.
+  ScriptManifest other;
+  CHECK(ScriptManifest::Parse(
+      "{\"name\":\"other\",\"version\":\"1.0.0\",\"entry\":\"m.luau\","
+      "\"capabilities\":[\"render\"]}", &other, nullptr, nullptr));
+  other.sourceSha256 = ScriptManifest::SourceHash("code");
+  CHECK(other.SignEd25519(sec));
+  CHECK(!store.Register(other, TrustAnchor::HmacSecret("nope"), &err));
+  CHECK(err == ManifestError::UnsupportedAlgorithm);
+  CHECK(!store.Register(other, TrustAnchor::Ed25519Key("bad-key"), &err));
+  CHECK(err == ManifestError::BadSignature);
+
+  store.Clear();
+}
+
 int main() {
   TestCryptoVectors();
   TestCapabilities();
@@ -315,6 +511,10 @@ int main() {
   TestEntryPaths();
   TestSigning();
   TestStore();
+  TestEd25519Vectors();
+  TestEd25519Manifest();
+  TestTrustAnchor();
+  TestStoreRequiresVerifiedSource();
   if (g_fail == 0) printf("test_manifest: ALL OK\n");
   return g_fail;
 }

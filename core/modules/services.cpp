@@ -24,10 +24,12 @@ class CombatModule : public BerryModule {
   u32 Capabilities() const override { return kCapCombat; }
 
   bool Attach(Engine& e) override {
+    (void)e;
     combat_->Attach(nullptr);
     return true;
   }
   void Detach(Engine& e) override {
+    (void)e;
     combat_->Detach();
   }
 
@@ -50,10 +52,12 @@ class RenderModule : public BerryModule {
   u32 Capabilities() const override { return kCapRender | kCapWorld; }
 
   bool Attach(Engine& e) override {
+    (void)e;
     renderer_->Attach(nullptr);
     return true;
   }
   void Detach(Engine& e) override {
+    (void)e;
     renderer_->Detach();
   }
 
@@ -73,10 +77,12 @@ class NetworkModule : public BerryModule {
   u32 Capabilities() const override { return kCapNetwork; }
 
   bool Attach(Engine& e) override {
+    (void)e;
     Log::Info("Berry::Network attached");
     return true;
   }
   void Detach(Engine& e) override {
+    (void)e;
     Log::Info("Berry::Network detached");
   }
 };

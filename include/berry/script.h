@@ -28,6 +28,7 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -40,26 +41,50 @@ namespace Berry {
 // Values crossing the VM boundary.
 //----------------------------------------------------------------------------
 
+struct ScriptValue;
+
+/// A scripting table: an ordered, string-keyed map, with reference semantics
+/// (copies share the same table, exactly as a Luau table or a JS object would).
+/// Ordered so display, equality-by-content and the hot-reload snapshot are
+/// byte-stable.
+using ScriptTable = std::map<std::string, ScriptValue>;
+
 struct BERRY_API ScriptValue {
-  enum class Type : u8 { Nil, Bool, Number, String };
+  enum class Type : u8 { Nil, Bool, Number, String, Table };
 
   Type type = Type::Nil;
   bool boolean = false;
   f64 number = 0;
   std::string string;
+  /// Set when `type == Type::Table`. Shared so a table has reference
+  /// semantics; null for every other type.
+  std::shared_ptr<ScriptTable> table;
 
   ScriptValue() = default;
   static ScriptValue Nil() { return ScriptValue(); }
   static ScriptValue Bool(bool v);
   static ScriptValue Num(f64 v);
   static ScriptValue Str(std::string v);
+  /// Wraps a table, taking ownership of its contents.
+  static ScriptValue Tbl(ScriptTable t);
 
   bool IsNil() const { return type == Type::Nil; }
   bool IsBool() const { return type == Type::Bool; }
   bool IsNumber() const { return type == Type::Number; }
   bool IsString() const { return type == Type::String; }
+  bool IsTable() const { return type == Type::Table; }
 
-  /// Truthiness: nil and false are false; 0 is false; "" is false.
+  /// The table payload, or null when this is not a table.
+  const ScriptTable* AsTable() const {
+    return type == Type::Table ? table.get() : nullptr;
+  }
+
+  /// Field lookup on a table. Returns null when this is not a table or the key
+  /// is absent, so callers can fail closed.
+  const ScriptValue* Field(const char* key) const;
+
+  /// Truthiness: nil and false are false; 0 is false; "" is false. A table is
+  /// always truthy (an empty table included), matching Luau.
   bool Truthy() const;
   f64 AsNumber() const;
   const std::string& AsString() const;
@@ -67,6 +92,8 @@ struct BERRY_API ScriptValue {
   /// Human-readable form used in error messages and the REPL.
   std::string ToDisplay() const;
 
+  /// Equality. Tables compare by identity (like Luau tables), never by
+  /// content, so a self-referential table cannot recurse.
   bool operator==(const ScriptValue& o) const;
   bool operator!=(const ScriptValue& o) const { return !(*this == o); }
 };
@@ -148,6 +175,10 @@ class BERRY_API ScriptBindings {
 
   size_t Count() const;
   void Clear();
+
+  /// Registered binding names, in registration order. Used by a VM that must
+  /// expose the bindings to scripts under their canonical names.
+  std::vector<std::string> Names() const;
 
  private:
   struct Entry {
@@ -288,6 +319,13 @@ class BERRY_API IScriptVm {
 /// exists so the whole runtime is exercisable with no game and no third-party
 /// engine. On device, Luau/QuickJS-ng are plugged in behind this same seam.
 BERRY_API IScriptVm* CreateReferenceVm();
+
+/// Creates the Luau VM (the device backend). It speaks real Luau: scripts
+/// return a table of exported functions, bindings are exposed as globals under
+/// their IDL names (render.draw_text), and budgets are enforced through Luau's
+/// safepoint interrupt plus a memory-capping allocator. Sandboxed: no require,
+/// dofile, loadstring, os filesystem/process calls or debug library.
+BERRY_API IScriptVm* CreateLuauVm();
 
 //----------------------------------------------------------------------------
 // Script host — one script, one VM, one grant.

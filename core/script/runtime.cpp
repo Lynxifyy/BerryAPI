@@ -36,12 +36,26 @@ ScriptValue ScriptValue::Str(std::string v) {
   return s;
 }
 
+ScriptValue ScriptValue::Tbl(ScriptTable t) {
+  ScriptValue s;
+  s.type = Type::Table;
+  s.table = std::make_shared<ScriptTable>(std::move(t));
+  return s;
+}
+
+const ScriptValue* ScriptValue::Field(const char* key) const {
+  if (type != Type::Table || !table || !key) return nullptr;
+  auto it = table->find(key);
+  return it == table->end() ? nullptr : &it->second;
+}
+
 bool ScriptValue::Truthy() const {
   switch (type) {
     case Type::Nil: return false;
     case Type::Bool: return boolean;
     case Type::Number: return number != 0;
     case Type::String: return !string.empty();
+    case Type::Table: return true;   // an empty table is truthy, as in Luau
   }
   return false;
 }
@@ -58,6 +72,7 @@ f64 ScriptValue::AsNumber() const {
       return 0;
     }
     case Type::Nil: return 0;
+    case Type::Table: return 0;   // tables have no numeric value
   }
   return 0;
 }
@@ -84,6 +99,22 @@ std::string ScriptValue::ToDisplay() const {
       return buf;
     }
     case Type::String: return string;
+    case Type::Table: {
+      if (!table) return "{}";
+      // Deterministic key order (std::map) so the form is stable in errors,
+      // the REPL and the serialized snapshot.
+      std::string out = "{";
+      bool first = true;
+      for (const auto& kv : *table) {
+        if (!first) out += ", ";
+        first = false;
+        out += kv.first;
+        out += " = ";
+        out += kv.second.ToDisplay();
+      }
+      out += "}";
+      return out;
+    }
   }
   return "";
 }
@@ -102,6 +133,9 @@ bool ScriptValue::operator==(const ScriptValue& o) const {
     case Type::Bool: return boolean == o.boolean;
     case Type::Number: return number == o.number;
     case Type::String: return string == o.string;
+    // Reference equality, like Luau tables: comparing by content could recurse
+    // forever on a self-referential table.
+    case Type::Table: return table == o.table;
   }
   return false;
 }
@@ -206,6 +240,13 @@ ScriptValue ScriptBindings::Invoke(ScriptContext& ctx, const std::string& name,
 }
 
 size_t ScriptBindings::Count() const { return entries_.size(); }
+
+std::vector<std::string> ScriptBindings::Names() const {
+  std::vector<std::string> names;
+  names.reserve(entries_.size());
+  for (const auto& e : entries_) names.push_back(e.first);
+  return names;
+}
 
 void ScriptBindings::Clear() { entries_.clear(); }
 

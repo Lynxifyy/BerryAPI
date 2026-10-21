@@ -34,6 +34,7 @@
 
 #include "berry/script.h"
 #include "berry/logger.h"
+#include "berry/value_codec.h"
 
 #include <algorithm>
 #include <cctype>
@@ -50,6 +51,7 @@ struct Insn {
   enum class Op {
     PushNil, PushBool, PushNum, PushStr,
     Pop, Dup, Load, Store,
+    NewTable, Put, Get,
     Add, Sub, Mul, Div, Mod, Neg, Not,
     Eq, Ne, Lt, Le, Gt, Ge, And, Or,
     Jmp, Jz, Jnz,
@@ -189,6 +191,11 @@ class RefVm final : public IScriptVm {
   bool suspended() const override { return suspended_; }
 
   bool Resume(const ScriptValue& value, ScriptError* err) override {
+    // A resume cannot fail here: the value is handed to the suspended native
+    // instruction on the next Step, and any error from that surfaces as a Step
+    // status. The parameter stays in the signature so the interface is uniform
+    // across VM implementations.
+    (void)err;
     if (!suspended_) return false;
     suspended_ = false;
     // The resume value is delivered when execution next reaches the suspended
@@ -221,7 +228,8 @@ class RefVm final : public IScriptVm {
   size_t MemoryUsed() const override {
     size_t bytes = 0;
     for (const auto& kv : globals_) {
-      bytes += kv.first.size() + kv.second.string.size() + sizeof(ScriptValue);
+      bytes += kv.first.size() + sizeof(ScriptValue);
+      bytes += ValueCodec::Bytes(kv.second);
     }
     return bytes;
   }
@@ -233,39 +241,31 @@ class RefVm final : public IScriptVm {
   void ClearInterrupt() override { interrupt_ = false; }
 
   std::string SerializeState() const override {
-    // Deterministic key order (std::map) so the snapshot is byte-stable.
+    // Deterministic key order (std::map) so the snapshot is byte-stable. The
+    // body is a single length-prefixed table, so string values (and keys) that
+    // contain newlines round-trip exactly.
     std::ostringstream os;
-    os << "berry-ref-state-v1\n";
-    std::map<std::string, ScriptValue> ordered(globals_.begin(), globals_.end());
-    for (const auto& kv : ordered) {
-      os << kv.first << "=" << EncodeValue(kv.second) << "\n";
-    }
+    os << "berry-ref-state-v2\n";
+    ScriptTable body;
+    for (const auto& kv : globals_) body[kv.first] = kv.second;
+    os << ValueCodec::Encode(ScriptValue::Tbl(std::move(body)));
     return os.str();
   }
 
   bool RestoreState(const std::string& state, ScriptError* err) override {
-    std::istringstream is(state);
-    std::string header;
-    if (!std::getline(is, header) || header != "berry-ref-state-v1") {
+    const std::string header = "berry-ref-state-v2\n";
+    if (state.compare(0, header.size(), header) != 0) {
       if (err) *err = ScriptError::Make("bad state header", chunk_, 0);
       return false;
     }
-    std::unordered_map<std::string, ScriptValue> restored;
-    std::string line;
-    while (std::getline(is, line)) {
-      if (line.empty()) continue;
-      size_t eq = line.find('=');
-      if (eq == std::string::npos) {
-        if (err) *err = ScriptError::Make("bad state line: " + line, chunk_, 0);
-        return false;
-      }
-      ScriptValue v;
-      if (!DecodeValue(line.substr(eq + 1), &v)) {
-        if (err) *err = ScriptError::Make("bad state value: " + line, chunk_, 0);
-        return false;
-      }
-      restored[line.substr(0, eq)] = v;
+    ScriptValue root;
+    size_t pos = header.size();
+    if (!ValueCodec::DecodeAt(state, &pos, &root) || !root.IsTable() || !root.table) {
+      if (err) *err = ScriptError::Make("bad state body", chunk_, 0);
+      return false;
     }
+    std::unordered_map<std::string, ScriptValue> restored(
+        root.table->begin(), root.table->end());
     globals_ = std::move(restored);
     return true;
   }
@@ -282,39 +282,8 @@ class RefVm final : public IScriptVm {
     return 0;
   }
 
-  static std::string EncodeValue(const ScriptValue& v) {
-    switch (v.type) {
-      case ScriptValue::Type::Nil: return "nil";
-      case ScriptValue::Type::Bool: return v.boolean ? "true" : "false";
-      case ScriptValue::Type::Number: return "n:" + v.ToDisplay();
-      case ScriptValue::Type::String: {
-        // Length-prefixed so embedded newlines/commas survive round-trip.
-        return "s:" + std::to_string(v.string.size()) + ":" + v.string;
-      }
-    }
-    return "nil";
-  }
-
-  static bool DecodeValue(const std::string& s, ScriptValue* out) {
-    if (s == "nil") { *out = ScriptValue::Nil(); return true; }
-    if (s == "true") { *out = ScriptValue::Bool(true); return true; }
-    if (s == "false") { *out = ScriptValue::Bool(false); return true; }
-    if (s.rfind("n:", 0) == 0) {
-      *out = ScriptValue::Num(std::strtod(s.c_str() + 2, nullptr));
-      return true;
-    }
-    if (s.rfind("s:", 0) == 0) {
-      size_t colon = s.find(':', 2);
-      if (colon == std::string::npos) return false;
-      size_t len = (size_t)std::strtoull(s.c_str() + 2, nullptr, 10);
-      std::string body = s.substr(colon + 1);
-      if (body.size() != len) return false;
-      *out = ScriptValue::Str(body);
-      return true;
-    }
-    return false;
-  }
-
+  /// Recursive byte estimate for one value, so a table counts against the
+  /// memory budget instead of hiding behind a shared pointer.
   //----------------------------------------------------------------------------
   // Assembler
   //----------------------------------------------------------------------------
@@ -488,6 +457,9 @@ class RefVm final : public IScriptVm {
         }
       } else if (op == "pop") { insn.op = Insn::Op::Pop; }
       else if (op == "dup") { insn.op = Insn::Op::Dup; }
+      else if (op == "newtable") { insn.op = Insn::Op::NewTable; }
+      else if (op == "put") { if (!need(2, "key")) return false; insn.op = Insn::Op::Put; insn.name = toks[1]; }
+      else if (op == "get") { if (!need(2, "key")) return false; insn.op = Insn::Op::Get; insn.name = toks[1]; }
       else if (op == "load") { if (!need(2, "name")) return false; insn.op = Insn::Op::Load; insn.name = toks[1]; }
       else if (op == "store") { if (!need(2, "name")) return false; insn.op = Insn::Op::Store; insn.name = toks[1]; }
       else if (op == "add") { insn.op = Insn::Op::Add; }
@@ -653,6 +625,38 @@ class RefVm final : public IScriptVm {
       case Insn::Op::Not: {
         if (stack_.empty()) return Underflow(err);
         stack_.back() = ScriptValue::Bool(!stack_.back().Truthy());
+        ++pc_;
+        break;
+      }
+      case Insn::Op::NewTable: {
+        stack_.push_back(ScriptValue::Tbl(ScriptTable{}));
+        ++pc_;
+        break;
+      }
+      case Insn::Op::Put: {
+        // Stack layout: [ ... table, value ] -> sets table[key] = value and
+        // leaves the table on top, so fields can be chained.
+        if (stack_.size() < 2) return Underflow(err);
+        ScriptValue value = stack_.back();
+        stack_.pop_back();
+        ScriptValue& tbl = stack_.back();
+        if (!tbl.IsTable() || !tbl.table) {
+          if (err) *err = ScriptError::Make("put on a non-table value", chunk_, in.line);
+          Abort();
+          return ScriptStatus::Error;
+        }
+        (*tbl.table)[in.name] = std::move(value);
+        ++pc_;
+        break;
+      }
+      case Insn::Op::Get: {
+        if (stack_.empty()) return Underflow(err);
+        ScriptValue& tbl = stack_.back();
+        // Reading a field of a non-table (or a missing key) yields nil rather
+        // than faulting, matching table semantics in Luau.
+        const ScriptValue* f = tbl.Field(in.name.c_str());
+        ScriptValue out = f ? *f : ScriptValue::Nil();
+        stack_.back() = std::move(out);
         ++pc_;
         break;
       }
