@@ -41,6 +41,12 @@ make lib             # builds build/libBerryAPI.so
   generator self-test and fails when the generated files drift.
 - Scripts are capability-gated per call and budgeted per invocation; a fault
   puts the host in `Faulted` and it refuses further calls until reload.
+- The capability gate fails closed. A binding's requirement defaults to
+  `CapKind::Unknown`, which is **not** a grant and **not** grantable; a binding
+  that needs no capability must declare `Capability::NoCap()` (the IDL
+  `nocap`). `CapabilitySet::Add`/`Covers` reject non-grantable kinds, so
+  "author forgot to declare a capability" can never read as "no capability".
+  `test_idl` asserts no binding is capability-free by accident.
 - The async layer resumes on the script worker thread; keep the scheduler's
   predicate evaluation outside its lock.
 

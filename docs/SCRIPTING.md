@@ -284,6 +284,21 @@ by the bone and rotates it by the bone's yaw so a cape stays behind the back as
 the player turns. Nothing is drawn for a remote player until a verified loadout
 arrives.
 
+Attached assets follow the player's motion. A `CosmeticAsset` carries a `trail`
+factor (0 rigid .. 1 fully slack); `ComposeAttach` folds in a trailing pose —
+lean back and lag opposite the motion, saturating at `CosmeticTrailFullSpeed`.
+Motion comes from the bone itself, or, when the skeleton seam reports none, from
+a `LocalVelocitySource` the service injects. A rigid asset, a still player, or a
+non-finite velocity yields an all-zero pose (no fabricated sway). Scripts read
+the same vector as `input.velocity()`.
+
+Resolves are cached per entity. A cached entry is reused only while the skeleton
+seam reports an unchanged pose revision (`CosmeticSkeletonSource::PoseRevision`),
+the loadout and the injected velocity are all unchanged; a seam that cannot
+report a revision (`noRevision`) disables the cache, so a stale pose is never
+reused. The cache is bounded and LRU-evicted, and a seam swap clears it.
+`CosmeticStats::cacheHits`/`cacheMisses` expose the policy.
+
 Seeing another player's cosmetics needs a channel, and that channel is the
 security boundary. `CosmeticSyncChannel` signs a canonical `(player, loadout)`
 payload (Ed25519 in production, HMAC for local development), frames it with a
