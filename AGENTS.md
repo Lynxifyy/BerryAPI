@@ -68,3 +68,13 @@ make lib             # builds build/libBerryAPI.so
 
 - `tests/shim_net.h` contains a loopback HTTP server and a WS echo server.
 - Run a single suite: `make build/test_test_modules && ./build/test_test_modules`.
+- `make test` and `make test-sanitize` (ASan+UBSan) must both stay green; the
+  sanitizer build is slow (several minutes) — run it in the background and poll
+  a log file rather than blocking the terminal.
+
+## Pull requests
+
+- Opening a PR via the GitHub REST API or the `create_pr` tool returns
+  `403 Resource not accessible by integration` in this environment. The `gh`
+  CLI works instead: `GH_TOKEN="$Github" gh pr create ...`. All three tokens
+  (`Github`, `GithubLynxifyy`, `GITHUB_TOKEN`) authenticate as `Lynxifyy`.
