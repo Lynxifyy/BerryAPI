@@ -189,6 +189,11 @@ class RefVm final : public IScriptVm {
   bool suspended() const override { return suspended_; }
 
   bool Resume(const ScriptValue& value, ScriptError* err) override {
+    // A resume cannot fail here: the value is handed to the suspended native
+    // instruction on the next Step, and any error from that surfaces as a Step
+    // status. The parameter stays in the signature so the interface is uniform
+    // across VM implementations.
+    (void)err;
     if (!suspended_) return false;
     suspended_ = false;
     // The resume value is delivered when execution next reaches the suspended

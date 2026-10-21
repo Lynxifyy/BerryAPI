@@ -45,8 +45,8 @@ class BERRY_API BerryModule {
   virtual const char* Name() const = 0;                     // e.g. "Berry::Combat"
   virtual u32 Capabilities() const = 0;                     // capability mask
   virtual bool Preload() { return true; }                   // before hooks
-  virtual bool Attach(Engine& e) { return true; }           // after hooks
-  virtual void Detach(Engine& e) {}
+  virtual bool Attach(Engine& e) { (void)e; return true; }  // after hooks
+  virtual void Detach(Engine& e) { (void)e; }
   virtual void OnTick(GameTick tick) { (void)tick; }        // engine ticks
 
   /// The primary service object this module owns, if any (e.g. Combat for
