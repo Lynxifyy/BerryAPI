@@ -24,6 +24,8 @@ CORE_SRC := \
   core/lifecycle/engine.cpp \
   core/lifecycle/thread.cpp \
   core/net/net.cpp \
+  core/script/crypto.cpp \
+  core/script/manifest.cpp \
   util/logger.cpp \
   util/mem.cpp
 
@@ -35,7 +37,8 @@ TEST_SRC := \
   tests/test_sample.cpp \
   tests/test_sigscan.cpp \
   tests/test_thread.cpp \
-  tests/test_fuzz.cpp
+  tests/test_fuzz.cpp \
+  tests/test_manifest.cpp
 
 CORE_OBJ := $(CORE_SRC:.cpp=.o)
 TEST_OBJ := $(TEST_SRC:.cpp=.o)
@@ -71,7 +74,7 @@ check-samples: samples/sample_hitmarker.o
 	@rm -f samples/sample_hitmarker.o
 
 test: $(TEST_BINS) build/$(SHARED_NAME) check-samples
-	@for b in build/test_test_math build/test_test_modules build/test_test_net build/test_test_render build/test_test_sample build/test_test_sigscan build/test_test_thread build/test_test_fuzz; do \
+	@for b in build/test_test_math build/test_test_modules build/test_test_net build/test_test_render build/test_test_sample build/test_test_sigscan build/test_test_thread build/test_test_fuzz build/test_test_manifest; do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
 	@echo "-- dlopen ABI --"
