@@ -74,3 +74,16 @@ frame handling), `JsonRpc` (2.0 parse/build), `RateLimiter`.
 | Combat | `kCapCombat` | Damage seam, rules |
 | Render | `kCapRender \| kCapWorld` | Renderer, world for ESP |
 | Network | `kCapNetwork` | sockets, JSON-RPC |
+
+## Client services (not strict modules)
+
+The client-facing features are services that draw through `Berry::Render`; they
+are deliberately **not** added to the strict module set. See
+[SCRIPTING.md](SCRIPTING.md) for the full walkthrough.
+
+- `Hud` (`hud.h`) — retained-mode widget tree with anchors, flex flow, theming
+  and tweens.
+- `InputObserver` (`input.h`) — read-only local input and click-rate tracking.
+- `PvpOverlay` (`pvp.h`) — local-only CPS/keystrokes/combo/armor/ping HUD.
+- `PerformanceGovernor` (`perf.h`) — adaptive FPS governor with thermal
+  awareness and a `CullPolicy` for the render hooks' keep/cull decisions.

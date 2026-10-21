@@ -21,9 +21,20 @@ CORE_SRC := \
   core/modules/render_backend.cpp \
   core/modules/services.cpp \
   core/modules/world.cpp \
+  core/modules/hud.cpp \
+  core/modules/input.cpp \
+  core/modules/pvp.cpp \
+  core/modules/governor.cpp \
   core/lifecycle/engine.cpp \
   core/lifecycle/thread.cpp \
   core/net/net.cpp \
+  core/script/crypto.cpp \
+  core/script/manifest.cpp \
+  core/script/runtime.cpp \
+  core/script/vm_ref.cpp \
+  core/script/host.cpp \
+  core/script/reload.cpp \
+  core/script/async.cpp \
   util/logger.cpp \
   util/mem.cpp
 
@@ -35,7 +46,14 @@ TEST_SRC := \
   tests/test_sample.cpp \
   tests/test_sigscan.cpp \
   tests/test_thread.cpp \
-  tests/test_fuzz.cpp
+  tests/test_fuzz.cpp \
+  tests/test_manifest.cpp \
+  tests/test_script.cpp \
+  tests/test_reload.cpp \
+  tests/test_async.cpp \
+  tests/test_idl.cpp \
+  tests/test_hud.cpp \
+  tests/test_governor.cpp
 
 CORE_OBJ := $(CORE_SRC:.cpp=.o)
 TEST_OBJ := $(TEST_SRC:.cpp=.o)
@@ -70,8 +88,8 @@ check-samples: samples/sample_hitmarker.o
 	@echo "== samples compile OK =="
 	@rm -f samples/sample_hitmarker.o
 
-test: $(TEST_BINS) build/$(SHARED_NAME) check-samples
-	@for b in build/test_test_math build/test_test_modules build/test_test_net build/test_test_render build/test_test_sample build/test_test_sigscan build/test_test_thread build/test_test_fuzz; do \
+test: idl-check $(TEST_BINS) build/$(SHARED_NAME) check-samples
+	@for b in build/test_test_math build/test_test_modules build/test_test_net build/test_test_render build/test_test_sample build/test_test_sigscan build/test_test_thread build/test_test_fuzz build/test_test_manifest build/test_test_script build/test_test_reload build/test_test_async build/test_test_idl build/test_test_hud build/test_test_governor; do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
 	@echo "-- dlopen ABI --"
@@ -134,8 +152,18 @@ build/$(SHARED_NAME): $(SHARED_OBJ)
 lib: build/$(SHARED_NAME)
 	@echo "== built $(SHARED_NAME) =="
 
+# IDL codegen: one description generates the C++ binding table, the TS/Luau
+# type definitions and the API docs. `idl-check` fails when they drift.
+.PHONY: idl idl-check
+idl:
+	@python3 tools/idlgen.py
+
+idl-check:
+	@python3 tools/idlgen.py --self-test
+	@python3 tools/idlgen.py --check
+
 clean:
 	rm -rf build core/events/*.o core/hooks/*.o core/modules/*.o core/lifecycle/*.o \
-	       core/net/*.o util/*.o tests/*.o
+	       core/net/*.o core/script/*.o util/*.o tests/*.o samples/*.o
 
 .PHONY: all test lib clean
