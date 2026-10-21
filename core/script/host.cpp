@@ -95,30 +95,50 @@ ScriptStatus ScriptHost::RunHook(const std::string& hook,
   }
 
   ++invocations_;
-  ScriptError err;
   vm_->ResetInstructionCount();
   vm_->ClearInterrupt();
+  ScriptError startErr;
+  return Drive(vm_->Start(hook, args, &startErr), hook, ret, startErr);
+}
 
+ScriptStatus ScriptHost::ResumeFromYield(const ScriptValue& value,
+                                         std::vector<ScriptValue>* ret) {
+  if (state_ != ScriptHostState::Loaded) return ScriptStatus::NotLoaded;
+  if (!vm_ || !vm_->suspended()) return ScriptStatus::NotLoaded;
+  vm_->ResetInstructionCount();
+  vm_->ClearInterrupt();
+  ScriptError err;
+  if (!vm_->Resume(value, &err)) {
+    return Fail(ScriptStatus::Error,
+                err.occurred ? err : ScriptError::Make("resume failed"));
+  }
+  return Drive(ScriptStatus::Running, "<resume>", ret, ScriptError::None());
+}
+
+bool ScriptHost::suspended() const { return vm_ && vm_->suspended(); }
+
+ScriptStatus ScriptHost::Fault(const ScriptError& err) {
+  return Fail(ScriptStatus::Error, err);
+}
+
+/// Shared driver: steps the VM under the wall-clock guard and maps a terminal
+/// status. `initial` is the status Start()/Resume() returned.
+ScriptStatus ScriptHost::Drive(ScriptStatus initial, const std::string& hook,
+                               std::vector<ScriptValue>* ret,
+                               const ScriptError& initialErr) {
+  ScriptStatus st = initial;
+  ScriptError err;
   // Wall-clock guard around the whole invocation. If it trips we request a VM
   // interrupt so the interpreter stops at the next instruction boundary.
   const u64 deadline = NowNs() + limits_.wallClockMs * 1000000ULL;
-
-  ScriptStatus st = vm_->Start(hook, args, &err);
-  if (st != ScriptStatus::Running) {
-    if (st == ScriptStatus::NoFunction) return st;
-    return Fail(st == ScriptStatus::Ok ? ScriptStatus::Error : st, err);
-  }
-  while (vm_->inCall()) {
+  while (st == ScriptStatus::Running) {
+    if (!vm_->inCall()) break;
     st = vm_->Step(4096, &err);
-    if (st == ScriptStatus::Running) {
-      if (NowNs() >= deadline) {
-        vm_->RequestInterrupt();
-        ScriptError te = ScriptError::Make("wall-clock timeout", hook, 0);
-        return Fail(ScriptStatus::Timeout, te);
-      }
-      continue;
+    if (st == ScriptStatus::Running && NowNs() >= deadline) {
+      vm_->RequestInterrupt();
+      ScriptError te = ScriptError::Make("wall-clock timeout", hook, 0);
+      return Fail(ScriptStatus::Timeout, te);
     }
-    break;
   }
   if (st == ScriptStatus::Ok) {
     if (ret) *ret = vm_->Result();
@@ -129,7 +149,9 @@ ScriptStatus ScriptHost::RunHook(const std::string& hook,
     // resume it. The VM keeps its state.
     return ScriptStatus::Yielded;
   }
-  return Fail(st, err);
+  if (st == ScriptStatus::NoFunction) return st;
+  if (st == ScriptStatus::Running) st = ScriptStatus::Error;
+  return Fail(st, err.occurred ? err : initialErr);
 }
 
 ScriptStatus ScriptHost::CallBinding(const std::string& binding,

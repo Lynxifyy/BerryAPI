@@ -96,6 +96,7 @@ class RefVm final : public IScriptVm {
     result_.clear();
     loaded_ = false;
     inCall_ = false;
+    suspended_ = false;
     callDepth_ = 0;
     instructions_ = 0;
     interrupt_ = false;
@@ -121,6 +122,7 @@ class RefVm final : public IScriptVm {
     resultValues_.clear();
     frames_.clear();
     inCall_ = true;
+    suspended_ = false;
     callDepth_ = 0;
     // Seed the argument frame; the callee reads params from globals so state
     // stays serializable (arguments are not part of persisted state).
@@ -184,10 +186,25 @@ class RefVm final : public IScriptVm {
   }
 
   bool inCall() const override { return inCall_; }
+  bool suspended() const override { return suspended_; }
+
+  bool Resume(const ScriptValue& value, ScriptError* err) override {
+    if (!suspended_) return false;
+    suspended_ = false;
+    // The resume value is delivered when execution next reaches the suspended
+    // native instruction, which substitutes it instead of re-invoking the
+    // binding. pc_ is deliberately not advanced here.
+    resumeValue_ = value;
+    hasResumeValue_ = true;
+    if (ctx_) ctx_->ClearYield();
+    return true;
+  }
+
   const std::vector<ScriptValue>& Result() const override { return result_; }
 
   void Abort() override {
     inCall_ = false;
+    suspended_ = false;
     frames_.clear();
     stack_.clear();
     resultValues_.clear();
@@ -751,7 +768,21 @@ class RefVm final : public IScriptVm {
       Abort();
       return ScriptStatus::Error;
     }
+    // Resumed await: the binding already ran and consumed its arguments before
+    // suspending, so this must be handled BEFORE the stack-depth check below
+    // (which would otherwise see the missing args as an underflow). Substitute
+    // the resume value and continue without re-invoking the binding — invoking
+    // again would re-register the same wait and loop forever.
+    if (hasResumeValue_) {
+      hasResumeValue_ = false;
+      stack_.push_back(resumeValue_);
+      resumeValue_ = ScriptValue::Nil();
+      ++pc_;
+      return ScriptStatus::Running;
+    }
+
     if (in.argc < 0 || (size_t)in.argc > stack_.size()) return Underflow(err);
+
     std::vector<ScriptValue> args((size_t)in.argc);
     for (i32 i = in.argc - 1; i >= 0; --i) {
       args[(size_t)i] = stack_.back();
@@ -769,13 +800,18 @@ class RefVm final : public IScriptVm {
       Abort();
       return denied ? ScriptStatus::CapabilityDenied : ScriptStatus::Error;
     }
-    stack_.push_back(r);
+    if (ctx_->hasError()) {
+      if (err) *err = ScriptError::Make(ctx_->errorMessage(), chunk_, in.line);
+      Abort();
+      return ScriptStatus::Error;
+    }
     if (ctx_->yieldRequested()) {
-      // The async layer asked to suspend: stop the call cleanly at this
-      // boundary. State stays intact for a resume.
-      inCall_ = false;
+      // The async layer asked to suspend. Leave the frame and pc untouched so
+      // Resume() can substitute this binding's value and continue.
+      suspended_ = true;
       return ScriptStatus::Yielded;
     }
+    stack_.push_back(r);
     ++pc_;
     return ScriptStatus::Running;
   }
@@ -829,6 +865,9 @@ class RefVm final : public IScriptVm {
   u64 instructions_ = 0;
   bool loaded_ = false;
   bool inCall_ = false;
+  bool suspended_ = false;
+  bool hasResumeValue_ = false;
+  ScriptValue resumeValue_;
   bool interrupt_ = false;
 };
 

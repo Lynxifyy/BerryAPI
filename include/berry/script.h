@@ -175,7 +175,34 @@ class BERRY_API ScriptContext {
     yieldRequested_ = true;
     yieldReason_ = reason;
   }
+  void ClearYield() {
+    yieldRequested_ = false;
+    yieldReason_.clear();
+  }
   const std::string& yieldReason() const { return yieldReason_; }
+
+  /// True when a binding is being re-invoked after a yield. Bindings use this
+  /// to distinguish "start the operation" from "check if it finished".
+  bool resuming() const { return resuming_; }
+  void SetResuming(bool r) { resuming_ = r; }
+
+  /// Async task the current binding belongs to (set by the async runtime on
+  /// first invocation, read back on resume).
+  u64 taskId() const { return taskId_; }
+  void SetTaskId(u64 id) { taskId_ = id; }
+
+  /// Raises a script error from inside a binding. The VM turns a set error
+  /// into a script failure when the binding returns.
+  void RaiseError(std::string message) {
+    hasError_ = true;
+    errorMessage_ = std::move(message);
+  }
+  bool hasError() const { return hasError_; }
+  const std::string& errorMessage() const { return errorMessage_; }
+  void ClearError() {
+    hasError_ = false;
+    errorMessage_.clear();
+  }
 
   /// Host-owned scratch value slots, keyed by name (REPL/inspector support).
   void SetScratch(const std::string& key, ScriptValue v);
@@ -186,6 +213,10 @@ class BERRY_API ScriptContext {
   CapabilitySet granted_;
   bool yieldRequested_ = false;
   std::string yieldReason_;
+  bool resuming_ = false;
+  u64 taskId_ = 0;
+  bool hasError_ = false;
+  std::string errorMessage_;
   std::vector<std::pair<std::string, ScriptValue>> scratch_;
 };
 
@@ -216,6 +247,11 @@ class BERRY_API IScriptVm {
   virtual ScriptStatus Step(u64 budget, ScriptError* err) = 0;
   /// True while a call started by Start() is still in progress.
   virtual bool inCall() const = 0;
+  /// True when the VM is suspended at a yield and can be resumed.
+  virtual bool suspended() const = 0;
+  /// Resumes a call suspended by a yield, substituting `value` for the
+  /// suspended binding's return value. Returns false when not suspended.
+  virtual bool Resume(const ScriptValue& value, ScriptError* err) = 0;
   /// Return values of the last completed call.
   virtual const std::vector<ScriptValue>& Result() const = 0;
   /// Cancels any in-progress call (used by detach / hard stop).
@@ -309,6 +345,19 @@ class BERRY_API ScriptHost {
                            const std::vector<ScriptValue>& args,
                            ScriptValue* ret);
 
+  /// Resumes a VM suspended at an await (ScriptStatus::Yielded) with the
+  /// awaited value and drives it to completion or the next await. Budgets and
+  /// error isolation apply exactly as in RunHook.
+  ScriptStatus ResumeFromYield(const ScriptValue& value,
+                               std::vector<ScriptValue>* ret = nullptr);
+
+  /// True when a hook is suspended at an await and can be resumed.
+  bool suspended() const;
+
+  /// Faults the host from outside a hook (async timeout, transport error).
+  /// Applies error isolation exactly like a hook failure.
+  ScriptStatus Fault(const ScriptError& err);
+
   /// Faults the host: aborts any call, unloads the VM. Idempotent.
   void Unload();
   bool loaded() const { return state_ == ScriptHostState::Loaded; }
@@ -327,6 +376,9 @@ class BERRY_API ScriptHost {
 
  private:
   ScriptStatus Fail(ScriptStatus status, const ScriptError& err);
+  ScriptStatus Drive(ScriptStatus initial, const std::string& hook,
+                     std::vector<ScriptValue>* ret,
+                     const ScriptError& initialErr);
 
   std::string name_;
   CapabilitySet granted_;
