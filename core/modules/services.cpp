@@ -2,6 +2,7 @@
 #include "berry/module.h"
 #include "berry/engine.h"
 #include "berry/logger.h"
+#include "berry/session_recorder.h"
 #include "berry/world_query.h"
 
 #include <memory>
@@ -122,12 +123,13 @@ class WorldModule : public BerryModule, public WorldHandle {
 
   // Module lifecycle ---
   bool Attach(Engine& e) override {
-    (void)e;
+    engine_ = &e;
     Log::Info("Berry::World attached (seam: %s)", seam_ ? seam_->Name() : "null");
     return true;
   }
   void Detach(Engine& e) override {
     (void)e;
+    engine_ = nullptr;
     Log::Info("Berry::World detached");
   }
   void OnTick(GameTick tick) override {
@@ -141,6 +143,10 @@ class WorldModule : public BerryModule, public WorldHandle {
       const std::vector<WorldDiffEvent> diff =
           UpdateWorldGrid(grid_, *seam_, (u64)tick);
       if (!diff.empty()) PublishWorldDiffToEvents(diff);
+      // Feed the same tick to the session recorder. Recording is off by
+      // default, in which case CaptureTick is a no-op. It reads the seam and
+      // the diff already computed above, never game memory.
+      if (engine_) engine_->Recorder().CaptureTick((u64)tick, *seam_, diff);
     }
   }
 
@@ -149,6 +155,7 @@ class WorldModule : public BerryModule, public WorldHandle {
   std::vector<EntityId> cache_;
   std::unordered_map<std::string, std::string> kv_;
   SpatialGrid grid_;
+  Engine* engine_ = nullptr;
 };
 
 //----------------------------------------------------------------------------

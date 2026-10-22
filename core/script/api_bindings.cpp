@@ -1346,6 +1346,88 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Nil();
   });
 
+  //--- Record (record & replay the world stream) ----------------------------
+  //
+  // The recorder is driven by the World module tick; these bindings only
+  // control the session and read the tape. `record.save` returns a whole JSON
+  // document a script can hand to `fs.write`, so a failing session is captured
+  // for a bug report. Everything fails closed when no recorder is bound.
+  install("record.start", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) { ctx.RaiseError("record.start: recorder unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.recorder->Start());
+  });
+
+  install("record.stop", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) { ctx.RaiseError("record.stop: recorder unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.recorder->Stop());
+  });
+
+  install("record.recording", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.recorder->recording());
+  });
+
+  install("record.frames", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.recorder->frames());
+  });
+
+  install("record.overflowed", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.recorder->overflowed());
+  });
+
+  install("record.save", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) { ctx.RaiseError("record.save: recorder unavailable"); return ScriptValue::Str(""); }
+    return ScriptValue::Str(services_.recorder->Save());
+  });
+
+  install("record.load", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.recorder) { ctx.RaiseError("record.load: recorder unavailable"); return ScriptValue::Bool(false); }
+    // The whole document is validated before anything is adopted, so a bad tape
+    // never half-loads and never disturbs the current one.
+    return ScriptValue::Bool(services_.recorder->Load(args[0].ToDisplay()));
+  });
+
+  install("record.clear", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.recorder) services_.recorder->Clear();
+    return ScriptValue::Nil();
+  });
+
+  install("record.replay_step", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.recorder->ReplayStep());
+  });
+
+  install("record.replay_seek", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.recorder) { ctx.RaiseError("record.replay_seek: recorder unavailable"); return ScriptValue::Bool(false); }
+    const f64 n = args[0].AsNumber();
+    // A negative or non-finite index cannot name a frame; refuse it rather than
+    // casting an out-of-range float to size_t.
+    if (!std::isfinite(n) || n < 0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.recorder->ReplaySeek((size_t)n));
+  });
+
+  install("record.replay_rewind", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.recorder) services_.recorder->ReplayRewind();
+    return ScriptValue::Nil();
+  });
+
+  install("record.replay_tick", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.recorder->ReplayTick());
+  });
+
+  install("record.replay_index", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)services_.recorder->ReplayIndex());
+  });
+
+  install("record.replay_end", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) return ScriptValue::Bool(true);
+    return ScriptValue::Bool(services_.recorder->ReplayAtEnd());
+  });
+
   //--- Fs (sandboxed file store) --------------------------------------------
   //
   // The store validates every path and enforces the size/count caps, so these

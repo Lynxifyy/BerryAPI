@@ -292,3 +292,24 @@ Capability: `fileio`.
 | `package.resolve(name: string, constraint: string) -> string` | `fileio` | - |
 | `package.require_path(path: string) -> string` | `fileio` | - |
 | `package.clear() -> nil` | `fileio` | - |
+
+## Record
+
+Capability: `world`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `record.start() -> bool` | `world` | Begins a fresh recording, clearing any previous tape. False when already recording. |
+| `record.stop() -> bool` | `world` | Ends the session and keeps the tape. False when not recording. |
+| `record.recording() -> bool` | `world` | - |
+| `record.frames() -> number` | `world` | The number of frames on the tape. |
+| `record.overflowed() -> bool` | `world` | True when a capture hit a cap and dropped data. |
+| `record.save() -> string` | `world` | The tape as one JSON document, ready to save or attach to a bug report. |
+| `record.load(json: string) -> bool` | `world` | Replaces the tape from a JSON document. Rejects the whole document on any error and leaves the current tape untouched. |
+| `record.clear() -> nil` | `world` | - |
+| `record.replay_step() -> bool` | `world` | Advances the replay one frame. False at the end of the tape. |
+| `record.replay_seek(index: number) -> bool` | `world` | - |
+| `record.replay_rewind() -> nil` | `world` | - |
+| `record.replay_tick() -> number` | `world` | The tick of the current replay frame, or 0 when there is none. |
+| `record.replay_index() -> number` | `world` | The current replay frame index, or -1 before the first step. |
+| `record.replay_end() -> bool` | `world` | - |

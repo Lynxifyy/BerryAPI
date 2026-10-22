@@ -286,3 +286,31 @@ module Package {
   fn require_path(path: string) -> string
   fn clear() -> nil
 }
+
+module Record {
+  capability world
+  doc "Record & replay of this client's world stream. `start` begins capturing one frame per tick — the level time, every entity the world grid already read, and the entered/left/updated transitions — into an in-memory tape; `stop` ends the session and keeps the tape. `save` returns the tape as one JSON document and `load` replaces the tape from one (rejecting the whole document on any error). `replay_*` drives a replay seam that answers the world queries from the tape instead of the game, so a script can be regression-tested with no game running. Recording reads the world read-only and never writes to it; a tape is what this client saw, a debugging aid, not a network protocol."
+  doc "Begins a fresh recording, clearing any previous tape. False when already recording."
+  fn start() -> bool
+  doc "Ends the session and keeps the tape. False when not recording."
+  fn stop() -> bool
+  fn recording() -> bool
+  doc "The number of frames on the tape."
+  fn frames() -> number
+  doc "True when a capture hit a cap and dropped data."
+  fn overflowed() -> bool
+  doc "The tape as one JSON document, ready to save or attach to a bug report."
+  fn save() -> string
+  doc "Replaces the tape from a JSON document. Rejects the whole document on any error and leaves the current tape untouched."
+  fn load(json: string) -> bool
+  fn clear() -> nil
+  doc "Advances the replay one frame. False at the end of the tape."
+  fn replay_step() -> bool
+  fn replay_seek(index: number) -> bool
+  fn replay_rewind() -> nil
+  doc "The tick of the current replay frame, or 0 when there is none."
+  fn replay_tick() -> number
+  doc "The current replay frame index, or -1 before the first step."
+  fn replay_index() -> number
+  fn replay_end() -> bool
+}

@@ -46,6 +46,7 @@
 #include "berry/render.h"
 #include "berry/script.h"
 #include "berry/scriptmod.h"
+#include "berry/session_recorder.h"
 #include "berry/shader.h"
 #include "berry/services.h"
 #include "berry/url.h"
@@ -157,6 +158,9 @@ class BERRY_API ScriptApi {
     /// The local player's entity id, used as the origin for `world.query`.
     /// Default 0 means "unknown", which makes the query fail closed.
     EntityId localPlayer;
+    /// The session recorder (record & replay of the world stream). Null makes
+    /// the `record.*` bindings fail closed (start/save report failure).
+    SessionRecorder* recorder = nullptr;
     /// Egress policy for `network.get`. The harness relaxes it for loopback.
     UrlPolicy networkPolicy;
   };

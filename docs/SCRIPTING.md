@@ -734,6 +734,42 @@ replay raycasts only what was recorded and can never invent a block.
 A tape records what this client saw. It is a debugging aid and a test fixture,
 not a network protocol.
 
+### Driving a session from the tick (`session_recorder.h`)
+
+`SessionRecorder` is the piece that connects `record.h` to the running client.
+The World module feeds it the same seam and world-diff it already computed each
+tick, so a session records with no extra call site and no second read of the
+world:
+
+```
+engine.Recorder().Start();        // clears any previous tape
+// ... ticks run; the World module calls CaptureTick(seam, diff) each one ...
+engine.Recorder().Stop();         // keeps the tape
+std::string tape = engine.Recorder().Save();
+```
+
+It also owns the replay. `ReplaySeamHandle()` returns the `LevelSeam` over the
+current tape; hand it to the World module (`world->SetSeam(...)`) and every
+read-only query a script makes answers from the recording:
+
+```
+auto seam = engine.Recorder().ReplaySeamHandle();
+world->SetSeam(seam);
+while (engine.Recorder().ReplayStep()) {
+  // world.query / entity.* now answer from the tape, tick by tick
+}
+```
+
+Captured transitions are recorded on the same channels the grid publishes
+(`entityEntered`/`entityLeft`/`entityUpdated`), with the same `"<id>:<type>"`
+payload, so a replayed event feeds an `Events.once` listener unchanged.
+
+Scripts reach it through the `record.*` bindings (`api/berry.idl`): `start`,
+`stop`, `frames`, `save`, `load`, `clear`, and the `replay_*` controls. The
+whole surface carries the `world` grant, since it reads the world stream and
+nothing more; `save` returns one JSON document a script can hand to `fs.write`.
+Every binding fails closed when no recorder is bound.
+
 ## Local RPC & REPL (`rpc.h`)
 
 Tooling needs a way to talk to a running client: a VS Code extension, a

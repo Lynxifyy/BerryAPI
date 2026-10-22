@@ -169,11 +169,25 @@ inline const BindingSpec* BindingSpecs() {
       {"package.resolve", CapKind::FileIO, 2, "Package"},
       {"package.require_path", CapKind::FileIO, 1, "Package"},
       {"package.clear", CapKind::FileIO, 0, "Package"},
+      {"record.start", CapKind::World, 0, "Record"},
+      {"record.stop", CapKind::World, 0, "Record"},
+      {"record.recording", CapKind::World, 0, "Record"},
+      {"record.frames", CapKind::World, 0, "Record"},
+      {"record.overflowed", CapKind::World, 0, "Record"},
+      {"record.save", CapKind::World, 0, "Record"},
+      {"record.load", CapKind::World, 1, "Record"},
+      {"record.clear", CapKind::World, 0, "Record"},
+      {"record.replay_step", CapKind::World, 0, "Record"},
+      {"record.replay_seek", CapKind::World, 1, "Record"},
+      {"record.replay_rewind", CapKind::World, 0, "Record"},
+      {"record.replay_tick", CapKind::World, 0, "Record"},
+      {"record.replay_index", CapKind::World, 0, "Record"},
+      {"record.replay_end", CapKind::World, 0, "Record"},
   };
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 148; }
+inline size_t BindingSpecCount() { return 162; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -376,6 +390,22 @@ inline const char* const kPackageNames[] = {
     "package.require_path",
     "package.clear",
 };
+inline const char* const kRecordNames[] = {
+    "record.start",
+    "record.stop",
+    "record.recording",
+    "record.frames",
+    "record.overflowed",
+    "record.save",
+    "record.load",
+    "record.clear",
+    "record.replay_step",
+    "record.replay_seek",
+    "record.replay_rewind",
+    "record.replay_tick",
+    "record.replay_index",
+    "record.replay_end",
+};
 
 inline const ModuleBindings* ModuleBindingTable() {
   static const ModuleBindings kModules[] = {
@@ -397,11 +427,12 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Intent", kIntentNames, 6},
       {"Shader", kShaderNames, 10},
       {"Package", kPackageNames, 6},
+      {"Record", kRecordNames, 14},
   };
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 18; }
+inline size_t ModuleBindingCount() { return 19; }
 
 }  // namespace api
 }  // namespace Berry

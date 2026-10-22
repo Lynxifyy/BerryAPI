@@ -262,6 +262,33 @@ export interface Package {
   clear(): void;
 }
 
+/** Capability required: world. */
+export interface Record {
+  /** Begins a fresh recording, clearing any previous tape. False when already recording. */
+  start(): boolean;
+  /** Ends the session and keeps the tape. False when not recording. */
+  stop(): boolean;
+  recording(): boolean;
+  /** The number of frames on the tape. */
+  frames(): number;
+  /** True when a capture hit a cap and dropped data. */
+  overflowed(): boolean;
+  /** The tape as one JSON document, ready to save or attach to a bug report. */
+  save(): string;
+  /** Replaces the tape from a JSON document. Rejects the whole document on any error and leaves the current tape untouched. */
+  load(json: string): boolean;
+  clear(): void;
+  /** Advances the replay one frame. False at the end of the tape. */
+  replay_step(): boolean;
+  replay_seek(index: number): boolean;
+  replay_rewind(): void;
+  /** The tick of the current replay frame, or 0 when there is none. */
+  replay_tick(): number;
+  /** The current replay frame index, or -1 before the first step. */
+  replay_index(): number;
+  replay_end(): boolean;
+}
+
 /** Coroutine-native async facade (Phase 4). */
 export interface AsyncFacade {
   /** Suspend until `ticks` game ticks have elapsed. */
@@ -290,4 +317,5 @@ declare const Cosmetic: Cosmetic;
 declare const Intent: Intent;
 declare const Shader: Shader;
 declare const Package: Package;
+declare const Record: Record;
 declare const async: AsyncFacade;
