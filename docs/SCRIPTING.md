@@ -325,6 +325,12 @@ rows, ping/TPS/FPS line, target panel, session stats, floating damage numbers,
 hit flash and a low-health vignette. Every widget renders state the local
 client already owns, so the overlay cannot become an ESP.
 
+The `pvp.*` bindings (capability `hud`) expose the read-outs — `cps`, `combo`,
+`session`, `armor`, `effects`, `net`, `target`, `health` — and the section
+switches. `pvp.set_config` fully describes the config from a newline list of
+enabled keys, so a key that is not named is off; an unknown key is refused and
+leaves the config unchanged rather than silently dropping a section.
+
 ### Performance governor (`perf.h`)
 
 The adaptive FPS governor: it watches rolling frame time and trades quality for

@@ -930,6 +930,68 @@ static void TestFsAndAudioBindings() {
              {"hud"}, &out) == ScriptStatus::CapabilityDenied);
 }
 
+static void TestPvpBindings() {
+  PvpOverlay pvp;
+  Hud hud;
+  ScriptApi::Services services;
+  services.pvp = &pvp;
+  services.hud = &hud;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  // With the overlay present, the read-outs answer (zeros/empty before any
+  // data is fed) and the section switches work.
+  CHECK(Call(bindings, "pvp.combo", {}, {"hud"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "pvp.cps", {ScriptValue::Str("left")}, {"hud"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  // An unknown button name is refused.
+  CHECK(Call(bindings, "pvp.cps", {ScriptValue::Str("middle")}, {"hud"}, &out) ==
+        ScriptStatus::Error);
+
+  CHECK(Call(bindings, "pvp.session", {}, {"hud"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("kills").AsNumber() == 0);
+  CHECK(Call(bindings, "pvp.net", {}, {"hud"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("tps").AsNumber() == 20);
+  CHECK(Call(bindings, "pvp.armor", {}, {"hud"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsTable()->empty());
+
+  // set_config fully describes the config; config() round-trips it.
+  CHECK(Call(bindings, "pvp.set_config",
+             {ScriptValue::Str("cps\ncombo\nnet")}, {"hud"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "pvp.config", {}, {"hud"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "cps\ncombo\nnet");
+  CHECK(pvp.config().showCps);
+  CHECK(!pvp.config().showArmor);
+
+  // An unknown key is refused and leaves the config unchanged.
+  CHECK(Call(bindings, "pvp.set_config",
+             {ScriptValue::Str("cps\nesp")}, {"hud"}, &out) == ScriptStatus::Error);
+  CHECK(pvp.config().showCombo);   // still the previous config
+
+  // attach/detach through the binding.
+  CHECK(Call(bindings, "pvp.attach", {}, {"hud"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(pvp.attached());
+  CHECK(Call(bindings, "pvp.detach", {}, {"hud"}, &out) == ScriptStatus::Ok);
+  CHECK(!pvp.attached());
+
+  // Without the hud grant, the whole module is denied by the gate.
+  CHECK(Call(bindings, "pvp.combo", {}, {"render"}, &out) ==
+        ScriptStatus::CapabilityDenied);
+
+  // With no overlay bound, everything fails closed.
+  ScriptApi bare(ScriptApi::Services{});
+  ScriptBindings bareBindings;
+  bare.InstallBindings(&bareBindings);
+  CHECK(Call(bareBindings, "pvp.combo", {}, {"hud"}, &out) == ScriptStatus::Error);
+}
+
 static void TestNetworkGetFailsClosed() {
   ScriptApi::Services services;
   ScriptApi api(services);
@@ -975,6 +1037,7 @@ int main() {
   TestWorldAndEntityReads();
   TestModBindings();
   TestFsAndAudioBindings();
+  TestPvpBindings();
   TestNetworkGetFailsClosed();
   TestDrawCommandsAreQueuedThenApplied();
   TestHudLifecycleAcrossThreads();

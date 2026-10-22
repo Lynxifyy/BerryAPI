@@ -73,6 +73,22 @@ inline const BindingSpec* BindingSpecs() {
       {"audio.history", CapKind::Audio, 0, "Audio"},
       {"audio.history_count", CapKind::Audio, 0, "Audio"},
       {"audio.clear_history", CapKind::Audio, 0, "Audio"},
+      {"pvp.cps", CapKind::Hud, 1, "Pvp"},
+      {"pvp.combo", CapKind::Hud, 0, "Pvp"},
+      {"pvp.combo_active", CapKind::Hud, 0, "Pvp"},
+      {"pvp.session", CapKind::Hud, 0, "Pvp"},
+      {"pvp.armor", CapKind::Hud, 0, "Pvp"},
+      {"pvp.effects", CapKind::Hud, 0, "Pvp"},
+      {"pvp.net", CapKind::Hud, 0, "Pvp"},
+      {"pvp.target", CapKind::Hud, 0, "Pvp"},
+      {"pvp.health", CapKind::Hud, 0, "Pvp"},
+      {"pvp.max_health", CapKind::Hud, 0, "Pvp"},
+      {"pvp.set_config", CapKind::Hud, 1, "Pvp"},
+      {"pvp.config", CapKind::Hud, 0, "Pvp"},
+      {"pvp.attach", CapKind::Hud, 0, "Pvp"},
+      {"pvp.detach", CapKind::Hud, 0, "Pvp"},
+      {"pvp.attached", CapKind::Hud, 0, "Pvp"},
+      {"pvp.low_health", CapKind::Hud, 0, "Pvp"},
       {"mod.create", CapKind::Hud, 2, "Mod"},
       {"mod.set_meta", CapKind::Hud, 3, "Mod"},
       {"mod.add_toggle", CapKind::Hud, 4, "Mod"},
@@ -147,7 +163,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 122; }
+inline size_t BindingSpecCount() { return 138; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -231,6 +247,24 @@ inline const char* const kAudioNames[] = {
     "audio.history",
     "audio.history_count",
     "audio.clear_history",
+};
+inline const char* const kPvpNames[] = {
+    "pvp.cps",
+    "pvp.combo",
+    "pvp.combo_active",
+    "pvp.session",
+    "pvp.armor",
+    "pvp.effects",
+    "pvp.net",
+    "pvp.target",
+    "pvp.health",
+    "pvp.max_health",
+    "pvp.set_config",
+    "pvp.config",
+    "pvp.attach",
+    "pvp.detach",
+    "pvp.attached",
+    "pvp.low_health",
 };
 inline const char* const kModNames[] = {
     "mod.create",
@@ -330,6 +364,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Entity", kEntityNames, 8},
       {"Fs", kFsNames, 10},
       {"Audio", kAudioNames, 8},
+      {"Pvp", kPvpNames, 16},
       {"Mod", kModNames, 23},
       {"Network", kNetworkNames, 2},
       {"Hud", kHudNames, 5},
@@ -343,7 +378,7 @@ inline const ModuleBindings* ModuleBindingTable() {
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 16; }
+inline size_t ModuleBindingCount() { return 17; }
 
 }  // namespace api
 }  // namespace Berry

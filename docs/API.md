@@ -106,6 +106,29 @@ Capability: `audio`.
 | `audio.history_count() -> number` | `audio` | - |
 | `audio.clear_history() -> nil` | `audio` | - |
 
+## Pvp
+
+Capability: `hud`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `pvp.cps(button: string) -> number` | `hud` | The clicks-per-second for \"left\" or \"right\", from the same rolling window the CPS widget reads. |
+| `pvp.combo() -> number` | `hud` | - |
+| `pvp.combo_active() -> bool` | `hud` | - |
+| `pvp.session() -> Table` | `hud` | - |
+| `pvp.armor() -> Table` | `hud` | - |
+| `pvp.effects() -> Table` | `hud` | - |
+| `pvp.net() -> Table` | `hud` | - |
+| `pvp.target() -> Table` | `hud` | - |
+| `pvp.health() -> number` | `hud` | - |
+| `pvp.max_health() -> number` | `hud` | - |
+| `pvp.set_config(flags: string) -> bool` | `hud` | Turns overlay sections on and off. `flags` is a newline-separated list of enabled keys from: cps, keystrokes, combo, armor, effects, net, target, session, popups, hitflash, vignette. A key that is not in the list is turned off, so the call fully describes the config; an unknown key is refused (fail closed) and leaves the config unchanged. |
+| `pvp.config() -> string` | `hud` | The enabled section keys, newline-separated, in a stable order. |
+| `pvp.attach() -> bool` | `hud` | - |
+| `pvp.detach() -> nil` | `hud` | - |
+| `pvp.attached() -> bool` | `hud` | - |
+| `pvp.low_health() -> bool` | `hud` | True while the local player is under the low-health threshold and the vignette is on. |
+
 ## Mod
 
 Capability: `hud`.

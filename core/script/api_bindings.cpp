@@ -240,6 +240,25 @@ void ScriptApi::InitFrameHook() {
         if (services_.cosmetics && services_.renderer) {
           services_.cosmetics->DrawLocal(*services_.renderer, services_.localPlayer);
         }
+        // The PvP overlay presents its widget tree through the HUD, then draws
+        // its popups/flash through the Renderer. Its animation is advanced from
+        // the frame delta so keystroke fades and popups track wall time.
+        if (services_.pvp && services_.hud && services_.renderer) {
+          const Vec2 screen = screenSize();
+          if (screen.x > 0 && screen.y > 0) {
+            const u64 now = NowMs();
+            f32 dt = 0.0f;
+            if (lastFrameMs_ != 0 && now > lastFrameMs_) {
+              dt = (f32)(now - lastFrameMs_);
+              // A long stall (a breakpoint, a pause) must not fast-forward every
+              // animation; clamp the step to a couple of frames' worth.
+              if (dt > 100.0f) dt = 100.0f;
+            }
+            lastFrameMs_ = now;
+            services_.pvp->Update(dt, now);
+            services_.pvp->Present(*services_.hud, *services_.renderer, screen);
+          }
+        }
         // The script-module overlay draws last, on top, when a user turned it
         // on. It reads a snapshot, so a module declared this frame is next
         // frame's line rather than a torn draw.
@@ -1384,6 +1403,206 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     if (!services_.audio) { ctx.RaiseError("audio.clear_history: audio unavailable"); return ScriptValue::Nil(); }
     services_.audio->ClearHistory();
     return ScriptValue::Nil();
+  });
+
+  //--- Pvp (the client-side overlay read-outs) ------------------------------
+  //
+  // The overlay owns the widgets and turns local data into draw calls; these
+  // bindings expose its read-outs and its section switches. Nothing here writes
+  // game state: a script reads what a normal client already shows.
+  install("pvp.cps", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.cps: pvp overlay unavailable"); return ScriptValue::Num(0); }
+    const std::string b = Lower(args[0].ToDisplay());
+    MouseButton button;
+    if (b == "left") button = MouseButton::Left;
+    else if (b == "right") button = MouseButton::Right;
+    else {
+      ctx.RaiseError("pvp.cps: button must be \"left\" or \"right\"");
+      return ScriptValue::Num(0);
+    }
+    return ScriptValue::Num(services_.pvp->clicksPerSecond(button));
+  });
+
+  install("pvp.combo", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.combo: pvp overlay unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.pvp->combo());
+  });
+
+  install("pvp.combo_active", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.combo_active: pvp overlay unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.pvp->comboActive());
+  });
+
+  install("pvp.session", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.session: pvp overlay unavailable"); return ScriptValue::Nil(); }
+    const SessionStats& s = services_.pvp->session();
+    ScriptTable t;
+    t["damage_dealt"] = ScriptValue::Num(s.damageDealt);
+    t["damage_taken"] = ScriptValue::Num(s.damageTaken);
+    t["kills"] = ScriptValue::Num((f64)s.kills);
+    t["deaths"] = ScriptValue::Num((f64)s.deaths);
+    t["hits"] = ScriptValue::Num((f64)s.hits);
+    t["peak_dps"] = ScriptValue::Num((f64)s.peakDps);
+    t["kd"] = ScriptValue::Num(s.Kd());
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("pvp.armor", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.armor: pvp overlay unavailable"); return ScriptValue::Nil(); }
+    ScriptTable t;
+    int n = 0;
+    for (const ArmorPiece& p : services_.pvp->armor()) {
+      ScriptTable e;
+      e["name"] = ScriptValue::Str(p.name);
+      e["durability"] = ScriptValue::Num((f64)p.durability);
+      e["max_durability"] = ScriptValue::Num((f64)p.maxDurability);
+      e["fraction"] = ScriptValue::Num((f64)p.Fraction());
+      t[std::to_string(n++)] = ScriptValue::Tbl(std::move(e));
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("pvp.effects", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.effects: pvp overlay unavailable"); return ScriptValue::Nil(); }
+    ScriptTable t;
+    int n = 0;
+    for (const EffectState& e : services_.pvp->effects()) {
+      ScriptTable s;
+      s["name"] = ScriptValue::Str(e.name);
+      s["amplifier"] = ScriptValue::Num((f64)e.amplifier);
+      s["seconds_left"] = ScriptValue::Num((f64)e.secondsLeft);
+      s["ambient"] = ScriptValue::Bool(e.ambient);
+      t[std::to_string(n++)] = ScriptValue::Tbl(std::move(s));
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("pvp.net", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.net: pvp overlay unavailable"); return ScriptValue::Nil(); }
+    const NetStats& s = services_.pvp->netStats();
+    ScriptTable t;
+    t["ping_ms"] = ScriptValue::Num((f64)s.pingMs);
+    t["tps"] = ScriptValue::Num((f64)s.tps);
+    t["fps"] = ScriptValue::Num((f64)s.fps);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("pvp.target", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.target: pvp overlay unavailable"); return ScriptValue::Nil(); }
+    const TargetInfo& g = services_.pvp->target();
+    ScriptTable t;
+    t["name"] = ScriptValue::Str(g.name);
+    t["health"] = ScriptValue::Num((f64)g.health);
+    t["max_health"] = ScriptValue::Num((f64)g.maxHealth);
+    t["distance"] = ScriptValue::Num((f64)g.distance);
+    t["armor"] = ScriptValue::Num((f64)g.armorPoints);
+    t["valid"] = ScriptValue::Bool(g.valid);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("pvp.health", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.health: pvp overlay unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.pvp->health());
+  });
+
+  install("pvp.max_health", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.max_health: pvp overlay unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.pvp->maxHealth());
+  });
+
+  install("pvp.set_config", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.set_config: pvp overlay unavailable"); return ScriptValue::Bool(false); }
+    // The call fully describes the config: start from all-off, enable the named
+    // sections. An unknown key is refused and nothing changes, so a typo cannot
+    // silently turn a section off.
+    PvpConfig c;
+    c.showCps = c.showKeystrokes = c.showCombo = c.showArmor = false;
+    c.showEffects = c.showNetStats = c.showTarget = c.showSession = false;
+    c.showDamagePopups = c.hitFlash = c.lowHealthVignette = false;
+
+    std::string cur;
+    auto apply = [&](const std::string& key) -> bool {
+      if (key.empty()) return true;
+      if (key == "cps") c.showCps = true;
+      else if (key == "keystrokes") c.showKeystrokes = true;
+      else if (key == "combo") c.showCombo = true;
+      else if (key == "armor") c.showArmor = true;
+      else if (key == "effects") c.showEffects = true;
+      else if (key == "net") c.showNetStats = true;
+      else if (key == "target") c.showTarget = true;
+      else if (key == "session") c.showSession = true;
+      else if (key == "popups") c.showDamagePopups = true;
+      else if (key == "hitflash") c.hitFlash = true;
+      else if (key == "vignette") c.lowHealthVignette = true;
+      else return false;
+      return true;
+    };
+    bool ok = true;
+    for (char ch : args[0].ToDisplay()) {
+      if (ch == '\n') {
+        if (!apply(cur)) { ok = false; break; }
+        cur.clear();
+      } else {
+        cur += ch;
+      }
+    }
+    if (ok && !apply(cur)) ok = false;
+    if (!ok) {
+      ctx.RaiseError("pvp.set_config: unknown section key");
+      return ScriptValue::Bool(false);
+    }
+    c.lowHealthThreshold = services_.pvp->config().lowHealthThreshold;
+    services_.pvp->SetConfig(c);
+    return ScriptValue::Bool(true);
+  });
+
+  install("pvp.config", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.config: pvp overlay unavailable"); return ScriptValue::Str(""); }
+    const PvpConfig& c = services_.pvp->config();
+    std::string out;
+    auto add = [&](const char* k, bool on) {
+      if (!on) return;
+      if (!out.empty()) out += '\n';
+      out += k;
+    };
+    add("cps", c.showCps);
+    add("keystrokes", c.showKeystrokes);
+    add("combo", c.showCombo);
+    add("armor", c.showArmor);
+    add("effects", c.showEffects);
+    add("net", c.showNetStats);
+    add("target", c.showTarget);
+    add("session", c.showSession);
+    add("popups", c.showDamagePopups);
+    add("hitflash", c.hitFlash);
+    add("vignette", c.lowHealthVignette);
+    return ScriptValue::Str(out);
+  });
+
+  install("pvp.attach", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp || !services_.hud) { ctx.RaiseError("pvp.attach: pvp overlay unavailable"); return ScriptValue::Bool(false); }
+    services_.pvp->Attach(*services_.hud);
+    return ScriptValue::Bool(services_.pvp->attached());
+  });
+
+  install("pvp.detach", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.detach: pvp overlay unavailable"); return ScriptValue::Nil(); }
+    services_.pvp->Detach();
+    return ScriptValue::Nil();
+  });
+
+  install("pvp.attached", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.attached: pvp overlay unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.pvp->attached());
+  });
+
+  install("pvp.low_health", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.low_health: pvp overlay unavailable"); return ScriptValue::Bool(false); }
+    const f32 maxH = services_.pvp->maxHealth();
+    if (maxH <= 0) return ScriptValue::Bool(false);
+    const f32 frac = services_.pvp->health() / maxH;
+    const PvpConfig& c = services_.pvp->config();
+    return ScriptValue::Bool(c.lowHealthVignette && frac < c.lowHealthThreshold);
   });
 
   //--- Mod (script modules + typed settings) --------------------------------

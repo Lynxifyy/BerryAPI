@@ -110,6 +110,31 @@ module Audio {
   fn clear_history() -> nil
 }
 
+module Pvp {
+  capability hud
+  doc "The PvP overlay: the client-side read-outs a normal client could already see — CPS, keystrokes, a combo counter, armor/durability, active effects, ping/TPS/FPS, the current target and rolling session stats. All local, all read-only; nothing here reveals another player beyond what a fight already shows, and nothing writes game state. `session` returns {damage_dealt, damage_taken, kills, deaths, hits, peak_dps, kd}; `armor` and `effects` are tables keyed \"0\",\"1\",… ; `net` returns {ping_ms, tps, fps}; `target` returns {name, health, max_health, distance, armor, valid}."
+  doc "The clicks-per-second for \"left\" or \"right\", from the same rolling window the CPS widget reads."
+  fn cps(button: string) -> number
+  fn combo() -> number
+  fn combo_active() -> bool
+  fn session() -> Table
+  fn armor() -> Table
+  fn effects() -> Table
+  fn net() -> Table
+  fn target() -> Table
+  fn health() -> number
+  fn max_health() -> number
+  doc "Turns overlay sections on and off. `flags` is a newline-separated list of enabled keys from: cps, keystrokes, combo, armor, effects, net, target, session, popups, hitflash, vignette. A key that is not in the list is turned off, so the call fully describes the config; an unknown key is refused (fail closed) and leaves the config unchanged."
+  fn set_config(flags: string) -> bool
+  doc "The enabled section keys, newline-separated, in a stable order."
+  fn config() -> string
+  fn attach() -> bool
+  fn detach() -> nil
+  fn attached() -> bool
+  doc "True while the local player is under the low-health threshold and the vignette is on."
+  fn low_health() -> bool
+}
+
 module Mod {
   capability hud
   doc "Script module + settings system. A script declares a module with metadata and a set of TYPED settings (toggle, slider, select, keybind, text, button); the client renders them and the user configures them. Every write is validated against the setting's declared kind and range and fails closed, so a toggle can never receive an out-of-range slider value. Handles are numbers; a setting is addressed by its module handle and key. `options` for a select is a newline-separated list of labels."

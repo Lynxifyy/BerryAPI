@@ -99,6 +99,30 @@ export interface Audio {
 }
 
 /** Capability required: hud. */
+export interface Pvp {
+  /** The clicks-per-second for \"left\" or \"right\", from the same rolling window the CPS widget reads. */
+  cps(button: string): number;
+  combo(): number;
+  combo_active(): boolean;
+  session(): Record<string, unknown>;
+  armor(): Record<string, unknown>;
+  effects(): Record<string, unknown>;
+  net(): Record<string, unknown>;
+  target(): Record<string, unknown>;
+  health(): number;
+  max_health(): number;
+  /** Turns overlay sections on and off. `flags` is a newline-separated list of enabled keys from: cps, keystrokes, combo, armor, effects, net, target, session, popups, hitflash, vignette. A key that is not in the list is turned off, so the call fully describes the config; an unknown key is refused (fail closed) and leaves the config unchanged. */
+  set_config(flags: string): boolean;
+  /** The enabled section keys, newline-separated, in a stable order. */
+  config(): string;
+  attach(): boolean;
+  detach(): void;
+  attached(): boolean;
+  /** True while the local player is under the low-health threshold and the vignette is on. */
+  low_health(): boolean;
+}
+
+/** Capability required: hud. */
 export interface Mod {
   /** Script module + settings system. A script declares a module with metadata and a set of TYPED settings (toggle, slider, select, keybind, text, button); the client renders them and the user configures them. Every write is validated against the setting's declared kind and range and fails closed, so a toggle can never receive an out-of-range slider value. Handles are numbers; a setting is addressed by its module handle and key. `options` for a select is a newline-separated list of labels. */
   create(name: string, description: string): number;
@@ -237,6 +261,7 @@ declare const World: World;
 declare const Entity: Entity;
 declare const Fs: Fs;
 declare const Audio: Audio;
+declare const Pvp: Pvp;
 declare const Mod: Mod;
 declare const Network: Network;
 declare const Hud: Hud;

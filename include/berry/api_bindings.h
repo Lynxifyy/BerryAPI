@@ -38,6 +38,7 @@
 #include "berry/input.h"
 #include "berry/intent.h"
 #include "berry/perf.h"
+#include "berry/pvp.h"
 #include "berry/pack.h"
 #include "berry/package.h"
 #include "berry/render.h"
@@ -141,6 +142,10 @@ class BERRY_API ScriptApi {
     /// Client-side audio cues. Null makes the `audio.*` bindings fail closed
     /// (a play reports false).
     AudioService* audio = nullptr;
+    /// The PvP overlay (CPS, keystrokes, combo, armor, effects, ping/FPS,
+    /// target, session stats). Null makes the `pvp.*` bindings fail closed and
+    /// the frame hook skip the overlay.
+    PvpOverlay* pvp = nullptr;
     /// The local player's entity id, used as the origin for `world.query`.
     /// Default 0 means "unknown", which makes the query fail closed.
     EntityId localPlayer;
@@ -244,6 +249,9 @@ class BERRY_API ScriptApi {
 
   EventBus::ListenerId frameListener_ = 0;
   EventBus::ListenerId combatListener_ = 0;
+  /// The wall-clock ms of the last presented frame, for the PvP overlay's
+  /// animation delta. Render thread only.
+  u64 lastFrameMs_ = 0;
 };
 
 }  // namespace Berry
