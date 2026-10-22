@@ -992,6 +992,78 @@ static void TestPvpBindings() {
   CHECK(Call(bareBindings, "pvp.combo", {}, {"hud"}, &out) == ScriptStatus::Error);
 }
 
+static void TestPacketBindings() {
+  PacketLog log;
+  log.Record(PacketDir::Inbound, 0x2A, 64, 1000, "PlayerAuthInput");
+  log.Record(PacketDir::Outbound, 0x2B, 32, 1001, "MovePlayer");
+  ScriptApi::Services services;
+  services.packets = &log;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  // recent returns a table keyed "0","1",… newest first, headers only.
+  CHECK(Call(bindings, "packets.recent", {ScriptValue::Num(0)}, {"packets"},
+             &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(out.AsTable()->size() == 2);
+  const ScriptValue& first = out.AsTable()->at("0");
+  CHECK(first.IsTable());
+  CHECK(first.Field("id")->AsNumber() == 0x2B);          // newest
+  CHECK(first.Field("dir")->AsString() == "outbound");
+  CHECK(first.Field("bytes")->AsNumber() == 32);
+  CHECK(first.Field("name")->AsString() == "MovePlayer");
+  // The payload itself is never present: only its length.
+  CHECK(first.Field("payload") == nullptr);
+
+  // A limited read returns the most recent n.
+  CHECK(Call(bindings, "packets.recent", {ScriptValue::Num(1)}, {"packets"},
+             &out) == ScriptStatus::Ok);
+  CHECK(out.AsTable()->size() == 1);
+
+  CHECK(Call(bindings, "packets.size", {}, {"packets"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 2);
+  CHECK(Call(bindings, "packets.count_of", {ScriptValue::Num(0x2A)}, {"packets"},
+             &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  // A negative id is refused rather than wrapping.
+  CHECK(Call(bindings, "packets.count_of", {ScriptValue::Num(-1)}, {"packets"},
+             &out) == ScriptStatus::Error);
+
+  CHECK(Call(bindings, "packets.totals", {}, {"packets"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("inbound").AsNumber() == 1);
+  CHECK(out.AsTable()->at("outbound_bytes").AsNumber() == 32);
+
+  CHECK(Call(bindings, "packets.summary", {ScriptValue::Str("inbound")}, {"packets"},
+             &out) == ScriptStatus::Ok);
+  CHECK(out.AsTable()->size() == 1);
+  CHECK(out.AsTable()->at("0").Field("id")->AsNumber() == 0x2A);
+  // An unknown direction is refused.
+  CHECK(Call(bindings, "packets.summary", {ScriptValue::Str("sideways")},
+             {"packets"}, &out) == ScriptStatus::Error);
+
+  CHECK(Call(bindings, "packets.last", {}, {"packets"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Field("id")->AsNumber() == 0x2B);
+
+  // clear is a read-surface reset; it works and the log is empty after.
+  CHECK(Call(bindings, "packets.clear", {}, {"packets"}, &out) == ScriptStatus::Ok);
+  CHECK(log.size() == 0);
+
+  // Without the packets grant the whole module is denied by the gate.
+  CHECK(Call(bindings, "packets.size", {}, {"network:*"}, &out) ==
+        ScriptStatus::CapabilityDenied);
+
+  // With no log bound, everything fails closed rather than crashing.
+  ScriptApi bare(ScriptApi::Services{});
+  ScriptBindings bareBindings;
+  bare.InstallBindings(&bareBindings);
+  CHECK(Call(bareBindings, "packets.size", {}, {"packets"}, &out) ==
+        ScriptStatus::Error);
+  CHECK(Call(bareBindings, "packets.last", {}, {"packets"}, &out) ==
+        ScriptStatus::Error);
+}
+
 static void TestNetworkGetFailsClosed() {
   ScriptApi::Services services;
   ScriptApi api(services);
@@ -1038,6 +1110,7 @@ int main() {
   TestModBindings();
   TestFsAndAudioBindings();
   TestPvpBindings();
+  TestPacketBindings();
   TestNetworkGetFailsClosed();
   TestDrawCommandsAreQueuedThenApplied();
   TestHudLifecycleAcrossThreads();

@@ -1605,6 +1605,104 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Bool(c.lowHealthVignette && frac < c.lowHealthThreshold);
   });
 
+  //--- Packets (read-only metadata inspection) ------------------------------
+  //
+  // The log holds headers, never payloads, so this cannot leak anyone's data.
+  // A script reads it to diagnose a connection; it can never write to it.
+  install("packets.recent", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.packets) { ctx.RaiseError("packets.recent: packet log unavailable"); return ScriptValue::Nil(); }
+    const f64 n = args[0].AsNumber();
+    // A negative or non-finite count means "all held"; otherwise take the last
+    // n records (newest first).
+    size_t max = 0;
+    if (std::isfinite(n) && n > 0) max = (size_t)n;
+    ScriptTable t;
+    int i = 0;
+    for (const PacketRecord& r : services_.packets->Recent(max)) {
+      ScriptTable e;
+      e["seq"] = ScriptValue::Num((f64)r.seq);
+      e["dir"] = ScriptValue::Str(PacketDirName(r.dir));
+      e["id"] = ScriptValue::Num((f64)r.id);
+      e["name"] = ScriptValue::Str(r.name);
+      e["bytes"] = ScriptValue::Num((f64)r.payloadLen);
+      e["time_ms"] = ScriptValue::Num((f64)r.timeMs);
+      t[std::to_string(i++)] = ScriptValue::Tbl(std::move(e));
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("packets.last", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.packets) { ctx.RaiseError("packets.last: packet log unavailable"); return ScriptValue::Nil(); }
+    PacketRecord r;
+    if (!services_.packets->Last(&r)) return ScriptValue::Nil();
+    ScriptTable e;
+    e["seq"] = ScriptValue::Num((f64)r.seq);
+    e["dir"] = ScriptValue::Str(PacketDirName(r.dir));
+    e["id"] = ScriptValue::Num((f64)r.id);
+    e["name"] = ScriptValue::Str(r.name);
+    e["bytes"] = ScriptValue::Num((f64)r.payloadLen);
+    e["time_ms"] = ScriptValue::Num((f64)r.timeMs);
+    return ScriptValue::Tbl(std::move(e));
+  });
+
+  install("packets.totals", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.packets) { ctx.RaiseError("packets.totals: packet log unavailable"); return ScriptValue::Nil(); }
+    const PacketTotals t = services_.packets->totals();
+    ScriptTable out;
+    out["inbound"] = ScriptValue::Num((f64)t.inbound);
+    out["outbound"] = ScriptValue::Num((f64)t.outbound);
+    out["inbound_bytes"] = ScriptValue::Num((f64)t.inboundBytes);
+    out["outbound_bytes"] = ScriptValue::Num((f64)t.outboundBytes);
+    out["dropped"] = ScriptValue::Num((f64)t.dropped);
+    out["total"] = ScriptValue::Num((f64)t.total());
+    return ScriptValue::Tbl(std::move(out));
+  });
+
+  install("packets.summary", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.packets) { ctx.RaiseError("packets.summary: packet log unavailable"); return ScriptValue::Nil(); }
+    const std::string d = Lower(args[0].AsString());
+    PacketDir dir = PacketDir::Count;
+    if (d == "inbound") dir = PacketDir::Inbound;
+    else if (d == "outbound") dir = PacketDir::Outbound;
+    else if (!d.empty()) {
+      ctx.RaiseError("packets.summary: dir must be \"inbound\", \"outbound\" or \"\"");
+      return ScriptValue::Nil();
+    }
+    ScriptTable t;
+    int i = 0;
+    for (const PacketIdStat& s : services_.packets->Summary(dir)) {
+      ScriptTable e;
+      e["id"] = ScriptValue::Num((f64)s.id);
+      e["name"] = ScriptValue::Str(s.name);
+      e["dir"] = ScriptValue::Str(PacketDirName(s.dir));
+      e["count"] = ScriptValue::Num((f64)s.count);
+      e["bytes"] = ScriptValue::Num((f64)s.bytes);
+      t[std::to_string(i++)] = ScriptValue::Tbl(std::move(e));
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("packets.count_of", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.packets) { ctx.RaiseError("packets.count_of: packet log unavailable"); return ScriptValue::Num(0); }
+    const f64 n = args[0].AsNumber();
+    if (!std::isfinite(n) || n < 0 || n > 4294967295.0) {
+      ctx.RaiseError("packets.count_of: id must be a non-negative 32-bit integer");
+      return ScriptValue::Num(0);
+    }
+    return ScriptValue::Num((f64)services_.packets->CountOf((u32)n));
+  });
+
+  install("packets.size", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.packets) { ctx.RaiseError("packets.size: packet log unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.packets->size());
+  });
+
+  install("packets.clear", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.packets) { ctx.RaiseError("packets.clear: packet log unavailable"); return ScriptValue::Nil(); }
+    services_.packets->Clear();
+    return ScriptValue::Nil();
+  });
+
   //--- Mod (script modules + typed settings) --------------------------------
   //
   // The registry is pure data; a script declares its module and settings, the

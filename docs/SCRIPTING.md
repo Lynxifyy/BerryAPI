@@ -331,6 +331,31 @@ switches. `pvp.set_config` fully describes the config from a newline list of
 enabled keys, so a key that is not named is off; an unknown key is refused and
 leaves the config unchanged rather than silently dropping a section.
 
+### Packet inspection (`packet.h`)
+
+A read-only log of packet metadata: a sequence number, direction, protocol id,
+a name, a byte length and a timestamp. It never stores payload bytes, and it is
+built so it cannot — a packet's body is other players' data, and the useful
+questions (am I being packet-spammed, is this id new since the update, how much
+am I sending) are all answered by the header.
+
+The log is bounded: a fixed ring of the most recent records plus running
+totals, so a flood cannot grow it without limit. An oversized payload length is
+refused rather than counted, so a hostile header cannot inflate the byte totals.
+
+The `packets.*` bindings carry the distinct `packets` capability — inspecting
+packets is a different authority from sending them, so it is not reachable with
+a `network` grant:
+
+- `packets.recent(max)` — newest first, `max` of 0 means all held; each entry is
+  `{seq, dir, id, name, bytes, time_ms}`.
+- `packets.last()` — the most recent entry, or nil.
+- `packets.totals()` — `{inbound, outbound, inbound_bytes, outbound_bytes,
+  dropped, total}`.
+- `packets.summary(dir)` — per-id totals, highest count first, capped; `dir` is
+  `"inbound"`, `"outbound"` or `""` for both.
+- `packets.count_of(id)`, `packets.size()`, `packets.clear()`.
+
 ### Performance governor (`perf.h`)
 
 The adaptive FPS governor: it watches rolling frame time and trades quality for

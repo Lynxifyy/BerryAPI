@@ -46,6 +46,7 @@ enum class CapKind : u32 {
   Events,    // subscribe to engine events
   Audio,     // play sounds
   Cosmetic,  // register cosmetics
+  Packets,   // read-only packet metadata inspection (headers, never payloads)
 };
 
 const char* CapKindName(CapKind k);

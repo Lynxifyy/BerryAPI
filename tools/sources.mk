@@ -50,6 +50,7 @@ CORE_SRC := \
   core/script/scriptmod.cpp \
   core/script/fs.cpp \
   core/script/audio.cpp \
+  core/script/packet.cpp \
   core/script/record.cpp \
   core/net/rpc.cpp \
   core/script/layout.cpp \
@@ -101,7 +102,8 @@ TEST_SRC := \
   tests/test_rpc.cpp \
   tests/test_scriptmod.cpp \
   tests/test_fs.cpp \
-  tests/test_audio.cpp
+  tests/test_audio.cpp \
+  tests/test_packet.cpp
 # Vendored Luau (MIT). See third_party/luau/PROVENANCE.md for the pinned
 # version and why these units and not the CLI. Compiled with -w because upstream
 # is only warning-clean under its own flag set; our code stays -Wall -Wextra clean.

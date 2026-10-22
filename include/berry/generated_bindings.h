@@ -89,6 +89,13 @@ inline const BindingSpec* BindingSpecs() {
       {"pvp.detach", CapKind::Hud, 0, "Pvp"},
       {"pvp.attached", CapKind::Hud, 0, "Pvp"},
       {"pvp.low_health", CapKind::Hud, 0, "Pvp"},
+      {"packets.recent", CapKind::Packets, 1, "Packets"},
+      {"packets.last", CapKind::Packets, 0, "Packets"},
+      {"packets.totals", CapKind::Packets, 0, "Packets"},
+      {"packets.summary", CapKind::Packets, 1, "Packets"},
+      {"packets.count_of", CapKind::Packets, 1, "Packets"},
+      {"packets.size", CapKind::Packets, 0, "Packets"},
+      {"packets.clear", CapKind::Packets, 0, "Packets"},
       {"mod.create", CapKind::Hud, 2, "Mod"},
       {"mod.set_meta", CapKind::Hud, 3, "Mod"},
       {"mod.add_toggle", CapKind::Hud, 4, "Mod"},
@@ -163,7 +170,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 138; }
+inline size_t BindingSpecCount() { return 145; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -266,6 +273,15 @@ inline const char* const kPvpNames[] = {
     "pvp.attached",
     "pvp.low_health",
 };
+inline const char* const kPacketsNames[] = {
+    "packets.recent",
+    "packets.last",
+    "packets.totals",
+    "packets.summary",
+    "packets.count_of",
+    "packets.size",
+    "packets.clear",
+};
 inline const char* const kModNames[] = {
     "mod.create",
     "mod.set_meta",
@@ -365,6 +381,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Fs", kFsNames, 10},
       {"Audio", kAudioNames, 8},
       {"Pvp", kPvpNames, 16},
+      {"Packets", kPacketsNames, 7},
       {"Mod", kModNames, 23},
       {"Network", kNetworkNames, 2},
       {"Hud", kHudNames, 5},
@@ -378,7 +395,7 @@ inline const ModuleBindings* ModuleBindingTable() {
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 17; }
+inline size_t ModuleBindingCount() { return 18; }
 
 }  // namespace api
 }  // namespace Berry

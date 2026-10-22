@@ -122,6 +122,18 @@ export type Pvp = {
   low_health: () -> boolean,
 }
 
+-- Capability required: packets.
+export type Packets = {
+  -- Read-only packet inspection. The log holds packet METADATA only — a sequence number, direction, protocol id, a name and a byte length — and never payload bytes, so it cannot become a collection surface. It answers the diagnostic questions (am I being spammed, is this id new since the update, how much am I sending) without exposing anyone's data. Fed by the network layer; a script only reads it. `recent` returns a table keyed \"0\",\"1\",…, newest first, each {seq, dir, id, name, bytes, time_ms}; `summary` is the same shape per id, highest count first. `dir` is \"inbound\", \"outbound\" or \"\" for both.
+  recent: (max: number) -> {[string]: any},
+  last: () -> {[string]: any},
+  totals: () -> {[string]: any},
+  summary: (dir: string) -> {[string]: any},
+  count_of: (id: number) -> number,
+  size: () -> number,
+  clear: () -> (),
+}
+
 -- Capability required: hud.
 export type Mod = {
   -- Script module + settings system. A script declares a module with metadata and a set of TYPED settings (toggle, slider, select, keybind, text, button); the client renders them and the user configures them. Every write is validated against the setting's declared kind and range and fails closed, so a toggle can never receive an out-of-range slider value. Handles are numbers; a setting is addressed by its module handle and key. `options` for a select is a newline-separated list of labels.

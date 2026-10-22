@@ -129,6 +129,20 @@ Capability: `hud`.
 | `pvp.attached() -> bool` | `hud` | - |
 | `pvp.low_health() -> bool` | `hud` | True while the local player is under the low-health threshold and the vignette is on. |
 
+## Packets
+
+Capability: `packets`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `packets.recent(max: number) -> Table` | `packets` | Read-only packet inspection. The log holds packet METADATA only — a sequence number, direction, protocol id, a name and a byte length — and never payload bytes, so it cannot become a collection surface. It answers the diagnostic questions (am I being spammed, is this id new since the update, how much am I sending) without exposing anyone's data. Fed by the network layer; a script only reads it. `recent` returns a table keyed \"0\",\"1\",…, newest first, each {seq, dir, id, name, bytes, time_ms}; `summary` is the same shape per id, highest count first. `dir` is \"inbound\", \"outbound\" or \"\" for both. |
+| `packets.last() -> Table` | `packets` | - |
+| `packets.totals() -> Table` | `packets` | - |
+| `packets.summary(dir: string) -> Table` | `packets` | - |
+| `packets.count_of(id: number) -> number` | `packets` | - |
+| `packets.size() -> number` | `packets` | - |
+| `packets.clear() -> nil` | `packets` | - |
+
 ## Mod
 
 Capability: `hud`.

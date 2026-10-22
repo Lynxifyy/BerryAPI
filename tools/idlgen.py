@@ -63,6 +63,7 @@ CAPABILITY_ENUM = {
     "events": "CapKind::Events",
     "audio": "CapKind::Audio",
     "cosmetic": "CapKind::Cosmetic",
+    "packets": "CapKind::Packets",
 }
 
 

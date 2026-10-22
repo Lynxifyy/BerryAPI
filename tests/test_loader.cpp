@@ -510,15 +510,14 @@ void TestPythonSignerInterop() {
       "{\"name\":\"interop\",\"version\":\"1.0.0\",\"entry\":\"main.luau\","
       "\"author\":\"Lynxifyy\","
       "\"capabilities\":[\"render\",\"hud\",\"input\","
-      "\"network:api.example.com\"],"
+      "\"network:api.example.com\",\"packets\"],"
       "\"source_sha256\":\"c4d89fbd7e19881c9c4c82e4708269d4ee88f98e0d30b561"
       "15d99c0dca335e92\","
-      "\"payload_hash\":\"1ea5d676989c072c88274a91fd3ef51785a4180389ce4f57b6"
-      "05d1d6634aad5a\","
+      "\"payload_hash\":\"5a859a2e744be345a3ca4b2f3e1480a67b8b5d0f17542b706c"
+      "273621cb5a8a3e\","
       "\"signature_algo\":\"ed25519\","
-      "\"signature\":\"5b984043108c5e5ff2d0ee68bc112e75dc8aedffb369793ac20bcb"
-      "9d596ebb3cf53c367800586cfc5b216dbc67011ec990be52d62446ea11d833215b"
-      "4f68b501\"}";
+      "\"signature\":\"9b00847135d910f73ff7df06719150db9e9519d96b0c7947fd6cfffd88"
+      "ad108710b98efec16067a8e7a7bca66717f644c1d4cab6a7d9bfd52c5f72205462e40f\"}";
 
   ScriptLoaderConfig cfg;
   cfg.anchor = TrustAnchor::Ed25519Key(kPubHex);
@@ -532,8 +531,9 @@ void TestPythonSignerInterop() {
   CHECK(loader.VerifyOnly(manifestJson, kSource, &out, &outcome, nullptr));
   CHECK(outcome.ok());
   CHECK(out.name == "interop");
-  CHECK(out.capabilities.Count() == 4);
+  CHECK(out.capabilities.Count() == 5);
   CHECK(out.capabilities.Has(CapKind::Network));
+  CHECK(out.capabilities.Has(CapKind::Packets));
 
   // A single changed byte of source fails the binding.
   CHECK(!loader.VerifyOnly(manifestJson, std::string(kSource) + " ", &out,

@@ -38,6 +38,7 @@
 #include "berry/input.h"
 #include "berry/intent.h"
 #include "berry/perf.h"
+#include "berry/packet.h"
 #include "berry/pvp.h"
 #include "berry/pack.h"
 #include "berry/package.h"
@@ -146,6 +147,9 @@ class BERRY_API ScriptApi {
     /// target, session stats). Null makes the `pvp.*` bindings fail closed and
     /// the frame hook skip the overlay.
     PvpOverlay* pvp = nullptr;
+    /// The read-only packet log. Null makes the `packets.*` bindings fail
+    /// closed (empty tables, zero counts).
+    PacketLog* packets = nullptr;
     /// The local player's entity id, used as the origin for `world.query`.
     /// Default 0 means "unknown", which makes the query fail closed.
     EntityId localPlayer;

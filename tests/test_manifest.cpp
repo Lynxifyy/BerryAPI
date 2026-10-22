@@ -68,6 +68,18 @@ static void TestCapabilities() {
   CHECK(cap.kind == CapKind::FileIO);
   CHECK(cap.scope == "own-dir");
 
+  // `packets` is its own kind: inspecting packets is a different authority from
+  // sending them, so a network grant must not reach it.
+  CHECK(Capability::Parse("packets", &cap));
+  CHECK(cap.kind == CapKind::Packets);
+  CHECK(CapKindFromName("packets") == CapKind::Packets);
+  CHECK(std::string(CapKindName(CapKind::Packets)) == "packets");
+  Capability netGrant;
+  CHECK(Capability::Parse("network:*", &netGrant));
+  Capability wantPackets;
+  CHECK(Capability::Parse("packets", &wantPackets));
+  CHECK(!netGrant.Covers(wantPackets));
+
   // Unknown kind and empty scope fail closed.
   CHECK(!Capability::Parse("teleport", &cap));
   CHECK(!Capability::Parse("", &cap));
