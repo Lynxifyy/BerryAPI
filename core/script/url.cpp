@@ -383,4 +383,17 @@ UrlReject UrlPolicy::Check(const Url& url) const {
   return UrlReject::None;
 }
 
+bool HostCoveredByGrant(const CapabilitySet& granted, const std::string& host) {
+  const std::string want = NormalizeNetworkScope(host);
+  if (want.empty()) return false;
+  for (const Capability& have : granted.All()) {
+    if (have.kind != CapKind::Network) continue;
+    if (have.scope == "*") return true;
+    if (have.scope.empty()) continue;
+    const std::string allowed = NormalizeNetworkScope(have.scope);
+    if (!allowed.empty() && allowed == want) return true;
+  }
+  return false;
+}
+
 }  // namespace Berry

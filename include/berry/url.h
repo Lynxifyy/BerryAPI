@@ -1,6 +1,7 @@
 #pragma once
 #include "berry/export.h"
 #include "berry/types.h"
+#include "berry/manifest.h"
 
 #include <string>
 
@@ -89,5 +90,16 @@ BERRY_API bool IsPrivateOrReservedHost(const std::string& host);
 
 /// True when `host` is a loopback address (`127.0.0.0/8`, `::1`).
 BERRY_API bool IsLoopbackHost(const std::string& host);
+
+/// True when the grant `granted` covers `host` for an outbound connection. A
+/// wildcard grant (`network:*`) covers any host; a scoped grant covers exactly
+/// the host it names, normalized so `network:api.example.com` and
+/// `network:domain=api.example.com` behave the same. An unscoped `network`
+/// grant covers nothing — it is not a licence to reach every host.
+///
+/// This is the one implementation of the grant check: the HTTP path and the
+/// WebSocket path both call it, so the two cannot drift apart.
+BERRY_API bool HostCoveredByGrant(const CapabilitySet& granted,
+                                  const std::string& host);
 
 }  // namespace Berry
