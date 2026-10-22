@@ -73,6 +73,23 @@ Capability: `input`.
 | --- | --- | --- |
 | `input.is_key_down(key: string) -> bool` | `input` | Client-side input state. Values a normal client could already see. |
 | `input.clicks_per_second() -> number` | `input` | - |
+| `input.velocity() -> Vec3` | `input` | The local player's core velocity (motionX/Y/Z, blocks/second). Zero when stationary or unknown; drives trailing cosmetic sway. |
+
+## Cosmetic
+
+Capability: `cosmetic`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `cosmetic.list() -> string` | `cosmetic` | Local cosmetic loadouts. Renders on this screen only unless the sync channel is on. |
+| `cosmetic.equipped(slot: string) -> string` | `cosmetic` | - |
+| `cosmetic.equip(asset: string) -> bool` | `cosmetic` | - |
+| `cosmetic.unequip(slot: string) -> bool` | `cosmetic` | - |
+| `cosmetic.save_preset(name: string) -> bool` | `cosmetic` | - |
+| `cosmetic.apply_preset(name: string) -> bool` | `cosmetic` | - |
+| `cosmetic.presets() -> string` | `cosmetic` | - |
+| `cosmetic.set_local_only(enabled: bool) -> nil` | `cosmetic` | - |
+| `cosmetic.reload_packs() -> number` | `cosmetic` | Reload local model packs from the pack directory, registering every valid *.pack.json. Returns the number of packs loaded; each pack is applied atomically (all its assets or none). |
 
 ## Events
 

@@ -87,3 +87,8 @@ are deliberately **not** added to the strict module set. See
 - `PvpOverlay` (`pvp.h`) — local-only CPS/keystrokes/combo/armor/ping HUD.
 - `PerformanceGovernor` (`perf.h`) — adaptive FPS governor with thermal
   awareness and a `CullPolicy` for the render hooks' keep/cull decisions.
+- `CosmeticService` (`cosmetic.h`) — slot/bone cosmetic registry, loadouts and
+  wardrobe, rendered locally through the skeleton and geometry seams.
+- `CosmeticSyncChannel` (`cosmetic_sync.h`) — optional signed loadout channel so
+  other clients can see your cosmetics; verification fails closed and applied
+  loadouts are gated on provable ownership.

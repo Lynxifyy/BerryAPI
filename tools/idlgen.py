@@ -45,9 +45,10 @@ class IdlError(Exception):
 
 
 # IDL capability name -> CapKind enum value. Kept explicit so a typo in the IDL
-# fails the build instead of silently mapping to CapKind::Unknown (which would
-# make the runtime treat the binding as capability-free).
+# fails the build instead of silently mapping to CapKind::Unknown, which the
+# runtime gate denies (a binding must name a capability, or say "nocap").
 CAPABILITY_ENUM = {
+    "nocap": "CapKind::NoCap",
     "combat": "CapKind::Combat",
     "render": "CapKind::Render",
     "world": "CapKind::World",

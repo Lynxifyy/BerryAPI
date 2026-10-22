@@ -161,14 +161,20 @@ using ScriptNativeFn =
 /// ScriptStatus::CapabilityDenied.
 class BERRY_API ScriptBindings {
  public:
+  /// Registers a binding and the capability it requires. Pass
+  /// `Capability::NoCap()` for a binding that genuinely needs no capability;
+  /// an unset requirement (a default-constructed Capability) is denied by
+  /// Invoke, so a forgotten capability can never become an open binding.
   void Register(const std::string& name, const Capability& required,
                 ScriptNativeFn fn);
   bool Has(const std::string& name) const;
-  /// Capability a binding requires; Unknown when the binding is absent.
+  /// Capability a binding requires; Unknown when the binding is absent OR was
+  /// registered without a capability. Use Has() to tell those apart.
   Capability Required(const std::string& name) const;
 
   /// Invokes a binding. On success sets *ok = true. When the capability is not
-  /// granted, sets *ok = false and *denied = true (fail closed).
+  /// granted — including the unset-capability case — sets *ok = false and
+  /// *denied = true (fail closed).
   ScriptValue Invoke(ScriptContext& ctx, const std::string& name,
                      const std::vector<ScriptValue>& args, bool* ok,
                      bool* denied) const;

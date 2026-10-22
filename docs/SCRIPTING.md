@@ -267,6 +267,69 @@ throttling itself, so the governor clamps to a low ceiling on
 turns the current settings into the render hooks' cull/keep, animate/don't and
 spawn/don't decisions.
 
+### Cosmetics (`cosmetic.h`, `cosmetic_sync.h`, `pack.h`)
+
+A cosmetic is data attached to a slot on the player skeleton: capes, wings,
+hats, backpacks, auras, trails, hit effects and emotes. `CosmeticSlot` says
+where an asset may sit and `Bone` says what it hangs from; a `CosmeticAsset`
+carries the geometry/texture ids and the attach transform. Assets live in the
+`CosmeticRegistry` (with a small built-in set from `RegisterBuiltins()`), and a
+`CosmeticLoadout` holds at most one asset per slot. `CosmeticWardrobe` keeps
+named presets so a player can switch loadouts.
+
+Rendering is local-only by default. `CosmeticService` resolves a loadout into
+draw items through a `CosmeticSkeletonSource` (a world transform per bone) and
+submits them to a `CosmeticRenderSeam`; `ComposeAttach` scales the asset offset
+by the bone and rotates it by the bone's yaw so a cape stays behind the back as
+the player turns. Nothing is drawn for a remote player until a verified loadout
+arrives.
+
+Attached assets follow the player's motion. A `CosmeticAsset` carries a `trail`
+factor (0 rigid .. 1 fully slack); `ComposeAttach` folds in a trailing pose —
+lean back and lag opposite the motion, saturating at `CosmeticTrailFullSpeed`.
+Motion comes from the bone itself, or, when the skeleton seam reports none, from
+a `LocalVelocitySource` the service injects. A rigid asset, a still player, or a
+non-finite velocity yields an all-zero pose (no fabricated sway). Scripts read
+the same vector as `input.velocity()`.
+
+Resolves are cached per entity. A cached entry is reused only while the skeleton
+seam reports an unchanged pose revision (`CosmeticSkeletonSource::PoseRevision`),
+the loadout and the injected velocity are all unchanged; a seam that cannot
+report a revision (`noRevision`) disables the cache, so a stale pose is never
+reused. The cache is bounded and LRU-evicted, and a seam swap clears it.
+`CosmeticStats::cacheHits`/`cacheMisses` expose the policy.
+
+Seeing another player's cosmetics needs a channel, and that channel is the
+security boundary. `CosmeticSyncChannel` signs a canonical `(player, loadout)`
+payload (Ed25519 in production, HMAC for local development), frames it with a
+versioned envelope and hands it to a `CosmeticSyncTransport` (a WebSocket on
+device). Receiving fails closed at every step — bad framing, unknown or
+mismatched algorithm, a signature that does not verify over the exact bytes, or
+a loadout body that does not parse all drop the message with no state change.
+Even a validly signed loadout is applied through
+`CosmeticService::SetRemoteLoadout`, which keeps only assets the named player
+provably owns (`CosmeticOwnership`), so a compromised peer cannot wear someone
+else's cosmetics.
+
+Scripts reach the local loadout through the `cosmetic.*` bindings (see
+[API.md](API.md)): `equip`, `unequip`, `equipped`, `list`, `save_preset`,
+`apply_preset`, `presets` and `set_local_only`. All are client-side state — no
+world write and no other player affected — and gated on the `cosmetic`
+capability.
+
+Assets can also be authored as data. A **model pack** (`pack.h`) is a JSON
+document — `format`, `name`, `assets` — that describes assets (id, slot, bone,
+geometry/texture handles, offset, rotation, scale, tint, trail, tags); the
+`CosmeticPackLoader` parses one through the loader's `IScriptFileSystem` seam
+(never the host filesystem directly) and registers it. Loading is atomic: a pack
+whose document is malformed, names an unknown key/slot/bone, or repeats an id
+registers nothing, because the whole document is validated before any asset is
+applied (`CosmeticRegistry::RegisterAll`). `LoadDirectory()` reads only
+`*.pack.json` files, one failed pack does not stop the others, and the counts
+are capped so a runaway directory cannot exhaust memory. The
+`cosmetic.reload_packs()` binding triggers a directory load and returns how many
+packs loaded cleanly.
+
 ## The intent layer
 
 `World` and `Combat` are read-only. Writes go through intents that a policy

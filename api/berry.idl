@@ -72,6 +72,23 @@ module Input {
   doc "Client-side input state. Values a normal client could already see."
   fn is_key_down(key: string) -> bool
   fn clicks_per_second() -> number
+  doc "The local player's core velocity (motionX/Y/Z, blocks/second). Zero when stationary or unknown; drives trailing cosmetic sway."
+  fn velocity() -> Vec3
+}
+
+module Cosmetic {
+  capability cosmetic
+  doc "Local cosmetic loadouts. Renders on this screen only unless the sync channel is on."
+  fn list() -> string
+  fn equipped(slot: string) -> string
+  fn equip(asset: string) -> bool
+  fn unequip(slot: string) -> bool
+  fn save_preset(name: string) -> bool
+  fn apply_preset(name: string) -> bool
+  fn presets() -> string
+  fn set_local_only(enabled: bool) -> nil
+  doc "Reload local model packs from the pack directory, registering every valid *.pack.json. Returns the number of packs loaded; each pack is applied atomically (all its assets or none)."
+  fn reload_packs() -> number
 }
 
 module Events {

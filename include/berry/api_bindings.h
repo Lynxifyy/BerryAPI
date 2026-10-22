@@ -31,9 +31,11 @@
 #include "berry/export.h"
 #include "berry/types.h"
 #include "berry/combat.h"
+#include "berry/cosmetic.h"
 #include "berry/hud.h"
 #include "berry/input.h"
 #include "berry/perf.h"
+#include "berry/pack.h"
 #include "berry/render.h"
 #include "berry/script.h"
 #include "berry/services.h"
@@ -106,6 +108,15 @@ class BERRY_API ScriptApi {
     PerformanceGovernor* governor = nullptr;
     Combat* combat = nullptr;
     WorldHandle* world = nullptr;
+    /// Local cosmetic loadouts and wardrobe. Null makes the cosmetic.* bindings
+    /// fail closed ("cosmetics unavailable").
+    CosmeticService* cosmetics = nullptr;
+    /// Local model-pack loader. Null makes `cosmetic.reload_packs` fail closed
+    /// (returns 0 and raises "pack loader unavailable").
+    CosmeticPackLoader* packs = nullptr;
+    /// Local player velocity (motionX/Y/Z). Null makes `input.velocity` fail
+    /// closed (returns zero, i.e. "stationary").
+    LocalVelocitySource* velocity = nullptr;
     /// The local player's entity id, used as the origin for `world.query`.
     /// Default 0 means "unknown", which makes the query fail closed.
     EntityId localPlayer;

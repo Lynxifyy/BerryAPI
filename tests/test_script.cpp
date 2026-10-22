@@ -275,6 +275,62 @@ static void TestBindingsGate() {
   CHECK(!ok && !denied);
 }
 
+// The gate must fail CLOSED when a binding's capability is unset. An unset
+// requirement (a default-constructed Capability, kind == Unknown) means "the
+// author forgot to declare one", not "no capability needed": it must be denied,
+// and only an explicit Capability::NoCap may run without a grant.
+static void TestGateDeniesUnsetCapability() {
+  ScriptBindings bindings;
+  // A binding registered the way a careless caller would: no capability named.
+  Capability unset;
+  CHECK(unset.kind == CapKind::Unknown);
+  bindings.Register("forgot", unset,
+                    [](ScriptContext&, const std::vector<ScriptValue>&) {
+                      return ScriptValue::Bool(true);
+                    });
+  // A binding that names NoCap on purpose: genuinely capability-free.
+  bindings.Register("scheduler", Capability::NoCap(),
+                    [](ScriptContext&, const std::vector<ScriptValue>&) {
+                      return ScriptValue::Bool(true);
+                    });
+
+  // Even a generously granted script cannot reach the unset binding.
+  ScriptContext rich("rich", Grant({"render", "network", "world", "combat",
+                                    "input", "hud", "perf", "events", "audio",
+                                    "cosmetic", "fileio"}));
+  bool ok = true, denied = false;
+  bindings.Invoke(rich, "forgot", {}, &ok, &denied);
+  CHECK(!ok && denied);
+
+  // And of course not a script with no grants either.
+  ScriptContext bare("bare", Grant({}));
+  ok = true; denied = false;
+  bindings.Invoke(bare, "forgot", {}, &ok, &denied);
+  CHECK(!ok && denied);
+
+  // NoCap runs with no grants at all.
+  ok = false; denied = true;
+  ScriptValue v = bindings.Invoke(bare, "scheduler", {}, &ok, &denied);
+  CHECK(ok && !denied && v.Truthy());
+}
+
+// NoCap is a binding requirement, never something a manifest can grant, and it
+// must never cover anything when it appears as a grant side.
+static void TestNoCapIsNotGrantable() {
+  CapabilitySet s;
+  CHECK(!s.Add("nocap"));                    // not a manifest capability
+  CHECK(!s.Add(Capability::NoCap()));        // not addable as a grant
+  CHECK(s.empty());
+  // A NoCap "grant" covers nothing, including another NoCap requirement.
+  CHECK(!Capability::NoCap().Covers(Capability::NoCap()));
+  // An unset capability covers nothing either.
+  Capability unset;
+  Capability render;
+  CHECK(Capability::Parse("render", &render));
+  CHECK(!unset.Covers(render));
+  CHECK(!unset.Covers(unset));
+}
+
 static void TestHostBindingsThroughVm() {
   auto vm = std::unique_ptr<IScriptVm>(CreateReferenceVm());
   ScriptBindings bindings;
@@ -450,6 +506,8 @@ int main() {
   TestMemoryLimit();
   TestTimeslice();
   TestBindingsGate();
+  TestGateDeniesUnsetCapability();
+  TestNoCapIsNotGrantable();
   TestHostBindingsThroughVm();
   TestErrorIsolation();
   TestStateRoundTrip();

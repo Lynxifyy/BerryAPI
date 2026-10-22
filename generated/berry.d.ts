@@ -61,6 +61,23 @@ export interface Input {
   /** Client-side input state. Values a normal client could already see. */
   is_key_down(key: string): boolean;
   clicks_per_second(): number;
+  /** The local player's core velocity (motionX/Y/Z, blocks/second). Zero when stationary or unknown; drives trailing cosmetic sway. */
+  velocity(): Vec3;
+}
+
+/** Capability required: cosmetic. */
+export interface Cosmetic {
+  /** Local cosmetic loadouts. Renders on this screen only unless the sync channel is on. */
+  list(): string;
+  equipped(slot: string): string;
+  equip(asset: string): boolean;
+  unequip(slot: string): boolean;
+  save_preset(name: string): boolean;
+  apply_preset(name: string): boolean;
+  presets(): string;
+  set_local_only(enabled: boolean): void;
+  /** Reload local model packs from the pack directory, registering every valid *.pack.json. Returns the number of packs loaded; each pack is applied atomically (all its assets or none). */
+  reload_packs(): number;
 }
 
 /** Coroutine-native async facade (Phase 4). */

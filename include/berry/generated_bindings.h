@@ -41,11 +41,21 @@ inline const BindingSpec* BindingSpecs() {
       {"perf.set_thermal_mode", CapKind::Perf, 1, "Perf"},
       {"input.is_key_down", CapKind::Input, 1, "Input"},
       {"input.clicks_per_second", CapKind::Input, 0, "Input"},
+      {"input.velocity", CapKind::Input, 0, "Input"},
+      {"cosmetic.list", CapKind::Cosmetic, 0, "Cosmetic"},
+      {"cosmetic.equipped", CapKind::Cosmetic, 1, "Cosmetic"},
+      {"cosmetic.equip", CapKind::Cosmetic, 1, "Cosmetic"},
+      {"cosmetic.unequip", CapKind::Cosmetic, 1, "Cosmetic"},
+      {"cosmetic.save_preset", CapKind::Cosmetic, 1, "Cosmetic"},
+      {"cosmetic.apply_preset", CapKind::Cosmetic, 1, "Cosmetic"},
+      {"cosmetic.presets", CapKind::Cosmetic, 0, "Cosmetic"},
+      {"cosmetic.set_local_only", CapKind::Cosmetic, 1, "Cosmetic"},
+      {"cosmetic.reload_packs", CapKind::Cosmetic, 0, "Cosmetic"},
   };
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 20; }
+inline size_t BindingSpecCount() { return 30; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -97,6 +107,18 @@ inline const char* const kPerfNames[] = {
 inline const char* const kInputNames[] = {
     "input.is_key_down",
     "input.clicks_per_second",
+    "input.velocity",
+};
+inline const char* const kCosmeticNames[] = {
+    "cosmetic.list",
+    "cosmetic.equipped",
+    "cosmetic.equip",
+    "cosmetic.unequip",
+    "cosmetic.save_preset",
+    "cosmetic.apply_preset",
+    "cosmetic.presets",
+    "cosmetic.set_local_only",
+    "cosmetic.reload_packs",
 };
 
 inline const ModuleBindings* ModuleBindingTable() {
@@ -107,12 +129,13 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Network", kNetworkNames, 1},
       {"Hud", kHudNames, 5},
       {"Perf", kPerfNames, 3},
-      {"Input", kInputNames, 2},
+      {"Input", kInputNames, 3},
+      {"Cosmetic", kCosmeticNames, 9},
   };
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 7; }
+inline size_t ModuleBindingCount() { return 8; }
 
 }  // namespace api
 }  // namespace Berry

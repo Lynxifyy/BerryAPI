@@ -245,8 +245,10 @@ void AsyncRuntime::InstallBindings(ScriptBindings* bindings,
   AsyncRuntime* self = const_cast<AsyncRuntime*>(this);
   self->policy_ = policy;
 
-  Capability none;   // async.wait needs no capability: pure scheduling
-  bindings->Register(AsyncBindings::Wait(), none,
+  // async.wait is pure scheduling and needs no capability, but it must SAY so:
+  // an unset requirement is denied by the gate, so capability-free is an
+  // explicit declaration (Capability::NoCap), never a default.
+  bindings->Register(AsyncBindings::Wait(), Capability::NoCap(),
                      [self](ScriptContext& ctx,
                             const std::vector<ScriptValue>& args) {
                        const GameTick ticks =

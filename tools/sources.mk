@@ -23,10 +23,12 @@ CORE_SRC := \
   core/modules/hud.cpp \
   core/modules/input.cpp \
   core/modules/pvp.cpp \
+  core/modules/cosmetic.cpp \
   core/modules/governor.cpp \
   core/lifecycle/engine.cpp \
   core/lifecycle/thread.cpp \
   core/net/net.cpp \
+  core/net/cosmetic_sync.cpp \
   core/script/crypto.cpp \
   core/script/ed25519.cpp \
   core/script/manifest.cpp \
@@ -37,6 +39,7 @@ CORE_SRC := \
   core/script/host.cpp \
   core/script/reload.cpp \
   core/script/loader.cpp \
+  core/script/pack.cpp \
   core/script/async.cpp \
   core/script/url.cpp \
   core/script/api_bindings.cpp \
@@ -76,7 +79,9 @@ TEST_SRC := \
   tests/test_governor.cpp \
   tests/test_url.cpp \
   tests/test_loader.cpp \
-  tests/test_api_bindings.cpp
+  tests/test_api_bindings.cpp \
+  tests/test_cosmetic.cpp \
+  tests/test_pack.cpp
 # Vendored Luau (MIT). See third_party/luau/PROVENANCE.md for the pinned
 # version and why these units and not the CLI. Compiled with -w because upstream
 # is only warning-clean under its own flag set; our code stays -Wall -Wextra clean.

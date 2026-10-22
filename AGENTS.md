@@ -41,6 +41,12 @@ make lib             # builds build/libBerryAPI.so
   generator self-test and fails when the generated files drift.
 - Scripts are capability-gated per call and budgeted per invocation; a fault
   puts the host in `Faulted` and it refuses further calls until reload.
+- The capability gate fails closed. A binding's requirement defaults to
+  `CapKind::Unknown`, which is **not** a grant and **not** grantable; a binding
+  that needs no capability must declare `Capability::NoCap()` (the IDL
+  `nocap`). `CapabilitySet::Add`/`Covers` reject non-grantable kinds, so
+  "author forgot to declare a capability" can never read as "no capability".
+  `test_idl` asserts no binding is capability-free by accident.
 - The async layer resumes on the script worker thread; keep the scheduler's
   predicate evaluation outside its lock.
 
@@ -54,6 +60,18 @@ make lib             # builds build/libBerryAPI.so
 - `Hud::Present` re-lays out only dirty subtrees; call `SetText`/`SetSize`/
   `SetOffset` (which dirty the right nodes) rather than poking resolved
   geometry.
+- `CosmeticService` resolves a loadout into draw items through the
+  `CosmeticSkeletonSource`/`CosmeticRenderSeam` seams; never assume engine
+  pointers in the core. A resolve is cached per entity and only reused while the
+  skeleton seam reports an unchanged pose revision — a seam that cannot report
+  one (`noRevision`) disables the cache so a stale attach transform is never
+  reused. A seam swap clears the cache.
+- Cosmetic model packs (`pack.h`) are data, loaded through the loader's
+  `IScriptFileSystem` seam, and applied atomically via
+  `CosmeticRegistry::RegisterAll`: a pack that is malformed, names an unknown
+  key/slot/bone, or repeats an id registers nothing. `LoadDirectory()` reads only
+  `*.pack.json`. `RealScriptFileSystem`/`MemoryScriptFileSystem` both implement
+  `ListDir`; a seam without a listing simply finds no packs.
 
 ## Conventions
 
@@ -68,3 +86,13 @@ make lib             # builds build/libBerryAPI.so
 
 - `tests/shim_net.h` contains a loopback HTTP server and a WS echo server.
 - Run a single suite: `make build/test_test_modules && ./build/test_test_modules`.
+- `make test` and `make test-sanitize` (ASan+UBSan) must both stay green; the
+  sanitizer build is slow (several minutes) — run it in the background and poll
+  a log file rather than blocking the terminal.
+
+## Pull requests
+
+- Opening a PR via the GitHub REST API or the `create_pr` tool returns
+  `403 Resource not accessible by integration` in this environment. The `gh`
+  CLI works instead: `GH_TOKEN="$Github" gh pr create ...`. All three tokens
+  (`Github`, `GithubLynxifyy`, `GITHUB_TOKEN`) authenticate as `Lynxifyy`.

@@ -307,7 +307,17 @@ static void TestHttpBindingGated() {
   CHECK(bindings.Has("async.http_get"));
   CHECK(bindings.Required("async.events_once").kind == CapKind::Events);
   CHECK(bindings.Required("async.http_get").kind == CapKind::Network);
-  CHECK(bindings.Required("async.wait").kind == CapKind::Unknown);
+  // async.wait is capability-free, and it declares that explicitly (NoCap)
+  // rather than leaving the requirement unset (Unknown), which the gate denies.
+  CHECK(bindings.Required("async.wait").kind == CapKind::NoCap);
+
+  // async.wait therefore runs for a script with no grants at all...
+  {
+    ScriptContext open("no-grants", Grant({}));
+    bool wok = false, wdenied = true;
+    bindings.Invoke(open, "async.wait", {ScriptValue::Num(1)}, &wok, &wdenied);
+    CHECK(wok && !wdenied);
+  }
 
   // A script without the network grant cannot use Http.get.
   ScriptContext ctx("no-net", Grant({"events"}));

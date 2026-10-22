@@ -149,7 +149,7 @@ class BERRY_API AsyncRuntime {
                std::function<u64()> nowMs);
 
   /// Registers the async bindings on `bindings`, each requiring `cap`.
-  /// - async.wait:        requires no capability (pure scheduling).
+  /// - async.wait:        requires no capability (declared via Capability::NoCap).
   /// - async.events_once: requires kCapEvents.
   /// - async.http_get:    requires a kCapNetwork grant scoped to the URL host.
   ///
