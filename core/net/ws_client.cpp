@@ -135,10 +135,14 @@ u64 WsClientPool::Connect(const std::string& url, const CapabilitySet& granted,
     conns_[conn->handle] = conn;
   }
   // The callbacks fire on the thread calling Pump (the script worker) and only
-  // touch this connection's inbox. They capture the shared_ptr, so a concurrent
-  // CloseAll cannot leave them pointing at freed memory.
-  std::shared_ptr<Conn> self = conn;
-  conn->sock->OnMessage([self](const WsMessage& msg) {
+  // touch this connection's inbox. They capture a weak reference: the socket is
+  // owned by the connection, so it cannot outlive it, and a strong capture
+  // would form a cycle (Conn -> sock -> callback -> Conn) that keeps the
+  // connection alive after it is erased from the pool.
+  std::weak_ptr<Conn> weak = conn;
+  conn->sock->OnMessage([weak](const WsMessage& msg) {
+    std::shared_ptr<Conn> self = weak.lock();
+    if (!self) return;
     WsClientMessage m;
     m.opcode = WsOpcodeName((u8)msg.opcode);
     m.binary = msg.opcode == WsOpcode::Binary;
@@ -146,7 +150,9 @@ u64 WsClientPool::Connect(const std::string& url, const CapabilitySet& granted,
     self->inbox.push_back(std::move(m));
     while (self->inbox.size() > kMaxInbox) self->inbox.pop_front();
   });
-  conn->sock->OnClose([self](int, const std::string& reason) {
+  conn->sock->OnClose([weak](int, const std::string& reason) {
+    std::shared_ptr<Conn> self = weak.lock();
+    if (!self) return;
     self->open = false;
     self->error = reason;
   });
