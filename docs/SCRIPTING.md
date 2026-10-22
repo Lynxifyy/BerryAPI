@@ -336,6 +336,23 @@ Even a validly signed loadout is applied through
 provably owns (`CosmeticOwnership`), so a compromised peer cannot wear someone
 else's cosmetics.
 
+A signature proves *who* sent a message, not that sending it again is welcome,
+so the channel defends against a valid-but-hostile peer as well. After the
+signature verifies, `Receive` applies, in order: revocation, a per-peer token
+bucket, and a replay window. A peer id on the revocation list (`RevokePeer`) is
+refused outright, without rotating the shared key. The token bucket lets a peer
+burst `rateBurst` messages and refills at `ratePerSecond`, so a stream of
+individually-valid loadouts cannot flood the channel; the peer table is bounded
+by `maxPeers`, evicting the least-recently-seen peer so a flood of distinct ids
+cannot grow it without limit. The replay window remembers the digest of every
+accepted message for `replayTtlMs` (bounded by `replayWindow`), so the same
+signed loadout cannot be re-applied and re-broadcast after the fact. All three
+run *after* the signature check, so an unauthenticated message never consumes a
+token or fills the window. `Verify` stays a pure signature/shape check with no
+side effects; the defences live in `Receive`. Limits are set through
+`CosmeticSyncConfig`, and the clock is injectable so the TTL and the limiter are
+deterministic in tests.
+
 Scripts reach the local loadout through the `cosmetic.*` bindings (see
 [API.md](API.md)): `equip`, `unequip`, `equipped`, `list`, `save_preset`,
 `apply_preset`, `presets` and `set_local_only`. All are client-side state — no

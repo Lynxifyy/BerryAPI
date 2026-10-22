@@ -735,6 +735,235 @@ static void TestSyncHmacAndAlgorithmConfusion() {
 }
 
 //----------------------------------------------------------------------------
+// Sync channel: replay, rate limiting, revocation
+//----------------------------------------------------------------------------
+
+namespace {
+
+/// A controllable clock so the replay TTL and the rate limiter are driven by
+/// test time, not wall time.
+struct FakeClock {
+  u64 ms = 1000;
+  u64 operator()() const { return ms; }
+  void Advance(u64 d) { ms += d; }
+};
+
+}  // namespace
+
+static void TestSyncReplayRefused() {
+  FreshRegistry();
+  auto& ownership = CosmeticOwnership::Instance();
+  ownership.Clear();
+  ownership.Grant("alice", "builtin.cape.red");
+
+  std::string pub, sec;
+  SeedKey(&pub, &sec, 'S');
+
+  FakeClock clock;
+  CaptureTransport transport;
+  CosmeticSyncChannel ch;
+  ch.SetClock([&clock] { return clock(); });
+  ch.SetTransport(&transport);
+  ch.SetVerifyKey(CosmeticSyncKey::Ed25519PublicKey(crypto::ToHexLower(pub)));
+
+  CosmeticLoadout lo;
+  lo.Equip("builtin.cape.red");
+  CHECK(ch.Publish("alice", lo, sec, false));
+  const std::string good = transport.sent[0];
+
+  Berry::Test::ShimSkeleton skel;
+  Berry::Test::CaptureCosmeticSeam seam;
+  CosmeticService svc;
+  svc.SetSkeletonSource(&skel);
+  svc.SetRenderSeam(&seam);
+
+  // First delivery applies.
+  size_t applied = 0;
+  CHECK(ch.Receive(good, &svc, &applied) == CosmeticSyncResult::Ok);
+  CHECK(applied == 1);
+  CHECK(ch.replayWindowSize() == 1);
+
+  // The identical message again is refused as a replay, and changes nothing.
+  applied = 99;
+  CHECK(ch.Receive(good, &svc, &applied) == CosmeticSyncResult::Replayed);
+  CHECK(applied == 99);
+  CHECK(ch.lastResult() == CosmeticSyncResult::Replayed);
+
+  // Verify() is a pure signature check and stays Ok for the same bytes: the
+  // replay defence lives in Receive.
+  CosmeticSyncMessage msg;
+  CHECK(ch.Verify(good, &msg) == CosmeticSyncResult::Ok);
+
+  // A different, freshly signed message is a different digest and is accepted.
+  CosmeticLoadout lo2;
+  lo2.Equip("builtin.hat.top");
+  ownership.Grant("alice", "builtin.hat.top");
+  CHECK(ch.Publish("alice", lo2, sec, false));
+  CHECK(ch.Receive(transport.sent[1], &svc, &applied) == CosmeticSyncResult::Ok);
+}
+
+static void TestSyncReplayWindowExpires() {
+  FreshRegistry();
+  auto& ownership = CosmeticOwnership::Instance();
+  ownership.Clear();
+  ownership.Grant("alice", "builtin.cape.red");
+
+  std::string pub, sec;
+  SeedKey(&pub, &sec, 'S');
+
+  FakeClock clock;
+  CaptureTransport transport;
+  CosmeticSyncChannel ch;
+  ch.SetClock([&clock] { return clock(); });
+  ch.SetTransport(&transport);
+  ch.SetVerifyKey(CosmeticSyncKey::Ed25519PublicKey(crypto::ToHexLower(pub)));
+  CosmeticSyncConfig cfg;
+  cfg.replayTtlMs = 500;
+  // A big burst so the rate limiter does not interfere with this test.
+  cfg.rateBurst = 1000;
+  ch.SetConfig(cfg);
+
+  CosmeticLoadout lo;
+  lo.Equip("builtin.cape.red");
+  CHECK(ch.Publish("alice", lo, sec, false));
+  const std::string good = transport.sent[0];
+
+  CHECK(ch.Receive(good, nullptr) == CosmeticSyncResult::Ok);
+  CHECK(ch.Receive(good, nullptr) == CosmeticSyncResult::Replayed);
+
+  // Past the TTL the digest is dropped, so the same message is admitted again.
+  clock.Advance(501);
+  CHECK(ch.Receive(good, nullptr) == CosmeticSyncResult::Ok);
+}
+
+static void TestSyncRateLimited() {
+  FreshRegistry();
+  auto& ownership = CosmeticOwnership::Instance();
+  ownership.Clear();
+  ownership.Grant("alice", "builtin.cape.red");
+
+  std::string pub, sec;
+  SeedKey(&pub, &sec, 'S');
+
+  FakeClock clock;
+  CaptureTransport transport;
+  CosmeticSyncChannel ch;
+  ch.SetClock([&clock] { return clock(); });
+  ch.SetTransport(&transport);
+  ch.SetVerifyKey(CosmeticSyncKey::Ed25519PublicKey(crypto::ToHexLower(pub)));
+  CosmeticSyncConfig cfg;
+  cfg.rateBurst = 3.0;
+  cfg.ratePerSecond = 1.0;   // 1 token/sec
+  ch.SetConfig(cfg);
+
+  // Distinct signed messages from one peer, so the limiter (not a replay) is
+  // what refuses them. The four builtin assets sit in four slots, so the 16
+  // subsets are 16 distinct loadouts.
+  const char* kAssets[4] = {"builtin.aura.spark", "builtin.cape.red",
+                            "builtin.hat.top", "builtin.wings.angel"};
+  std::vector<std::string> msgs;
+  for (int mask = 0; mask < 10; ++mask) {
+    CosmeticLoadout lo;
+    for (int b = 0; b < 4; ++b) {
+      if (mask & (1 << b)) lo.Equip(kAssets[b]);
+    }
+    std::string m;
+    CHECK(CosmeticSyncSignEd25519("alice", lo, sec, &m));
+    msgs.push_back(m);
+  }
+
+  // The first three spend the burst; the rest are rate limited.
+  int ok = 0, limited = 0;
+  for (const auto& m : msgs) {
+    const CosmeticSyncResult r = ch.Receive(m, nullptr);
+    if (r == CosmeticSyncResult::Ok) ++ok;
+    else if (r == CosmeticSyncResult::RateLimited) ++limited;
+  }
+  CHECK(ok == 3);
+  CHECK(limited == 7);
+  CHECK(ch.lastResult() == CosmeticSyncResult::RateLimited);
+
+  // After enough time passes, a token refills and one more is admitted.
+  clock.Advance(1000);
+  CHECK(ch.Receive(msgs[3], nullptr) == CosmeticSyncResult::Ok);
+
+  // The rate limit is per peer: a different peer has its own full bucket.
+  std::string m;
+  CosmeticLoadout lo;
+  lo.Equip("builtin.cape.red");
+  CHECK(CosmeticSyncSignEd25519("bob", lo, sec, &m));
+  CHECK(ch.Receive(m, nullptr) == CosmeticSyncResult::Ok);
+}
+
+static void TestSyncPeerTableBounded() {
+  FreshRegistry();
+  std::string pub, sec;
+  SeedKey(&pub, &sec, 'S');
+
+  FakeClock clock;
+  CaptureTransport transport;
+  CosmeticSyncChannel ch;
+  ch.SetClock([&clock] { return clock(); });
+  ch.SetTransport(&transport);
+  ch.SetVerifyKey(CosmeticSyncKey::Ed25519PublicKey(crypto::ToHexLower(pub)));
+  CosmeticSyncConfig cfg;
+  cfg.maxPeers = 4;
+  cfg.rateBurst = 1000;   // don't let the limiter mask the eviction test
+  ch.SetConfig(cfg);
+
+  CosmeticLoadout lo;
+  lo.Equip("builtin.cape.red");
+  for (int i = 0; i < 50; ++i) {
+    std::string m;
+    CHECK(CosmeticSyncSignEd25519("peer" + std::to_string(i), lo, sec, &m));
+    CHECK(ch.Receive(m, nullptr) == CosmeticSyncResult::Ok);
+  }
+  // 50 distinct peers were seen, but the table never grew past the cap.
+  CHECK(ch.trackedPeers() == 4);
+}
+
+static void TestSyncRevocation() {
+  FreshRegistry();
+  auto& ownership = CosmeticOwnership::Instance();
+  ownership.Clear();
+  ownership.Grant("mallory", "builtin.cape.red");
+
+  std::string pub, sec;
+  SeedKey(&pub, &sec, 'S');
+
+  FakeClock clock;
+  CaptureTransport transport;
+  CosmeticSyncChannel ch;
+  ch.SetClock([&clock] { return clock(); });
+  ch.SetTransport(&transport);
+  ch.SetVerifyKey(CosmeticSyncKey::Ed25519PublicKey(crypto::ToHexLower(pub)));
+
+  CosmeticLoadout lo;
+  lo.Equip("builtin.cape.red");
+  CHECK(ch.Publish("mallory", lo, sec, false));
+  const std::string good = transport.sent[0];
+
+  // Before revocation the (valid, signed) message is accepted.
+  CHECK(ch.Receive(good, nullptr) == CosmeticSyncResult::Ok);
+
+  // After revoking the peer, even a validly signed, unseen message is refused.
+  ch.RevokePeer("mallory");
+  CHECK(ch.IsPeerRevoked("mallory"));
+  CHECK(!ch.IsPeerRevoked("alice"));
+
+  CosmeticLoadout lo2;
+  lo2.Equip("builtin.hat.top");
+  CHECK(ch.Publish("mallory", lo2, sec, false));
+  CHECK(ch.Receive(transport.sent[1], nullptr) == CosmeticSyncResult::Revoked);
+  CHECK(ch.lastResult() == CosmeticSyncResult::Revoked);
+
+  // Clearing the list re-admits the peer.
+  ch.ClearRevocations();
+  CHECK(!ch.IsPeerRevoked("mallory"));
+  CHECK(ch.Receive(transport.sent[1], nullptr) == CosmeticSyncResult::Ok);
+}
+
+//----------------------------------------------------------------------------
 // Script bindings
 //----------------------------------------------------------------------------
 
@@ -856,6 +1085,11 @@ int main() {
   TestSyncEd25519HappyPath();
   TestSyncRejections();
   TestSyncHmacAndAlgorithmConfusion();
+  TestSyncReplayRefused();
+  TestSyncReplayWindowExpires();
+  TestSyncRateLimited();
+  TestSyncPeerTableBounded();
+  TestSyncRevocation();
   TestCosmeticBindings();
   TestVelocityBinding();
   if (g_fail == 0) printf("test_cosmetic: ALL OK\n");
