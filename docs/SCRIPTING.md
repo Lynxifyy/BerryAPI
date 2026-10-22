@@ -380,6 +380,26 @@ animate/don't and spawn/don't decisions, including per-category particle caps
 and a screen-size cull for ambient particles. `FrameStats` reports p99 and
 `FrameHistogram` shows the shape of the tail.
 
+### Profiler flame graph (`event.h`)
+
+`Profiler` aggregates named spans into a call tree. `ProfilerScope` opens a span
+for the life of a scope; spans nest, so a span opened while another is open on
+the same thread becomes its child. Each node carries `selfMs` (time excluding
+children) and `totalMs` (self plus descendants), so a parent's total is the time
+actually spent inside it. Repeats of a name aggregate into one node, and
+children are ordered by total time descending so the expensive branch reads
+first. The open-span stack is per-thread: the render thread, the script worker
+and the game tick nest independently, and an `End` on a different thread charges
+the node its `Begin` opened without unbalancing the local stack.
+
+Spans are raised where work happens: one per module per tick (`TickAll`, named
+`Berry::Combat` etc.) and one per script hook (`RunHook`, named
+`<script>:<hook>`), including the resumed half of an async hook. The `perf.*`
+bindings read it back — `perf.flame` returns the nested tree, `perf.spans` the
+flat list, and `perf.flame_reset` starts it over. The read is a snapshot taken
+under the profiler lock, so a script can inspect the tree while the game keeps
+running.
+
 ### Cosmetics (`cosmetic.h`, `cosmetic_sync.h`, `pack.h`)
 
 A cosmetic is data attached to a slot on the player skeleton: capes, wings,

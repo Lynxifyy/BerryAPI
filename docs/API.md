@@ -206,6 +206,9 @@ Capability: `perf`.
 | `perf.set_target_fps(fps: number) -> nil` | `perf` | - |
 | `perf.set_thermal_mode(enabled: bool) -> nil` | `perf` | - |
 | `perf.set_platform(name: string) -> nil` | `perf` | Select the device profile the governor tunes itself for: generic, mobile-low, mobile-high or desktop. Unknown names are refused (fail closed). |
+| `perf.flame() -> Table` | `perf` | The aggregated span call tree since the last `perf.flame_reset`, as a nested table: each node is {name, self_ms, total_ms, count, children}, and `children` is ordered by total time descending so the expensive branch reads first. `self_ms` excludes child spans, so a parent's `total_ms` is the time actually spent inside it. Populated by the profiler spans the modules and hooks raise. |
+| `perf.spans() -> Table` | `perf` | The flat span list, highest total time first: a table keyed \"0\",\"1\",… each {name, total_ms, count, max_ms}. The list view of the same data `flame` nests. |
+| `perf.flame_reset() -> nil` | `perf` | Drops the flame tree, the span stats and the per-frame ring, starting the profiler over. |
 
 ## Input
 

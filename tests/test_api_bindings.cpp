@@ -655,6 +655,58 @@ static void TestPerfStatsAndPlatform() {
   CHECK(governor.platform() == PlatformClass::Desktop);
 }
 
+static void TestPerfFlameBindings() {
+  Profiler& prof = Profiler::Instance();
+  prof.FlameReset();
+  prof.SetEnabled(true);
+  {
+    ProfilerScope outer("hook:on_tick");
+    { ProfilerScope inner("Berry::Combat"); }
+  }
+
+  ScriptApi::Services services;
+  services.profiler = &prof;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  CHECK(Call(bindings, "perf.flame", {}, {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  const ScriptValue& outer = out.Field("children")->AsTable()->at("0");
+  CHECK(outer.Field("name")->AsString() == "hook:on_tick");
+  CHECK(outer.Field("count")->AsNumber() == 1);
+  // The nested span is a child, and the parent's self time excludes it.
+  CHECK(outer.Field("children")->AsTable()->size() == 1);
+  CHECK(outer.Field("children")->AsTable()->at("0").Field("name")->AsString() ==
+        "Berry::Combat");
+  CHECK(outer.Field("self_ms")->AsNumber() <= outer.Field("total_ms")->AsNumber());
+
+  CHECK(Call(bindings, "perf.spans", {}, {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsTable()->size() == 2);
+
+  // reset drops the tree; the next read is empty rather than stale.
+  CHECK(Call(bindings, "perf.flame_reset", {}, {"perf"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(Call(bindings, "perf.flame", {}, {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Field("children")->AsTable()->size() == 0);
+
+  // Without the perf grant the surface is denied by the gate.
+  CHECK(Call(bindings, "perf.flame", {}, {"hud"}, &out) ==
+        ScriptStatus::CapabilityDenied);
+
+  // With no profiler bound, the surface fails closed rather than crashing.
+  ScriptApi bare(ScriptApi::Services{});
+  ScriptBindings bareBindings;
+  bare.InstallBindings(&bareBindings);
+  CHECK(Call(bareBindings, "perf.flame", {}, {"perf"}, &out) ==
+        ScriptStatus::Error);
+  CHECK(Call(bareBindings, "perf.spans", {}, {"perf"}, &out) ==
+        ScriptStatus::Error);
+  CHECK(Call(bareBindings, "perf.flame_reset", {}, {"perf"}, &out) ==
+        ScriptStatus::Error);
+}
+
 //----------------------------------------------------------------------------
 // Read-only world / entity surface
 //----------------------------------------------------------------------------
@@ -1125,6 +1177,7 @@ int main() {
   TestRenderDrawHelpers();
   TestWorldReads();
   TestPerfStatsAndPlatform();
+  TestPerfFlameBindings();
   if (g_fail == 0) printf("test_api_bindings: ALL OK\n");
   return g_fail;
 }

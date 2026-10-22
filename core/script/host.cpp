@@ -98,6 +98,10 @@ ScriptStatus ScriptHost::RunHook(const std::string& hook,
   vm_->ResetInstructionCount();
   vm_->ClearInterrupt();
   ScriptError startErr;
+  // Span the hook per script, so the flame graph attributes hook time to the
+  // script that spent it. Nested bindings the hook calls land under it.
+  const std::string spanName = name_ + ":" + hook;
+  ProfilerScope span(spanName.c_str());
   return Drive(vm_->Start(hook, args, &startErr), hook, ret, startErr);
 }
 
@@ -112,6 +116,10 @@ ScriptStatus ScriptHost::ResumeFromYield(const ScriptValue& value,
     return Fail(ScriptStatus::Error,
                 err.occurred ? err : ScriptError::Make("resume failed"));
   }
+  // The resumed half of an async hook is still that script's time; span it so
+  // the flame graph does not lose work that happens after an await.
+  const std::string spanName = name_ + ":<resume>";
+  ProfilerScope span(spanName.c_str());
   return Drive(ScriptStatus::Running, "<resume>", ret, ScriptError::None());
 }
 

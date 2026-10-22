@@ -33,6 +33,7 @@
 #include "berry/audio.h"
 #include "berry/combat.h"
 #include "berry/cosmetic.h"
+#include "berry/event.h"
 #include "berry/fs.h"
 #include "berry/hud.h"
 #include "berry/input.h"
@@ -150,6 +151,9 @@ class BERRY_API ScriptApi {
     /// The read-only packet log. Null makes the `packets.*` bindings fail
     /// closed (empty tables, zero counts).
     PacketLog* packets = nullptr;
+    /// The process profiler. Null makes the `perf.flame`/`perf.spans`/
+    /// `perf.flame_reset` bindings fail closed ("profiler unavailable").
+    Profiler* profiler = nullptr;
     /// The local player's entity id, used as the origin for `world.query`.
     /// Default 0 means "unknown", which makes the query fail closed.
     EntityId localPlayer;

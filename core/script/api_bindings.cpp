@@ -145,6 +145,24 @@ f32 SafeCoord(const ScriptValue& v, f32 fallback = 0.0f) {
   return (f32)n;
 }
 
+/// A profiler flame node as a script table, recursing into children. Children
+/// are keyed "0","1",… in the order the profiler sorted them (total time
+/// descending), so a script that walks the table sees the expensive branch
+/// first without sorting.
+ScriptValue FlameToTable(const Profiler::FlameNode& node) {
+  ScriptTable t;
+  t["name"] = ScriptValue::Str(node.name);
+  t["self_ms"] = ScriptValue::Num(node.selfMs);
+  t["total_ms"] = ScriptValue::Num(node.totalMs);
+  t["count"] = ScriptValue::Num((f64)node.count);
+  ScriptTable kids;
+  for (size_t i = 0; i < node.children.size(); ++i) {
+    kids[std::to_string(i)] = FlameToTable(node.children[i]);
+  }
+  t["children"] = ScriptValue::Tbl(std::move(kids));
+  return ScriptValue::Tbl(std::move(t));
+}
+
 /// Named input keys the observer tracks. Returns null for anything else so the
 /// caller fails closed rather than guessing a mapping.
 const char* KeyField(const std::string& key, bool* out) {
@@ -966,6 +984,38 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
       // real Serious thermal report triggers, and clears it when disabled.
       services_.governor->OnThermal(enabled ? ThermalState::Serious : ThermalState::Nominal);
     });
+    return ScriptValue::Nil();
+  });
+
+  //--- Profiler (flame graph) ----------------------------------------------
+  //
+  // Built on the module/hook spans in `Profiler`. The tree is aggregated since
+  // the last reset, so a script can see where a frame actually goes rather than
+  // just the frame time. Read-only: a script inspects the profiler, it cannot
+  // fabricate spans.
+  install("perf.flame", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.profiler) { ctx.RaiseError("perf.flame: profiler unavailable"); return ScriptValue::Nil(); }
+    return FlameToTable(services_.profiler->Flame());
+  });
+
+  install("perf.spans", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.profiler) { ctx.RaiseError("perf.spans: profiler unavailable"); return ScriptValue::Nil(); }
+    ScriptTable t;
+    int i = 0;
+    for (const auto& row : services_.profiler->Spans()) {
+      ScriptTable e;
+      e["name"] = ScriptValue::Str(row.first);
+      e["total_ms"] = ScriptValue::Num(row.second.totalMs);
+      e["count"] = ScriptValue::Num((f64)row.second.count);
+      e["max_ms"] = ScriptValue::Num(row.second.maxMs);
+      t[std::to_string(i++)] = ScriptValue::Tbl(std::move(e));
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("perf.flame_reset", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.profiler) { ctx.RaiseError("perf.flame_reset: profiler unavailable"); return ScriptValue::Nil(); }
+    services_.profiler->FlameReset();
     return ScriptValue::Nil();
   });
 
