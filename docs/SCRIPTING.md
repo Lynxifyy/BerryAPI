@@ -270,6 +270,23 @@ The client-facing modules are services that draw through `Berry::Render`, not
 new strict modules — the strict module set stays
 `Combat`/`Render`/`World`/`Network`.
 
+### Sandboxed file store (`fs.h`)
+
+A script gets its own directory and nothing else. `ValidateScriptPath` is the
+whole sandbox and it is a pure function of the path: no absolute path, no
+backslash, no drive letter, no control character, no empty segment, no `.` and
+no `..`, a bounded length and depth. On top of that sit caps — per file, in
+total and on the file count — so a write loop cannot exhaust memory. Every
+`fs.*` call fails closed (false / empty) rather than throwing.
+
+### Audio cues (`audio.h`)
+
+`audio.play` plays a named cue; the device backend decides what the name means.
+A cue is a sound the local player hears, so nothing here is authoritative and
+nothing leaves the client. A malformed name is refused, a muted play is dropped
+rather than queued, and volume/pitch are clamped. With no backend bound, a play
+reports false.
+
 ### Script modules + settings (`scriptmod.h`)
 
 A script ships a MODULE: a named unit with metadata and a set of typed settings

@@ -68,6 +68,36 @@ export interface Entity {
   nearest(type: string): number;
 }
 
+/** Capability required: fileio. */
+export interface Fs {
+  /** Sandboxed file store. A script gets its own directory and nothing else: a path is validated before use (no absolute path, no backslash, no drive letter, no control character, no empty segment, no \".\" or \"..\", a bounded length and depth), so a path cannot escape the sandbox however it is spelled. Writes are capped per file, in total and in count, so a write loop cannot exhaust memory. Every call fails closed (false / empty) rather than throwing. */
+  write(path: string, data: string): boolean;
+  read(path: string): string;
+  append(path: string, data: string): boolean;
+  exists(path: string): boolean;
+  remove(path: string): boolean;
+  size(path: string): number;
+  /** Every path in the sandbox, sorted, newline-separated. `prefix` filters to paths that start with it; an empty prefix lists everything. */
+  list(prefix: string): string;
+  count(): number;
+  total_bytes(): number;
+  clear(): void;
+}
+
+/** Capability required: audio. */
+export interface Audio {
+  /** Client-side sound cues. A script plays a named cue; the device backend decides what the name means. This is a sound the local player hears, so nothing here is authoritative. An unknown or malformed cue name is refused, and a muted play is dropped rather than queued. Volume and pitch are clamped into range. */
+  play(name: string, volume: number, pitch: number): boolean;
+  set_volume(volume: number): void;
+  volume(): number;
+  set_muted(muted: boolean): void;
+  muted(): boolean;
+  /** The recent cues that would have played, newest last, newline-separated as \"name:volume:pitch\". */
+  history(): string;
+  history_count(): number;
+  clear_history(): void;
+}
+
 /** Capability required: hud. */
 export interface Mod {
   /** Script module + settings system. A script declares a module with metadata and a set of TYPED settings (toggle, slider, select, keybind, text, button); the client renders them and the user configures them. Every write is validated against the setting's declared kind and range and fails closed, so a toggle can never receive an out-of-range slider value. Handles are numbers; a setting is addressed by its module handle and key. `options` for a select is a newline-separated list of labels. */
@@ -205,6 +235,8 @@ declare const Player: Player;
 declare const Render: Render;
 declare const World: World;
 declare const Entity: Entity;
+declare const Fs: Fs;
+declare const Audio: Audio;
 declare const Mod: Mod;
 declare const Network: Network;
 declare const Hud: Hud;

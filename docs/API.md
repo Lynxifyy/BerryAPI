@@ -74,6 +74,38 @@ Capability: `world`.
 | `entity.distance_to(id: number) -> number` | `world` | - |
 | `entity.nearest(type: string) -> number` | `world` | The raw id of the nearest alive entity of `type` to the local player, or 0 when none is in range. An unknown type name is refused (fails closed) rather than returning an arbitrary entity. |
 
+## Fs
+
+Capability: `fileio`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `fs.write(path: string, data: string) -> bool` | `fileio` | Sandboxed file store. A script gets its own directory and nothing else: a path is validated before use (no absolute path, no backslash, no drive letter, no control character, no empty segment, no \".\" or \"..\", a bounded length and depth), so a path cannot escape the sandbox however it is spelled. Writes are capped per file, in total and in count, so a write loop cannot exhaust memory. Every call fails closed (false / empty) rather than throwing. |
+| `fs.read(path: string) -> string` | `fileio` | - |
+| `fs.append(path: string, data: string) -> bool` | `fileio` | - |
+| `fs.exists(path: string) -> bool` | `fileio` | - |
+| `fs.remove(path: string) -> bool` | `fileio` | - |
+| `fs.size(path: string) -> number` | `fileio` | - |
+| `fs.list(prefix: string) -> string` | `fileio` | Every path in the sandbox, sorted, newline-separated. `prefix` filters to paths that start with it; an empty prefix lists everything. |
+| `fs.count() -> number` | `fileio` | - |
+| `fs.total_bytes() -> number` | `fileio` | - |
+| `fs.clear() -> nil` | `fileio` | - |
+
+## Audio
+
+Capability: `audio`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `audio.play(name: string, volume: number, pitch: number) -> bool` | `audio` | Client-side sound cues. A script plays a named cue; the device backend decides what the name means. This is a sound the local player hears, so nothing here is authoritative. An unknown or malformed cue name is refused, and a muted play is dropped rather than queued. Volume and pitch are clamped into range. |
+| `audio.set_volume(volume: number) -> nil` | `audio` | - |
+| `audio.volume() -> number` | `audio` | - |
+| `audio.set_muted(muted: bool) -> nil` | `audio` | - |
+| `audio.muted() -> bool` | `audio` | - |
+| `audio.history() -> string` | `audio` | The recent cues that would have played, newest last, newline-separated as \"name:volume:pitch\". |
+| `audio.history_count() -> number` | `audio` | - |
+| `audio.clear_history() -> nil` | `audio` | - |
+
 ## Mod
 
 Capability: `hud`.

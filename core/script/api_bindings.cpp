@@ -1277,6 +1277,115 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Nil();
   });
 
+  //--- Fs (sandboxed file store) --------------------------------------------
+  //
+  // The store validates every path and enforces the size/count caps, so these
+  // bindings only translate values. A refused path or an over-cap write reports
+  // false; nothing here throws for a script's own bad input.
+  install("fs.write", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.files) { ctx.RaiseError("fs.write: file store unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.files->Write(args[0].ToDisplay(), args[1].ToDisplay()));
+  });
+
+  install("fs.read", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.files) { ctx.RaiseError("fs.read: file store unavailable"); return ScriptValue::Str(""); }
+    std::string data;
+    if (!services_.files->Read(args[0].ToDisplay(), &data)) return ScriptValue::Str("");
+    return ScriptValue::Str(data);
+  });
+
+  install("fs.append", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.files) { ctx.RaiseError("fs.append: file store unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.files->Append(args[0].ToDisplay(), args[1].ToDisplay()));
+  });
+
+  install("fs.exists", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.files) { ctx.RaiseError("fs.exists: file store unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.files->Exists(args[0].ToDisplay()));
+  });
+
+  install("fs.remove", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.files) { ctx.RaiseError("fs.remove: file store unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.files->Remove(args[0].ToDisplay()));
+  });
+
+  install("fs.size", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.files) { ctx.RaiseError("fs.size: file store unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.files->Size(args[0].ToDisplay()));
+  });
+
+  install("fs.list", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.files) { ctx.RaiseError("fs.list: file store unavailable"); return ScriptValue::Str(""); }
+    return ScriptValue::Str(services_.files->List(args[0].ToDisplay()));
+  });
+
+  install("fs.count", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.files) { ctx.RaiseError("fs.count: file store unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.files->FileCount());
+  });
+
+  install("fs.total_bytes", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.files) { ctx.RaiseError("fs.total_bytes: file store unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.files->TotalBytes());
+  });
+
+  install("fs.clear", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.files) { ctx.RaiseError("fs.clear: file store unavailable"); return ScriptValue::Nil(); }
+    services_.files->Clear();
+    return ScriptValue::Nil();
+  });
+
+  //--- Audio (client-side cues) ---------------------------------------------
+  install("audio.play", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.audio) { ctx.RaiseError("audio.play: audio unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.audio->Play(args[0].ToDisplay(),
+                                                   (f32)args[1].AsNumber(),
+                                                   (f32)args[2].AsNumber()));
+  });
+
+  install("audio.set_volume", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.audio) { ctx.RaiseError("audio.set_volume: audio unavailable"); return ScriptValue::Nil(); }
+    services_.audio->SetVolume((f32)args[0].AsNumber());
+    return ScriptValue::Nil();
+  });
+
+  install("audio.volume", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.audio) { ctx.RaiseError("audio.volume: audio unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.audio->volume());
+  });
+
+  install("audio.set_muted", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.audio) { ctx.RaiseError("audio.set_muted: audio unavailable"); return ScriptValue::Nil(); }
+    services_.audio->SetMuted(args[0].Truthy());
+    return ScriptValue::Nil();
+  });
+
+  install("audio.muted", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.audio) { ctx.RaiseError("audio.muted: audio unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.audio->muted());
+  });
+
+  install("audio.history", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.audio) { ctx.RaiseError("audio.history: audio unavailable"); return ScriptValue::Str(""); }
+    std::string out;
+    for (const AudioCue& c : services_.audio->History()) {
+      if (!out.empty()) out += '\n';
+      out += c.name + ":" + std::to_string(c.volume) + ":" + std::to_string(c.pitch);
+    }
+    return ScriptValue::Str(out);
+  });
+
+  install("audio.history_count", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.audio) { ctx.RaiseError("audio.history_count: audio unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.audio->HistoryCount());
+  });
+
+  install("audio.clear_history", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.audio) { ctx.RaiseError("audio.clear_history: audio unavailable"); return ScriptValue::Nil(); }
+    services_.audio->ClearHistory();
+    return ScriptValue::Nil();
+  });
+
   //--- Mod (script modules + typed settings) --------------------------------
   //
   // The registry is pure data; a script declares its module and settings, the

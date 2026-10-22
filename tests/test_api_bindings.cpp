@@ -886,6 +886,50 @@ static void TestModBindings() {
         ScriptStatus::Error);
 }
 
+static void TestFsAndAudioBindings() {
+  ScriptFileStore files;
+  AudioService audio;
+  // A recording backend, so `audio.play` reaches a real play path.
+  struct Recording : AudioSeam {
+    bool Play(const AudioCue&) override { return true; }
+  } seam;
+  audio.SetSeam(&seam);
+  ScriptApi::Services services;
+  services.files = &files;
+  services.audio = &audio;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  // fs carries the fileio grant.
+  CHECK(Call(bindings, "fs.write",
+             {ScriptValue::Str("cfg.json"), ScriptValue::Str("{}")}, {"fileio"},
+             &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "fs.read", {ScriptValue::Str("cfg.json")}, {"fileio"},
+             &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "{}");
+  // A traversal path fails closed.
+  CHECK(Call(bindings, "fs.write",
+             {ScriptValue::Str("../x"), ScriptValue::Str("y")}, {"fileio"},
+             &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  // Without the fileio grant, the binding is denied by the gate.
+  CHECK(Call(bindings, "fs.write",
+             {ScriptValue::Str("a"), ScriptValue::Str("b")}, {"render"}, &out) ==
+        ScriptStatus::CapabilityDenied);
+
+  // audio carries the audio grant.
+  CHECK(Call(bindings, "audio.play",
+             {ScriptValue::Str("hit"), ScriptValue::Num(1), ScriptValue::Num(1)},
+             {"audio"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "audio.play",
+             {ScriptValue::Str("hit"), ScriptValue::Num(1), ScriptValue::Num(1)},
+             {"hud"}, &out) == ScriptStatus::CapabilityDenied);
+}
+
 static void TestNetworkGetFailsClosed() {
   ScriptApi::Services services;
   ScriptApi api(services);
@@ -930,6 +974,7 @@ int main() {
   TestArityFailsClosed();
   TestWorldAndEntityReads();
   TestModBindings();
+  TestFsAndAudioBindings();
   TestNetworkGetFailsClosed();
   TestDrawCommandsAreQueuedThenApplied();
   TestHudLifecycleAcrossThreads();

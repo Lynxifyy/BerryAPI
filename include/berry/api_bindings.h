@@ -30,8 +30,10 @@
 
 #include "berry/export.h"
 #include "berry/types.h"
+#include "berry/audio.h"
 #include "berry/combat.h"
 #include "berry/cosmetic.h"
+#include "berry/fs.h"
 #include "berry/hud.h"
 #include "berry/input.h"
 #include "berry/intent.h"
@@ -133,6 +135,12 @@ class BERRY_API ScriptApi {
     /// Script module + settings registry. Null makes the `mod.*` bindings fail
     /// closed (creation returns 0 and the rest report false).
     ScriptModuleRegistry* modules = nullptr;
+    /// Sandboxed per-script file store. Null makes the `fs.*` bindings fail
+    /// closed (writes report false, reads return empty).
+    ScriptFileStore* files = nullptr;
+    /// Client-side audio cues. Null makes the `audio.*` bindings fail closed
+    /// (a play reports false).
+    AudioService* audio = nullptr;
     /// The local player's entity id, used as the origin for `world.query`.
     /// Default 0 means "unknown", which makes the query fail closed.
     EntityId localPlayer;

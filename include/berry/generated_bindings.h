@@ -55,6 +55,24 @@ inline const BindingSpec* BindingSpecs() {
       {"entity.alive", CapKind::World, 1, "Entity"},
       {"entity.distance_to", CapKind::World, 1, "Entity"},
       {"entity.nearest", CapKind::World, 1, "Entity"},
+      {"fs.write", CapKind::FileIO, 2, "Fs"},
+      {"fs.read", CapKind::FileIO, 1, "Fs"},
+      {"fs.append", CapKind::FileIO, 2, "Fs"},
+      {"fs.exists", CapKind::FileIO, 1, "Fs"},
+      {"fs.remove", CapKind::FileIO, 1, "Fs"},
+      {"fs.size", CapKind::FileIO, 1, "Fs"},
+      {"fs.list", CapKind::FileIO, 1, "Fs"},
+      {"fs.count", CapKind::FileIO, 0, "Fs"},
+      {"fs.total_bytes", CapKind::FileIO, 0, "Fs"},
+      {"fs.clear", CapKind::FileIO, 0, "Fs"},
+      {"audio.play", CapKind::Audio, 3, "Audio"},
+      {"audio.set_volume", CapKind::Audio, 1, "Audio"},
+      {"audio.volume", CapKind::Audio, 0, "Audio"},
+      {"audio.set_muted", CapKind::Audio, 1, "Audio"},
+      {"audio.muted", CapKind::Audio, 0, "Audio"},
+      {"audio.history", CapKind::Audio, 0, "Audio"},
+      {"audio.history_count", CapKind::Audio, 0, "Audio"},
+      {"audio.clear_history", CapKind::Audio, 0, "Audio"},
       {"mod.create", CapKind::Hud, 2, "Mod"},
       {"mod.set_meta", CapKind::Hud, 3, "Mod"},
       {"mod.add_toggle", CapKind::Hud, 4, "Mod"},
@@ -129,7 +147,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 104; }
+inline size_t BindingSpecCount() { return 122; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -191,6 +209,28 @@ inline const char* const kEntityNames[] = {
     "entity.alive",
     "entity.distance_to",
     "entity.nearest",
+};
+inline const char* const kFsNames[] = {
+    "fs.write",
+    "fs.read",
+    "fs.append",
+    "fs.exists",
+    "fs.remove",
+    "fs.size",
+    "fs.list",
+    "fs.count",
+    "fs.total_bytes",
+    "fs.clear",
+};
+inline const char* const kAudioNames[] = {
+    "audio.play",
+    "audio.set_volume",
+    "audio.volume",
+    "audio.set_muted",
+    "audio.muted",
+    "audio.history",
+    "audio.history_count",
+    "audio.clear_history",
 };
 inline const char* const kModNames[] = {
     "mod.create",
@@ -288,6 +328,8 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Render", kRenderNames, 7},
       {"World", kWorldNames, 9},
       {"Entity", kEntityNames, 8},
+      {"Fs", kFsNames, 10},
+      {"Audio", kAudioNames, 8},
       {"Mod", kModNames, 23},
       {"Network", kNetworkNames, 2},
       {"Hud", kHudNames, 5},
@@ -301,7 +343,7 @@ inline const ModuleBindings* ModuleBindingTable() {
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 14; }
+inline size_t ModuleBindingCount() { return 16; }
 
 }  // namespace api
 }  // namespace Berry

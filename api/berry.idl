@@ -80,6 +80,36 @@ module Entity {
   fn nearest(type: string) -> number
 }
 
+module Fs {
+  capability fileio
+  doc "Sandboxed file store. A script gets its own directory and nothing else: a path is validated before use (no absolute path, no backslash, no drive letter, no control character, no empty segment, no \".\" or \"..\", a bounded length and depth), so a path cannot escape the sandbox however it is spelled. Writes are capped per file, in total and in count, so a write loop cannot exhaust memory. Every call fails closed (false / empty) rather than throwing."
+  fn write(path: string, data: string) -> bool
+  fn read(path: string) -> string
+  fn append(path: string, data: string) -> bool
+  fn exists(path: string) -> bool
+  fn remove(path: string) -> bool
+  fn size(path: string) -> number
+  doc "Every path in the sandbox, sorted, newline-separated. `prefix` filters to paths that start with it; an empty prefix lists everything."
+  fn list(prefix: string) -> string
+  fn count() -> number
+  fn total_bytes() -> number
+  fn clear() -> nil
+}
+
+module Audio {
+  capability audio
+  doc "Client-side sound cues. A script plays a named cue; the device backend decides what the name means. This is a sound the local player hears, so nothing here is authoritative. An unknown or malformed cue name is refused, and a muted play is dropped rather than queued. Volume and pitch are clamped into range."
+  fn play(name: string, volume: number, pitch: number) -> bool
+  fn set_volume(volume: number) -> nil
+  fn volume() -> number
+  fn set_muted(muted: bool) -> nil
+  fn muted() -> bool
+  doc "The recent cues that would have played, newest last, newline-separated as \"name:volume:pitch\"."
+  fn history() -> string
+  fn history_count() -> number
+  fn clear_history() -> nil
+}
+
 module Mod {
   capability hud
   doc "Script module + settings system. A script declares a module with metadata and a set of TYPED settings (toggle, slider, select, keybind, text, button); the client renders them and the user configures them. Every write is validated against the setting's declared kind and range and fails closed, so a toggle can never receive an out-of-range slider value. Handles are numbers; a setting is addressed by its module handle and key. `options` for a select is a newline-separated list of labels."
