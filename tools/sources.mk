@@ -47,6 +47,7 @@ CORE_SRC := \
   core/script/api_bindings.cpp \
   core/script/intent.cpp \
   core/script/package.cpp \
+  core/script/scriptmod.cpp \
   core/script/record.cpp \
   core/net/rpc.cpp \
   core/script/layout.cpp \
@@ -95,7 +96,8 @@ TEST_SRC := \
   tests/test_layout.cpp \
   tests/test_world_query.cpp \
   tests/test_record.cpp \
-  tests/test_rpc.cpp
+  tests/test_rpc.cpp \
+  tests/test_scriptmod.cpp
 # Vendored Luau (MIT). See third_party/luau/PROVENANCE.md for the pinned
 # version and why these units and not the CLI. Compiled with -w because upstream
 # is only warning-clean under its own flag set; our code stays -Wall -Wextra clean.

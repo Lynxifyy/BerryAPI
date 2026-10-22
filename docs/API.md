@@ -74,6 +74,36 @@ Capability: `world`.
 | `entity.distance_to(id: number) -> number` | `world` | - |
 | `entity.nearest(type: string) -> number` | `world` | The raw id of the nearest alive entity of `type` to the local player, or 0 when none is in range. An unknown type name is refused (fails closed) rather than returning an arbitrary entity. |
 
+## Mod
+
+Capability: `hud`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `mod.create(name: string, description: string) -> number` | `hud` | Script module + settings system. A script declares a module with metadata and a set of TYPED settings (toggle, slider, select, keybind, text, button); the client renders them and the user configures them. Every write is validated against the setting's declared kind and range and fails closed, so a toggle can never receive an out-of-range slider value. Handles are numbers; a setting is addressed by its module handle and key. `options` for a select is a newline-separated list of labels. |
+| `mod.set_meta(handle: number, version: string, author: string) -> bool` | `hud` | Sets a module's version and author after creation. Fails closed on an unknown handle. |
+| `mod.add_toggle(handle: number, key: string, label: string, default: bool) -> bool` | `hud` | - |
+| `mod.add_slider(handle: number, key: string, label: string, min: number, max: number, default: number) -> bool` | `hud` | - |
+| `mod.add_select(handle: number, key: string, label: string, options: string, default: number) -> bool` | `hud` | - |
+| `mod.add_keybind(handle: number, key: string, label: string, default: string) -> bool` | `hud` | - |
+| `mod.add_text(handle: number, key: string, label: string, default: string) -> bool` | `hud` | - |
+| `mod.add_button(handle: number, key: string, label: string) -> bool` | `hud` | - |
+| `mod.set_number(handle: number, key: string, value: number) -> bool` | `hud` | - |
+| `mod.set_text(handle: number, key: string, value: string) -> bool` | `hud` | - |
+| `mod.press(handle: number, key: string) -> bool` | `hud` | Raises a button setting's one-shot press. The next `mod.get` / `mod.number` read consumes it. |
+| `mod.number(handle: number, key: string) -> number` | `hud` | - |
+| `mod.text(handle: number, key: string) -> string` | `hud` | - |
+| `mod.enabled(handle: number) -> bool` | `hud` | - |
+| `mod.set_enabled(handle: number, on: bool) -> bool` | `hud` | - |
+| `mod.count() -> number` | `hud` | - |
+| `mod.get(handle: number, key: string) -> Table` | `hud` | One setting as a table: {key, label, kind, number, text, pressed, min, max, options}. |
+| `mod.info(handle: number) -> Table` | `hud` | A module's metadata and its settings as a table: {handle, name, description, version, author, enabled, count, settings}. |
+| `mod.list() -> string` | `hud` | - |
+| `mod.settings(handle: number) -> string` | `hud` | - |
+| `mod.clear() -> nil` | `hud` | - |
+| `mod.set_overlay(on: bool) -> nil` | `hud` | - |
+| `mod.overlay() -> bool` | `hud` | - |
+
 ## Network
 
 Capability: `network`.

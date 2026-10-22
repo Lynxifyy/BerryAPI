@@ -55,6 +55,29 @@ inline const BindingSpec* BindingSpecs() {
       {"entity.alive", CapKind::World, 1, "Entity"},
       {"entity.distance_to", CapKind::World, 1, "Entity"},
       {"entity.nearest", CapKind::World, 1, "Entity"},
+      {"mod.create", CapKind::Hud, 2, "Mod"},
+      {"mod.set_meta", CapKind::Hud, 3, "Mod"},
+      {"mod.add_toggle", CapKind::Hud, 4, "Mod"},
+      {"mod.add_slider", CapKind::Hud, 6, "Mod"},
+      {"mod.add_select", CapKind::Hud, 5, "Mod"},
+      {"mod.add_keybind", CapKind::Hud, 4, "Mod"},
+      {"mod.add_text", CapKind::Hud, 4, "Mod"},
+      {"mod.add_button", CapKind::Hud, 3, "Mod"},
+      {"mod.set_number", CapKind::Hud, 3, "Mod"},
+      {"mod.set_text", CapKind::Hud, 3, "Mod"},
+      {"mod.press", CapKind::Hud, 2, "Mod"},
+      {"mod.number", CapKind::Hud, 2, "Mod"},
+      {"mod.text", CapKind::Hud, 2, "Mod"},
+      {"mod.enabled", CapKind::Hud, 1, "Mod"},
+      {"mod.set_enabled", CapKind::Hud, 2, "Mod"},
+      {"mod.count", CapKind::Hud, 0, "Mod"},
+      {"mod.get", CapKind::Hud, 2, "Mod"},
+      {"mod.info", CapKind::Hud, 1, "Mod"},
+      {"mod.list", CapKind::Hud, 0, "Mod"},
+      {"mod.settings", CapKind::Hud, 1, "Mod"},
+      {"mod.clear", CapKind::Hud, 0, "Mod"},
+      {"mod.set_overlay", CapKind::Hud, 1, "Mod"},
+      {"mod.overlay", CapKind::Hud, 0, "Mod"},
       {"network.get", CapKind::Network, 2, "Network"},
       {"network.post", CapKind::Network, 3, "Network"},
       {"hud.create_label", CapKind::Hud, 1, "Hud"},
@@ -106,7 +129,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 81; }
+inline size_t BindingSpecCount() { return 104; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -168,6 +191,31 @@ inline const char* const kEntityNames[] = {
     "entity.alive",
     "entity.distance_to",
     "entity.nearest",
+};
+inline const char* const kModNames[] = {
+    "mod.create",
+    "mod.set_meta",
+    "mod.add_toggle",
+    "mod.add_slider",
+    "mod.add_select",
+    "mod.add_keybind",
+    "mod.add_text",
+    "mod.add_button",
+    "mod.set_number",
+    "mod.set_text",
+    "mod.press",
+    "mod.number",
+    "mod.text",
+    "mod.enabled",
+    "mod.set_enabled",
+    "mod.count",
+    "mod.get",
+    "mod.info",
+    "mod.list",
+    "mod.settings",
+    "mod.clear",
+    "mod.set_overlay",
+    "mod.overlay",
 };
 inline const char* const kNetworkNames[] = {
     "network.get",
@@ -240,6 +288,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Render", kRenderNames, 7},
       {"World", kWorldNames, 9},
       {"Entity", kEntityNames, 8},
+      {"Mod", kModNames, 23},
       {"Network", kNetworkNames, 2},
       {"Hud", kHudNames, 5},
       {"Perf", kPerfNames, 6},
@@ -252,7 +301,7 @@ inline const ModuleBindings* ModuleBindingTable() {
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 13; }
+inline size_t ModuleBindingCount() { return 14; }
 
 }  // namespace api
 }  // namespace Berry

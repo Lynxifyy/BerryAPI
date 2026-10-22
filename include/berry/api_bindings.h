@@ -40,6 +40,7 @@
 #include "berry/package.h"
 #include "berry/render.h"
 #include "berry/script.h"
+#include "berry/scriptmod.h"
 #include "berry/shader.h"
 #include "berry/services.h"
 #include "berry/url.h"
@@ -129,6 +130,9 @@ class BERRY_API ScriptApi {
     /// Script package registry and resolver. Null makes the `package.*`
     /// bindings fail closed (registration reports false).
     PackageRegistry* packages = nullptr;
+    /// Script module + settings registry. Null makes the `mod.*` bindings fail
+    /// closed (creation returns 0 and the rest report false).
+    ScriptModuleRegistry* modules = nullptr;
     /// The local player's entity id, used as the origin for `world.query`.
     /// Default 0 means "unknown", which makes the query fail closed.
     EntityId localPlayer;

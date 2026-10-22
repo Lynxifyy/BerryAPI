@@ -240,6 +240,15 @@ void ScriptApi::InitFrameHook() {
         if (services_.cosmetics && services_.renderer) {
           services_.cosmetics->DrawLocal(*services_.renderer, services_.localPlayer);
         }
+        // The script-module overlay draws last, on top, when a user turned it
+        // on. It reads a snapshot, so a module declared this frame is next
+        // frame's line rather than a torn draw.
+        if (services_.modules && services_.renderer) {
+          const Vec2 screen = screenSize();
+          if (screen.x > 0 && screen.y > 0) {
+            services_.modules->DrawOverlay(*services_.renderer, screen);
+          }
+        }
         return EventResult::Continue;
       });
 }
@@ -1266,6 +1275,248 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
   install("package.clear", [this](ScriptContext&, const std::vector<ScriptValue>&) {
     if (services_.packages) services_.packages->Clear();
     return ScriptValue::Nil();
+  });
+
+  //--- Mod (script modules + typed settings) --------------------------------
+  //
+  // The registry is pure data; a script declares its module and settings, the
+  // client renders them. Every write is validated against the declared kind and
+  // range inside the registry, so a bad value fails closed here too.
+  install("mod.create", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.create: module registry unavailable"); return ScriptValue::Num(0); }
+    const u64 h = services_.modules->Create(args[0].ToDisplay(), args[1].ToDisplay(),
+                                            "", "");
+    if (h == 0) {
+      // A zero handle means the name was empty or already taken; report why
+      // rather than handing back a handle that names nothing.
+      ctx.RaiseError("mod.create: module name is empty or already in use");
+      return ScriptValue::Num(0);
+    }
+    return ScriptValue::Num((f64)h);
+  });
+
+  install("mod.set_meta", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.set_meta: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->SetMeta((u64)args[0].AsNumber(),
+                                                        args[1].ToDisplay(),
+                                                        args[2].ToDisplay()));
+  });
+
+  install("mod.add_toggle", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.add_toggle: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->AddToggle((u64)args[0].AsNumber(),
+                                                          args[1].ToDisplay(),
+                                                          args[2].ToDisplay(),
+                                                          args[3].Truthy()));
+  });
+
+  install("mod.add_slider", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.add_slider: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->AddSlider((u64)args[0].AsNumber(),
+                                                          args[1].ToDisplay(),
+                                                          args[2].ToDisplay(),
+                                                          args[3].AsNumber(),
+                                                          args[4].AsNumber(),
+                                                          args[5].AsNumber()));
+  });
+
+  install("mod.add_select", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.add_select: module registry unavailable"); return ScriptValue::Bool(false); }
+    // Options arrive as a newline-separated list, the same shape the settings
+    // and module listings use, so a script builds one string either way.
+    std::vector<std::string> options;
+    std::string cur;
+    for (char c : args[3].ToDisplay()) {
+      if (c == '\n') { options.push_back(cur); cur.clear(); }
+      else cur += c;
+    }
+    options.push_back(cur);
+    return ScriptValue::Bool(services_.modules->AddSelect((u64)args[0].AsNumber(),
+                                                          args[1].ToDisplay(),
+                                                          args[2].ToDisplay(),
+                                                          options,
+                                                          (i64)args[4].AsNumber()));
+  });
+
+  install("mod.add_keybind", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.add_keybind: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->AddKeybind((u64)args[0].AsNumber(),
+                                                           args[1].ToDisplay(),
+                                                           args[2].ToDisplay(),
+                                                           args[3].ToDisplay()));
+  });
+
+  install("mod.add_text", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.add_text: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->AddText((u64)args[0].AsNumber(),
+                                                        args[1].ToDisplay(),
+                                                        args[2].ToDisplay(),
+                                                        args[3].ToDisplay()));
+  });
+
+  install("mod.add_button", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.add_button: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->AddButton((u64)args[0].AsNumber(),
+                                                          args[1].ToDisplay(),
+                                                          args[2].ToDisplay()));
+  });
+
+  install("mod.set_number", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.set_number: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->SetNumber((u64)args[0].AsNumber(),
+                                                          args[1].ToDisplay(),
+                                                          args[2].AsNumber()));
+  });
+
+  install("mod.set_text", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.set_text: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->SetText((u64)args[0].AsNumber(),
+                                                        args[1].ToDisplay(),
+                                                        args[2].ToDisplay()));
+  });
+
+  install("mod.press", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.press: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->Press((u64)args[0].AsNumber(),
+                                                      args[1].ToDisplay()));
+  });
+
+  install("mod.number", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.number: module registry unavailable"); return ScriptValue::Num(0); }
+    f64 v = 0;
+    if (!services_.modules->GetNumber((u64)args[0].AsNumber(), args[1].ToDisplay(), &v)) {
+      ctx.RaiseError("mod.number: no such setting");
+      return ScriptValue::Num(0);
+    }
+    return ScriptValue::Num(v);
+  });
+
+  install("mod.text", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.text: module registry unavailable"); return ScriptValue::Str(""); }
+    std::string v;
+    if (!services_.modules->GetText((u64)args[0].AsNumber(), args[1].ToDisplay(), &v)) {
+      ctx.RaiseError("mod.text: no such setting");
+      return ScriptValue::Str("");
+    }
+    return ScriptValue::Str(v);
+  });
+
+  install("mod.enabled", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.enabled: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->IsEnabled((u64)args[0].AsNumber()));
+  });
+
+  install("mod.set_enabled", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.set_enabled: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->SetEnabled((u64)args[0].AsNumber(),
+                                                           args[1].Truthy()));
+  });
+
+  install("mod.count", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.modules) { ctx.RaiseError("mod.count: module registry unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.modules->Count());
+  });
+
+  install("mod.get", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.get: module registry unavailable"); return ScriptValue::Nil(); }
+    const u64 h = (u64)args[0].AsNumber();
+    const std::string key = args[1].ToDisplay();
+    ScriptModuleInfo info;
+    if (!services_.modules->GetModule(h, &info)) {
+      ctx.RaiseError("mod.get: no such module");
+      return ScriptValue::Nil();
+    }
+    const SettingDef* def = nullptr;
+    for (const SettingDef& d : info.settings) {
+      if (d.key == key) { def = &d; break; }
+    }
+    if (!def) {
+      ctx.RaiseError("mod.get: no such setting");
+      return ScriptValue::Nil();
+    }
+    SettingValue v;
+    if (!services_.modules->Get(h, key, &v)) {
+      ctx.RaiseError("mod.get: no such setting");
+      return ScriptValue::Nil();
+    }
+    ScriptTable t;
+    t["key"] = ScriptValue::Str(def->key);
+    t["label"] = ScriptValue::Str(def->label);
+    t["kind"] = ScriptValue::Str(SettingKindName(def->kind));
+    t["number"] = ScriptValue::Num(v.number);
+    t["text"] = ScriptValue::Str(v.text);
+    t["pressed"] = ScriptValue::Bool(v.pressed);
+    t["min"] = ScriptValue::Num(def->min);
+    t["max"] = ScriptValue::Num(def->max);
+    std::string opts;
+    for (size_t i = 0; i < def->options.size(); ++i) {
+      if (i) opts += '\n';
+      opts += def->options[i];
+    }
+    t["options"] = ScriptValue::Str(opts);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("mod.info", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.info: module registry unavailable"); return ScriptValue::Nil(); }
+    ScriptModuleInfo info;
+    if (!services_.modules->GetModule((u64)args[0].AsNumber(), &info)) {
+      ctx.RaiseError("mod.info: no such module");
+      return ScriptValue::Nil();
+    }
+    ScriptTable t;
+    t["handle"] = ScriptValue::Num((f64)info.handle);
+    t["name"] = ScriptValue::Str(info.name);
+    t["description"] = ScriptValue::Str(info.description);
+    t["version"] = ScriptValue::Str(info.version);
+    t["author"] = ScriptValue::Str(info.author);
+    t["enabled"] = ScriptValue::Bool(info.enabled);
+    t["count"] = ScriptValue::Num((f64)info.settings.size());
+    ScriptTable settings;
+    int n = 0;
+    for (const SettingDef& d : info.settings) {
+      SettingValue v;
+      services_.modules->Get(info.handle, d.key, &v);
+      ScriptTable s;
+      s["key"] = ScriptValue::Str(d.key);
+      s["label"] = ScriptValue::Str(d.label);
+      s["kind"] = ScriptValue::Str(SettingKindName(d.kind));
+      s["number"] = ScriptValue::Num(v.number);
+      s["text"] = ScriptValue::Str(v.text);
+      s["pressed"] = ScriptValue::Bool(v.pressed);
+      s["min"] = ScriptValue::Num(d.min);
+      s["max"] = ScriptValue::Num(d.max);
+      settings[std::to_string(n++)] = ScriptValue::Tbl(std::move(s));
+    }
+    t["settings"] = ScriptValue::Tbl(std::move(settings));
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("mod.list", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.modules) { ctx.RaiseError("mod.list: module registry unavailable"); return ScriptValue::Str(""); }
+    return ScriptValue::Str(services_.modules->List());
+  });
+
+  install("mod.settings", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.settings: module registry unavailable"); return ScriptValue::Str(""); }
+    return ScriptValue::Str(services_.modules->SettingsOf((u64)args[0].AsNumber()));
+  });
+
+  install("mod.clear", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.modules) { ctx.RaiseError("mod.clear: module registry unavailable"); return ScriptValue::Nil(); }
+    services_.modules->Clear();
+    return ScriptValue::Nil();
+  });
+
+  install("mod.set_overlay", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.set_overlay: module registry unavailable"); return ScriptValue::Nil(); }
+    services_.modules->SetOverlayVisible(args[0].Truthy());
+    return ScriptValue::Nil();
+  });
+
+  install("mod.overlay", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.modules) { ctx.RaiseError("mod.overlay: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->overlayVisible());
   });
 
   return installed_.size();

@@ -799,6 +799,93 @@ static void TestWorldAndEntityReads() {
         ScriptStatus::Error);
 }
 
+static void TestModBindings() {
+  ScriptModuleRegistry modules;
+  ScriptApi::Services services;
+  services.modules = &modules;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  // A duplicate name returns 0 and raises.
+  CHECK(Call(bindings, "mod.create",
+             {ScriptValue::Str("Combo"), ScriptValue::Str("counts")},
+             {"hud"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  CHECK(Call(bindings, "mod.create",
+             {ScriptValue::Str("Combo"), ScriptValue::Str("dup")},
+             {"hud"}, &out) == ScriptStatus::Error);
+
+  // Settings are typed; a bad declaration reports false.
+  CHECK(Call(bindings, "mod.add_slider",
+             {ScriptValue::Num(1), ScriptValue::Str("scale"), ScriptValue::Str("Scale"),
+              ScriptValue::Num(0.5), ScriptValue::Num(2), ScriptValue::Num(1)},
+             {"hud"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "mod.add_slider",
+             {ScriptValue::Num(1), ScriptValue::Str("bad"), ScriptValue::Str("Bad"),
+              ScriptValue::Num(5), ScriptValue::Num(1), ScriptValue::Num(3)},
+             {"hud"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());   // max < min
+
+  // A select built from a newline list.
+  CHECK(Call(bindings, "mod.add_select",
+             {ScriptValue::Num(1), ScriptValue::Str("anchor"), ScriptValue::Str("Anchor"),
+              ScriptValue::Str("tl\ntr\nbl"), ScriptValue::Num(1)},
+             {"hud"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  // Out-of-range write fails closed; in-range succeeds.
+  CHECK(Call(bindings, "mod.set_number",
+             {ScriptValue::Num(1), ScriptValue::Str("scale"), ScriptValue::Num(3)},
+             {"hud"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "mod.set_number",
+             {ScriptValue::Num(1), ScriptValue::Str("scale"), ScriptValue::Num(1.5)},
+             {"hud"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  // Reads round-trip, and a missing setting raises.
+  CHECK(Call(bindings, "mod.number",
+             {ScriptValue::Num(1), ScriptValue::Str("scale")}, {"hud"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1.5);
+  CHECK(Call(bindings, "mod.number",
+             {ScriptValue::Num(1), ScriptValue::Str("nope")}, {"hud"}, &out) ==
+        ScriptStatus::Error);
+
+  // mod.get returns the declared shape, including the options list.
+  CHECK(Call(bindings, "mod.get",
+             {ScriptValue::Num(1), ScriptValue::Str("anchor")}, {"hud"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("kind").AsString() == "select");
+  CHECK(out.AsTable()->at("options").AsString() == "tl\ntr\nbl");
+
+  // mod.info reports the module and its setting count.
+  CHECK(Call(bindings, "mod.info", {ScriptValue::Num(1)}, {"hud"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("name").AsString() == "Combo");
+  CHECK(out.AsTable()->at("count").AsNumber() == 2);   // scale + anchor (bad was refused)
+  CHECK(out.AsTable()->at("settings").IsTable());
+
+  CHECK(Call(bindings, "mod.count", {}, {"hud"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+
+  // The capability gate still applies: without `hud`, the binding is denied.
+  CHECK(Call(bindings, "mod.create",
+             {ScriptValue::Str("X"), ScriptValue::Str("")}, {"render"}, &out) ==
+        ScriptStatus::CapabilityDenied);
+
+  // With no registry bound, everything fails closed rather than crashing.
+  ScriptApi bare(ScriptApi::Services{});
+  ScriptBindings bareBindings;
+  bare.InstallBindings(&bareBindings);
+  CHECK(Call(bareBindings, "mod.create",
+             {ScriptValue::Str("Y"), ScriptValue::Str("")}, {"hud"}, &out) ==
+        ScriptStatus::Error);
+}
+
 static void TestNetworkGetFailsClosed() {
   ScriptApi::Services services;
   ScriptApi api(services);
@@ -842,6 +929,7 @@ int main() {
   TestCapabilityGateOnDeclaredBindings();
   TestArityFailsClosed();
   TestWorldAndEntityReads();
+  TestModBindings();
   TestNetworkGetFailsClosed();
   TestDrawCommandsAreQueuedThenApplied();
   TestHudLifecycleAcrossThreads();

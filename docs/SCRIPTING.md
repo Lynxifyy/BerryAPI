@@ -270,6 +270,20 @@ The client-facing modules are services that draw through `Berry::Render`, not
 new strict modules — the strict module set stays
 `Combat`/`Render`/`World`/`Network`.
 
+### Script modules + settings (`scriptmod.h`)
+
+A script ships a MODULE: a named unit with metadata and a set of typed settings
+(toggle, slider, select, keybind, text, button). The registry is pure data — it
+never reads game memory — so it runs headless, and it is what the UI renders.
+A setting's type is fixed at declaration, so a later write is validated against
+it: a toggle accepts only 0/1, a slider rejects an out-of-range value, a select
+rejects an out-of-range index, and a slider whose `max` is below its `min`, a
+select with no options, or a duplicate/illegal key is refused outright. Nothing
+clamps silently. A Button press is a one-shot edge, consumed by the read, so a
+polling caller cannot see the same press twice. The `mod.*` bindings expose all
+of this to a script; the module overlay (off by default) draws the list through
+`Berry::Render`.
+
 ### HUD (`hud.h`)
 
 A retained-mode widget tree: `Panel`, `Label`, `Bar`, `Graph`, `Row`, `Column`,

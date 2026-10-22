@@ -80,6 +80,38 @@ module Entity {
   fn nearest(type: string) -> number
 }
 
+module Mod {
+  capability hud
+  doc "Script module + settings system. A script declares a module with metadata and a set of TYPED settings (toggle, slider, select, keybind, text, button); the client renders them and the user configures them. Every write is validated against the setting's declared kind and range and fails closed, so a toggle can never receive an out-of-range slider value. Handles are numbers; a setting is addressed by its module handle and key. `options` for a select is a newline-separated list of labels."
+  fn create(name: string, description: string) -> number
+  doc "Sets a module's version and author after creation. Fails closed on an unknown handle."
+  fn set_meta(handle: number, version: string, author: string) -> bool
+  fn add_toggle(handle: number, key: string, label: string, default: bool) -> bool
+  fn add_slider(handle: number, key: string, label: string, min: number, max: number, default: number) -> bool
+  fn add_select(handle: number, key: string, label: string, options: string, default: number) -> bool
+  fn add_keybind(handle: number, key: string, label: string, default: string) -> bool
+  fn add_text(handle: number, key: string, label: string, default: string) -> bool
+  fn add_button(handle: number, key: string, label: string) -> bool
+  fn set_number(handle: number, key: string, value: number) -> bool
+  fn set_text(handle: number, key: string, value: string) -> bool
+  doc "Raises a button setting's one-shot press. The next `mod.get` / `mod.number` read consumes it."
+  fn press(handle: number, key: string) -> bool
+  fn number(handle: number, key: string) -> number
+  fn text(handle: number, key: string) -> string
+  fn enabled(handle: number) -> bool
+  fn set_enabled(handle: number, on: bool) -> bool
+  fn count() -> number
+  doc "One setting as a table: {key, label, kind, number, text, pressed, min, max, options}."
+  fn get(handle: number, key: string) -> Table
+  doc "A module's metadata and its settings as a table: {handle, name, description, version, author, enabled, count, settings}."
+  fn info(handle: number) -> Table
+  fn list() -> string
+  fn settings(handle: number) -> string
+  fn clear() -> nil
+  fn set_overlay(on: bool) -> nil
+  fn overlay() -> bool
+}
+
 module Network {
   capability network
   doc "Outbound requests. Requires a network grant scoped to the host. Both calls return an HttpResult table (status, ok, headers, body, error, truncated) rather than raising, so a script can branch on the outcome; headers is a newline-separated \"Name: value\" list. A refused destination (bad URL, egress policy, or a host outside the grant) comes back with status 0 and a non-empty error. TLS is not implemented, so an https destination is refused rather than downgraded to plaintext."

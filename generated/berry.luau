@@ -68,6 +68,38 @@ export type Entity = {
   nearest: (type: string) -> number,
 }
 
+-- Capability required: hud.
+export type Mod = {
+  -- Script module + settings system. A script declares a module with metadata and a set of TYPED settings (toggle, slider, select, keybind, text, button); the client renders them and the user configures them. Every write is validated against the setting's declared kind and range and fails closed, so a toggle can never receive an out-of-range slider value. Handles are numbers; a setting is addressed by its module handle and key. `options` for a select is a newline-separated list of labels.
+  create: (name: string, description: string) -> number,
+  -- Sets a module's version and author after creation. Fails closed on an unknown handle.
+  set_meta: (handle: number, version: string, author: string) -> boolean,
+  add_toggle: (handle: number, key: string, label: string, default: boolean) -> boolean,
+  add_slider: (handle: number, key: string, label: string, min: number, max: number, default: number) -> boolean,
+  add_select: (handle: number, key: string, label: string, options: string, default: number) -> boolean,
+  add_keybind: (handle: number, key: string, label: string, default: string) -> boolean,
+  add_text: (handle: number, key: string, label: string, default: string) -> boolean,
+  add_button: (handle: number, key: string, label: string) -> boolean,
+  set_number: (handle: number, key: string, value: number) -> boolean,
+  set_text: (handle: number, key: string, value: string) -> boolean,
+  -- Raises a button setting's one-shot press. The next `mod.get` / `mod.number` read consumes it.
+  press: (handle: number, key: string) -> boolean,
+  number: (handle: number, key: string) -> number,
+  text: (handle: number, key: string) -> string,
+  enabled: (handle: number) -> boolean,
+  set_enabled: (handle: number, on: boolean) -> boolean,
+  count: () -> number,
+  -- One setting as a table: {key, label, kind, number, text, pressed, min, max, options}.
+  get: (handle: number, key: string) -> {[string]: any},
+  -- A module's metadata and its settings as a table: {handle, name, description, version, author, enabled, count, settings}.
+  info: (handle: number) -> {[string]: any},
+  list: () -> string,
+  settings: (handle: number) -> string,
+  clear: () -> (),
+  set_overlay: (on: boolean) -> (),
+  overlay: () -> boolean,
+}
+
 -- Capability required: network.
 export type Network = {
   -- Outbound requests. Requires a network grant scoped to the host. Both calls return an HttpResult table (status, ok, headers, body, error, truncated) rather than raising, so a script can branch on the outcome; headers is a newline-separated \"Name: value\" list. A refused destination (bad URL, egress policy, or a host outside the grant) comes back with status 0 and a non-empty error. TLS is not implemented, so an https destination is refused rather than downgraded to plaintext.
