@@ -488,3 +488,40 @@ Scripts read the registry through `package.*` (see [API.md](API.md)): `add`,
 `has`, `versions`, `resolve`, `require_path` and `clear`. The module carries the
 `fileio` grant — it names packages that live on disk — and every binding fails
 closed when no registry is bound.
+
+## Struct layouts as data (`layout.h`)
+
+A hooked function hands us a pointer to a game object, and reading a field of it
+means knowing an offset, which changes whenever the game is rebuilt.
+`StructLayout` moves that offset into a JSON table next to a signature, so a new
+client build is a data update rather than a recompile.
+
+The table is per-version and gated by a build fingerprint, exactly like the
+signature table. A layout declares the `build` it was written against, and
+`LayoutRegistry::Find` only returns a layout whose build matches the active
+fingerprint. An empty fingerprint disables every layout, so the fail-closed
+default is "read nothing", not "read a stale offset out of a foreign struct".
+Reading the wrong offset is worse than reading nothing.
+
+Decoding is deliberately narrow and explicit. A field declares its type, so a
+read is a bounded, checked copy and never a blind reinterpret of memory:
+
+* every read is bounds-checked against the layout's declared size *and* the
+  number of bytes the caller supplied, so a truncated buffer fails rather than
+  over-reading
+* a pointer is only dereferenced by an explicit `FollowPointer` hop, one at a
+  time, so a layout can never describe a dereference the caller did not ask for
+* a string is copied with a cap, and a missing terminator is an error rather
+  than a silent truncation
+* a field must not overlap another, and no field may run past the struct end
+* nothing here writes to game memory
+
+Validation is wholesale, the way a pack or a package manifest is: an unknown
+key, a duplicate or overlapping field, a bad type, a bad offset or a field past
+the end registers nothing.
+
+This is an internal subsystem, not a script module. Raw memory reads are not
+exposed through `berry.*` on purpose: a script surface that read arbitrary
+struct offsets would be an information leak and a crash waiting to happen. The
+layout table is what a module uses internally to decode a hooked argument; a
+script sees the decoded, already-vetted value.
