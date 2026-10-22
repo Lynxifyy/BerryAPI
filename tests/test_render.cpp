@@ -180,6 +180,148 @@ int main() {
     CHECK(bcap->rects == 0);
   }
 
+  // --- 3D debug geometry (world-space helpers) ---
+  {
+    Renderer r;
+    auto cap = std::make_shared<Berry::Test::CaptureRenderSeam>();
+    r.BindSeam(cap.get());
+    CameraState cam;
+    cam.width = 1280;
+    cam.height = 720;
+    cam.view = Mat4::LookAt(Vec3(0, 0, -10), Vec3(0, 0, 0), Vec3(0, 1, 0));
+    cam.projection = Mat4::Perspective(70, 1280.0f / 720.0f, 0.1f, 200.0f);
+    cam.valid = true;
+
+    // ProjectWorld refuses without a camera and projects with one.
+    Vec2 sp;
+    CHECK(!r.ProjectWorld(Vec3(0, 0, 0), &sp));
+    r.SetCamera(cam);
+    CHECK(r.ProjectWorld(Vec3(0, 0, 0), &sp));
+    // The origin is the frustum centre, so it lands at screen centre.
+    CHECK(std::fabs(sp.x - 640.0f) < 1.0f);
+    CHECK(std::fabs(sp.y - 360.0f) < 1.0f);
+    // A point behind the camera does not project.
+    CHECK(!r.ProjectWorld(Vec3(0, 0, -50), &sp));
+    // The camera() snapshot round-trips the bound camera.
+    CHECK(r.camera().valid);
+    CHECK(r.camera().width == cam.width);
+
+    // A 3D line across the viewport becomes one 2D line.
+    r.BeginFrame(Vec2(1280, 720));
+    r.Draw3DLine(Vec3(-1, 0, 0), Vec3(1, 0, 0), Rgba::Red());
+    r.EndFrame();
+    CHECK(cap->lines == 1);
+
+    // A 3D box is 12 edges -> 12 lines.
+    r.BeginFrame(Vec2(1280, 720));
+    r.Draw3DBox(Vec3(-1, -1, -1), Vec3(1, 1, 1), Rgba::Green());
+    r.EndFrame();
+    CHECK(cap->lines == 12);
+
+    // A box entirely behind the camera draws nothing.
+    r.BeginFrame(Vec2(1280, 720));
+    r.Draw3DBox(Vec3(-1, -1, -60), Vec3(1, 1, -55), Rgba::Green());
+    r.EndFrame();
+    CHECK(cap->lines == 0);
+
+    // 3D text at the centre draws; behind the camera it does not.
+    r.BeginFrame(Vec2(1280, 720));
+    r.Draw3DText(Vec3(0, 0, 0), "tag", Rgba::White());
+    r.EndFrame();
+    CHECK(cap->texts == 1);
+    r.BeginFrame(Vec2(1280, 720));
+    r.Draw3DText(Vec3(0, 0, -50), "tag", Rgba::White());
+    r.EndFrame();
+    CHECK(cap->texts == 0);
+  }
+
+  // --- Scissor stack ---
+  {
+    Renderer r;
+    auto cap = std::make_shared<Berry::Test::CaptureRenderSeam>();
+    r.BindSeam(cap.get());
+
+    // No clip: clipRect reports inactive and clipDepth is zero.
+    Rect2D out;
+    CHECK(!r.clipRect(&out));
+    CHECK(r.clipDepth() == 0);
+
+    // Push narrows; a child push can only shrink its parent.
+    r.BeginFrame(Vec2(1280, 720));
+    Rect2D a;
+    a.min = Vec2(100, 100);
+    a.max = Vec2(300, 300);
+    r.PushClipRect(a);
+    CHECK(r.clipDepth() == 1);
+    CHECK(r.clipRect(&out));
+    CHECK(out.min.x == 100 && out.max.x == 300);
+
+    // A wider child is clamped to the parent.
+    Rect2D wide;
+    wide.min = Vec2(0, 0);
+    wide.max = Vec2(1000, 1000);
+    r.PushClipRect(wide);
+    CHECK(r.clipRect(&out));
+    CHECK(out.min.x == 100 && out.max.x == 300);
+    CHECK(out.min.y == 100 && out.max.y == 300);
+
+    // A rect fully inside survives exactly.
+    Rect2D inside;
+    inside.min = Vec2(150, 150);
+    inside.max = Vec2(200, 200);
+    inside.filled = true;
+    r.DrawRect(inside);
+    // A rect that overhangs is trimmed to the clip.
+    Rect2D over;
+    over.min = Vec2(250, 250);
+    over.max = Vec2(500, 500);
+    r.DrawRect(over);
+    // A rect entirely outside is dropped.
+    Rect2D outside;
+    outside.min = Vec2(600, 600);
+    outside.max = Vec2(700, 700);
+    r.DrawRect(outside);
+    r.PopClipRect();
+    r.PopClipRect();
+    r.EndFrame();
+    CHECK(cap->rects == 2);
+    CHECK(r.stats().clipped == 1);
+    CHECK(r.clipDepth() == 0);
+
+    // A line crossing the clip is trimmed rather than dropped.
+    r.BeginFrame(Vec2(1280, 720));
+    r.PushClipRect(a);
+    r.DrawLine(Vec2(0, 200), Vec2(1000, 200), Rgba::Red());
+    r.EndFrame();
+    CHECK(cap->lines == 1);
+
+    // A line entirely outside is dropped.
+    r.BeginFrame(Vec2(1280, 720));
+    r.PushClipRect(a);
+    r.DrawLine(Vec2(0, 0), Vec2(10, 10), Rgba::Red());
+    r.EndFrame();
+    CHECK(cap->lines == 0);
+
+    // An unmatched pop is a no-op, and the stack resets each frame.
+    r.BeginFrame(Vec2(1280, 720));
+    r.PopClipRect();
+    CHECK(r.clipDepth() == 0);
+    r.PushClipRect(a);
+    r.EndFrame();
+    CHECK(r.clipDepth() == 0);
+
+    // The depth cap fails closed: pushes past kMaxClipDepth are ignored.
+    r.BeginFrame(Vec2(1280, 720));
+    for (size_t i = 0; i < Renderer::kMaxClipDepth + 8; ++i) {
+      Rect2D full;
+      full.min = Vec2(0, 0);
+      full.max = Vec2(1280, 720);
+      r.PushClipRect(full);
+    }
+    CHECK(r.clipDepth() == Renderer::kMaxClipDepth);
+    r.EndFrame();
+  }
+
   // --- Platform backend factory (host) ---
   {
     std::unique_ptr<IRenderBackend> bk(CreateRenderBackend());

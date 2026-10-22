@@ -132,10 +132,17 @@ struct RenderStats {
   f32 frameMs = 0;
   u64 drawCalls = 0;
   size_t primitives = 0;
+  /// Primitives dropped this frame because they fell entirely outside the
+  /// active clip rectangle.
+  u64 clipped = 0;
 };
 
 class BERRY_API Renderer {
  public:
+  /// Deepest scissor nesting the renderer accepts. A script that pushes more
+  /// is refused rather than allowed to grow the stack without bound.
+  static constexpr size_t kMaxClipDepth = 32;
+
   Renderer() = default;
   ~Renderer();
 
@@ -163,8 +170,53 @@ class BERRY_API Renderer {
   bool DrawBillboard(const Billboard3D& bb);
   void DrawTextCentered(const Vec2& center, const char* text, const Rgba& color, f32 scale);
 
+  //--- world-space (3D) debug geometry --------------------------------------
+  //
+  // Every 3D helper projects through the current camera and then queues the
+  // same 2D primitives as the immediate-mode API, so 3D debug geometry needs no
+  // new backend state: it is a line or a quad in the one batch.
+
+  /// Projects a world point to pixels. Returns false when no valid camera is
+  /// set or the point is behind the camera; an off-screen point still projects
+  /// (so a line crossing the viewport can be clipped rather than dropped).
+  bool ProjectWorld(const Vec3& world, Vec2* screen) const;
+
+  /// Draws a world-space line. The segment is clipped against the active clip
+  /// rectangle (and dropped when an endpoint is behind the camera), so a line
+  /// that runs off-screen is trimmed instead of vanishing.
+  void Draw3DLine(const Vec3& a, const Vec3& b, const Rgba& color,
+                  f32 thickness = 1.0f);
+
+  /// Draws the 12 edges of an axis-aligned world box (`min`..`max`).
+  void Draw3DBox(const Vec3& min, const Vec3& max, const Rgba& color,
+                 f32 thickness = 1.0f);
+
+  /// Draws text at a world position (anchored at the projected point).
+  /// Nothing is drawn when the point is behind the camera or outside the clip.
+  void Draw3DText(const Vec3& world, const char* text, const Rgba& color,
+                  f32 scale = 1.0f);
+
+  //--- scissor stack --------------------------------------------------------
+  //
+  // A nested clip rectangle. Pushing intersects with the current top, so a
+  // child clip can only ever narrow its parent. Clipping is applied on the CPU
+  // as primitives are queued:
+  //   * rects and lines are clipped exactly (a rect is intersected, a line is
+  //     trimmed with Liang-Barsky);
+  //   * text and circles have no exact clip representation in the batch, so
+  //     they are kept whenever they intersect the clip at all and dropped only
+  //     when they fall entirely outside — conservative in the safe direction.
+  // The stack resets each frame, and an unmatched Pop is a no-op.
+  void PushClipRect(const Rect2D& rect);
+  void PopClipRect();
+  /// The active (intersected) clip rectangle, or false when the stack is empty.
+  bool clipRect(Rect2D* out) const;
+  size_t clipDepth() const;
+
   // ESP helpers (need camera)
   void SetCamera(const CameraState& cam);
+  /// Snapshot of the camera the last frame was drawn with.
+  CameraState camera() const;
   bool EspBoxForEntity(const EntitySnapshot& ent, const CameraState& cam,
                        EspBox* out) const;
 
@@ -174,6 +226,10 @@ class BERRY_API Renderer {
   const RenderStats& stats() const { return stats_; }
 
  private:
+  /// True when `box` intersects the active clip (or no clip is active). When
+  /// `exact` is set, `box` is narrowed to the intersection.
+  bool ClipBox(Rect2D* box, bool exact) const;
+
   RenderSeam* seam_ = nullptr;
   bool inFrame_ = false;
   bool showOverlay_ = true;
@@ -184,6 +240,7 @@ class BERRY_API Renderer {
   std::vector<Circle2D> circles_;
   mutable std::mutex mutex_;
   CameraState cam_;
+  std::vector<Rect2D> clips_;
   RenderStats stats_;
 
   void PresentLocked();
