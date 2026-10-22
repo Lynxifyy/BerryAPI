@@ -17,7 +17,8 @@
 #   event <name>(a: t, ...)    an event channel scripts may await
 #   struct <Name> { f: t ... } a value shape
 #
-# Types: nil, bool, number, string, Actor, Vec3, Rgba, Widget, Task, HttpResult
+# Types: nil, bool, number, string, Actor, Vec3, Rgba, Widget, Task, HttpResult,
+#        Table (a structured value: a table/object of named fields)
 
 module Combat {
   capability combat
@@ -27,11 +28,26 @@ module Combat {
   fn observe(ticks: number) -> number
 }
 
+module Player {
+  capability world
+  doc "Read-only view of the LOCAL player. This is the client's own state, which it already holds; nothing here reveals another player. Reads fail closed when the local player is not bound."
+  fn position() -> Vec3
+  fn rotation() -> Vec3
+  fn velocity() -> Vec3
+  fn health() -> number
+  fn max_health() -> number
+  fn alive() -> bool
+  fn name() -> string
+}
+
 module Render {
   capability render
   doc "Client-side drawing. Everything here is local to this screen."
   fn draw_text(x: number, y: number, text: string, color: Rgba) -> nil
+  fn draw_text_centered(x: number, y: number, text: string, color: Rgba) -> nil
   fn draw_rect(x: number, y: number, w: number, h: number, color: Rgba) -> nil
+  fn draw_line(x1: number, y1: number, x2: number, y2: number, color: Rgba) -> nil
+  fn draw_circle(x: number, y: number, radius: number, color: Rgba) -> nil
   fn screen_size() -> Vec3
   fn set_zoom(factor: number) -> nil
 }
@@ -40,7 +56,11 @@ module World {
   capability world
   doc "Read-only world queries. The core never hands out raw pointers."
   fn query(within: number) -> number
+  fn entity_count() -> number
   fn block_at(x: number, y: number, z: number) -> string
+  fn time() -> Table
+  fn is_day() -> bool
+  fn is_raining() -> bool
 }
 
 module Network {
@@ -63,8 +83,12 @@ module Perf {
   capability perf
   doc "Frame timing and quality controls."
   fn frame_time_ms() -> number
+  fn stats() -> Table
+  fn quality() -> number
   fn set_target_fps(fps: number) -> nil
   fn set_thermal_mode(enabled: bool) -> nil
+  doc "Select the device profile the governor tunes itself for: generic, mobile-low, mobile-high or desktop. Unknown names are refused (fail closed)."
+  fn set_platform(name: string) -> nil
 }
 
 module Input {
@@ -93,8 +117,49 @@ module Cosmetic {
 
 module Events {
   capability events
-  doc "Event channels scripts may await with Events.once."
+  doc "Event channels scripts may await with Events.once. The world-diff channels are driven by the reactive world grid: entityEntered and entityLeft carry \"<id>:<type>\", entityUpdated fires when an entity's position, health or state changed between ticks, and blockChanged carries \"x,y,z,block\". A script never polls for these."
   event hit(damage: number)
   event kill(victim: string)
   event tick_count(count: number)
+  event entityEntered(entity: string)
+  event entityLeft(entity: string)
+  event entityUpdated(entity: string)
+  event blockChanged(change: string)
+}
+
+module Intent {
+  capability input
+  doc "Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share."
+  fn allowed(name: string) -> bool
+  fn classify(name: string) -> string
+  fn server() -> string
+  fn profile() -> string
+  fn disabled_groups() -> string
+  fn list() -> string
+}
+
+module Shader {
+  capability render
+  doc "Script-registered GLES fragment shaders and the post-process chain. Registration is validated before any GL call, so a malformed or oversized shader is refused without touching the device. Reloading a shader by re-registering its name keeps its chain position and the parameters whose uniforms survive, and a shader the device refuses leaves the previous program in place."
+  fn register(name: string, source: string) -> bool
+  fn unregister(name: string) -> bool
+  fn has(name: string) -> bool
+  fn list() -> string
+  fn uniforms(name: string) -> string
+  fn enable(name: string, on: bool) -> bool
+  fn chain() -> string
+  fn set_param(name: string, param: string, value: number) -> bool
+  fn param(name: string, param: string) -> number
+  fn clear() -> nil
+}
+
+module Package {
+  capability fileio
+  doc "Script package registry and resolver. A package is a JSON manifest plus an entry file; a script declares dependencies with version constraints. Semver is parsed (1.10.0 sorts above 1.9.0, a pre-release below its release) and caret/tilde constraints are normalised at parse time. Resolution picks one version per package and orders them dependencies-first; it fails closed on a missing package, an unsatisfiable constraint, a conflict or a cycle. This module carries the fileio grant: it names packages that live on disk, even though resolution itself is pure."
+  fn add(manifest_json: string) -> bool
+  fn has(name: string) -> bool
+  fn versions(name: string) -> string
+  fn resolve(name: string, constraint: string) -> string
+  fn require_path(path: string) -> string
+  fn clear() -> nil
 }

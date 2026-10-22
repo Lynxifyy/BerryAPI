@@ -126,6 +126,25 @@ std::string Lower(const std::string& s) {
   return out;
 }
 
+/// A Vec3 as a script table {x,y,z}. The IDL's Vec3 maps to this shape.
+ScriptValue Vec3Value(const Vec3& v) {
+  ScriptTable t;
+  t["x"] = ScriptValue::Num((f64)v.x);
+  t["y"] = ScriptValue::Num((f64)v.y);
+  t["z"] = ScriptValue::Num((f64)v.z);
+  return ScriptValue::Tbl(std::move(t));
+}
+
+/// A finite number clamped into [lo, hi]; non-finite input yields `fallback`.
+/// Used for coordinates a script feeds to the renderer, so a NaN cannot reach
+/// the draw list.
+f32 SafeCoord(const ScriptValue& v, f32 fallback = 0.0f) {
+  if (!v.IsNumber()) return fallback;
+  const f64 n = v.AsNumber();
+  if (!std::isfinite(n)) return fallback;
+  return (f32)n;
+}
+
 /// Named input keys the observer tracks. Returns null for anything else so the
 /// caller fails closed rather than guessing a mapping.
 const char* KeyField(const std::string& key, bool* out) {
@@ -167,6 +186,12 @@ void ScriptApi::InitFrameHook() {
           if (screen.x > 0 && screen.y > 0) {
             services_.hud->Present(*services_.renderer, screen);
           }
+        }
+        // Cosmetics draw through the same Renderer, after the HUD, so a worn
+        // asset presents through the one RenderSeam like every other overlay.
+        // DrawLocal needs no skeleton bound: it resolves nothing and returns 0.
+        if (services_.cosmetics && services_.renderer) {
+          services_.cosmetics->DrawLocal(*services_.renderer, services_.localPlayer);
         }
         return EventResult::Continue;
       });
@@ -257,11 +282,81 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Num((f64)n);
   });
 
+  //--- Player (read-only view of the LOCAL player) -------------------------
+  //
+  // Every read resolves the local player through the World seam and fails
+  // closed when it is not bound: a script sees "no player" rather than a
+  // fabricated or another entity's state. This is the client's own state.
+  auto localSnapshot = [this](ScriptContext& ctx, const char* who,
+                              EntitySnapshot* out) -> bool {
+    if (!services_.world) {
+      ctx.RaiseError(std::string(who) + ": world unavailable");
+      return false;
+    }
+    auto seam = services_.world->Seam();
+    if (!seam) {
+      ctx.RaiseError(std::string(who) + ": no level seam bound");
+      return false;
+    }
+    const EntityId id = services_.localPlayer;
+    if (!id.raw && !id.runtime) {
+      ctx.RaiseError(std::string(who) + ": no local player bound");
+      return false;
+    }
+    if (!seam->GetEntity(id, out)) {
+      ctx.RaiseError(std::string(who) + ": local player not present");
+      return false;
+    }
+    return true;
+  };
+
+  install("player.position", [this, localSnapshot](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    EntitySnapshot s;
+    if (!localSnapshot(ctx, "player.position", &s)) return Vec3Value(Vec3());
+    return Vec3Value(s.position);
+  });
+
+  install("player.rotation", [this, localSnapshot](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    EntitySnapshot s;
+    if (!localSnapshot(ctx, "player.rotation", &s)) return Vec3Value(Vec3());
+    return Vec3Value(s.rotation);
+  });
+
+  install("player.velocity", [this, localSnapshot](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    EntitySnapshot s;
+    if (!localSnapshot(ctx, "player.velocity", &s)) return Vec3Value(Vec3());
+    return Vec3Value(s.velocity);
+  });
+
+  install("player.health", [this, localSnapshot](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    EntitySnapshot s;
+    if (!localSnapshot(ctx, "player.health", &s)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)s.health);
+  });
+
+  install("player.max_health", [this, localSnapshot](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    EntitySnapshot s;
+    if (!localSnapshot(ctx, "player.max_health", &s)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)s.maxHealth);
+  });
+
+  install("player.alive", [this, localSnapshot](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    EntitySnapshot s;
+    if (!localSnapshot(ctx, "player.alive", &s)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(s.alive);
+  });
+
+  install("player.name", [this, localSnapshot](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    EntitySnapshot s;
+    if (!localSnapshot(ctx, "player.name", &s)) return ScriptValue::Str("");
+    return ScriptValue::Str(s.name);
+  });
+
   //--- Render (client-side draw) -------------------------------------------
   install("render.draw_text", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
     if (!services_.renderer) { ctx.RaiseError("render.draw_text: renderer unavailable"); return ScriptValue::Nil(); }
-    const f32 x = (f32)args[0].AsNumber();
-    const f32 y = (f32)args[1].AsNumber();
+    const f32 x = SafeCoord(args[0]);
+    const f32 y = SafeCoord(args[1]);
     const std::string text = args[2].ToDisplay();
     const Rgba color = ParseRgba(args[3]);
     PostRender([this, x, y, text, color] {
@@ -270,12 +365,26 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Nil();
   });
 
+  install("render.draw_text_centered", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.draw_text_centered: renderer unavailable"); return ScriptValue::Nil(); }
+    const f32 x = SafeCoord(args[0]);
+    const f32 y = SafeCoord(args[1]);
+    const std::string text = args[2].ToDisplay();
+    const Rgba color = ParseRgba(args[3]);
+    PostRender([this, x, y, text, color] {
+      if (services_.renderer) {
+        services_.renderer->DrawTextCentered(Vec2(x, y), text.c_str(), color, 1.0f);
+      }
+    });
+    return ScriptValue::Nil();
+  });
+
   install("render.draw_rect", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
     if (!services_.renderer) { ctx.RaiseError("render.draw_rect: renderer unavailable"); return ScriptValue::Nil(); }
-    const f32 x = (f32)args[0].AsNumber();
-    const f32 y = (f32)args[1].AsNumber();
-    const f32 w = (f32)args[2].AsNumber();
-    const f32 h = (f32)args[3].AsNumber();
+    const f32 x = SafeCoord(args[0]);
+    const f32 y = SafeCoord(args[1]);
+    const f32 w = SafeCoord(args[2]);
+    const f32 h = SafeCoord(args[3]);
     const Rgba color = ParseRgba(args[4]);
     PostRender([this, x, y, w, h, color] {
       if (!services_.renderer) return;
@@ -289,19 +398,53 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Nil();
   });
 
+  install("render.draw_line", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.draw_line: renderer unavailable"); return ScriptValue::Nil(); }
+    const f32 x1 = SafeCoord(args[0]);
+    const f32 y1 = SafeCoord(args[1]);
+    const f32 x2 = SafeCoord(args[2]);
+    const f32 y2 = SafeCoord(args[3]);
+    const Rgba color = ParseRgba(args[4]);
+    PostRender([this, x1, y1, x2, y2, color] {
+      if (services_.renderer) {
+        services_.renderer->DrawLine(Vec2(x1, y1), Vec2(x2, y2), color);
+      }
+    });
+    return ScriptValue::Nil();
+  });
+
+  install("render.draw_circle", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.draw_circle: renderer unavailable"); return ScriptValue::Nil(); }
+    const f32 x = SafeCoord(args[0]);
+    const f32 y = SafeCoord(args[1]);
+    // A negative radius would draw nothing meaningful and can confuse the
+    // seam's segment math, so clamp it up to zero.
+    const f32 radius = std::max(0.0f, SafeCoord(args[2]));
+    const Rgba color = ParseRgba(args[3]);
+    PostRender([this, x, y, radius, color] {
+      if (services_.renderer) services_.renderer->DrawCircle(Vec2(x, y), radius, color);
+    });
+    return ScriptValue::Nil();
+  });
+
   install("render.screen_size", [this](ScriptContext&, const std::vector<ScriptValue>&) {
     const Vec2 s = screenSize();
-    ScriptTable t;
-    t["x"] = ScriptValue::Num((f64)s.x);
-    t["y"] = ScriptValue::Num((f64)s.y);
-    t["z"] = ScriptValue::Num(0);
-    return ScriptValue::Tbl(std::move(t));
+    return Vec3Value(Vec3(s.x, s.y, 0.0f));
   });
 
   install("render.set_zoom", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
     const f64 factor = args[0].AsNumber();
     if (!std::isfinite(factor) || factor <= 0) {
       ctx.RaiseError("render.set_zoom: factor must be positive");
+      return ScriptValue::Nil();
+    }
+    // Zoom is a client-side camera intent. A server profile that disables the
+    // camera group must genuinely disable it, so the intent layer is consulted
+    // before the value is stored. An unbound validator is permissive here
+    // (the policy layer is opt-in), unlike the read-only intent.* bindings.
+    if (services_.intents &&
+        !services_.intents->Allowed(IntentKind::Zoom)) {
+      ctx.RaiseError("render.set_zoom: zoom disabled by server policy");
       return ScriptValue::Nil();
     }
     // Zoom is client-side camera state; the camera consumer reads it back via
@@ -336,6 +479,41 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     const Vec3 p((f32)args[0].AsNumber(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber());
     const u32 block = services_.world->GetBlock(p);
     return ScriptValue::Str(std::to_string(block));
+  });
+
+  install("world.entity_count", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.world) { ctx.RaiseError("world.entity_count: world unavailable"); return ScriptValue::Num(0); }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("world.entity_count: no level seam bound"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)seam->AllEntities().size());
+  });
+
+  install("world.time", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.world) { ctx.RaiseError("world.time: world unavailable"); return ScriptValue::Nil(); }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("world.time: no level seam bound"); return ScriptValue::Nil(); }
+    const LevelTime t = seam->GetTime();
+    ScriptTable out;
+    out["absolute"] = ScriptValue::Num((f64)t.absolute);
+    out["daylight"] = ScriptValue::Num((f64)t.daylight);
+    out["day"] = ScriptValue::Bool(t.day);
+    out["rain"] = ScriptValue::Num((f64)t.rainLevel);
+    out["thunder"] = ScriptValue::Num((f64)t.thunderLevel);
+    return ScriptValue::Tbl(std::move(out));
+  });
+
+  install("world.is_day", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.world) { ctx.RaiseError("world.is_day: world unavailable"); return ScriptValue::Bool(false); }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("world.is_day: no level seam bound"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(seam->GetTime().day);
+  });
+
+  install("world.is_raining", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.world) { ctx.RaiseError("world.is_raining: world unavailable"); return ScriptValue::Bool(false); }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("world.is_raining: no level seam bound"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(seam->GetTime().rainLevel > 0.0f);
   });
 
   //--- Network (granted, host-scoped) --------------------------------------
@@ -425,6 +603,45 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Num(0);
   });
 
+  install("perf.stats", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.governor) { ctx.RaiseError("perf.stats: governor unavailable"); return ScriptValue::Nil(); }
+    const FrameStats st = services_.governor->stats();
+    ScriptTable out;
+    out["avg_ms"] = ScriptValue::Num(st.avgMs);
+    out["p95_ms"] = ScriptValue::Num(st.p95Ms);
+    out["p99_ms"] = ScriptValue::Num(st.p99Ms);
+    out["min_ms"] = ScriptValue::Num(st.minMs);
+    out["max_ms"] = ScriptValue::Num(st.maxMs);
+    out["fps"] = ScriptValue::Num(st.Fps());
+    out["samples"] = ScriptValue::Num((f64)st.samples);
+    return ScriptValue::Tbl(std::move(out));
+  });
+
+  install("perf.quality", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.governor) { ctx.RaiseError("perf.quality: governor unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.governor->quality().Mean());
+  });
+
+  install("perf.set_platform", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.governor) { ctx.RaiseError("perf.set_platform: governor unavailable"); return ScriptValue::Nil(); }
+    const std::string name = Lower(args[0].ToDisplay());
+    PlatformClass cls;
+    if (name == "generic") cls = PlatformClass::Generic;
+    else if (name == "mobile-low") cls = PlatformClass::MobileLow;
+    else if (name == "mobile-high") cls = PlatformClass::MobileHigh;
+    else if (name == "desktop") cls = PlatformClass::Desktop;
+    else {
+      // An unknown profile name is refused rather than silently mapped to a
+      // default: the script asked for something that does not exist.
+      ctx.RaiseError("perf.set_platform: unknown profile '" + args[0].ToDisplay() + "'");
+      return ScriptValue::Nil();
+    }
+    PostRender([this, cls] {
+      if (services_.governor) services_.governor->SetPlatform(cls);
+    });
+    return ScriptValue::Nil();
+  });
+
   install("perf.set_target_fps", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
     if (!services_.governor) { ctx.RaiseError("perf.set_target_fps: governor unavailable"); return ScriptValue::Nil(); }
     const f64 fps = args[0].AsNumber();
@@ -483,11 +700,7 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     if (!services_.velocity || !services_.velocity->LocalVelocity(&v)) {
       v = Vec3(0, 0, 0);
     }
-    ScriptTable t;
-    t["x"] = ScriptValue::Num((f64)v.x);
-    t["y"] = ScriptValue::Num((f64)v.y);
-    t["z"] = ScriptValue::Num((f64)v.z);
-    return ScriptValue::Tbl(std::move(t));
+    return Vec3Value(v);
   });
 
   //--- Cosmetic (local loadout; renders on this screen only) ---------------
@@ -577,6 +790,211 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     // atomically; the return value is how many packs loaded cleanly.
     const PackLoadReport report = services_.packs->LoadDirectory();
     return ScriptValue::Num((f64)report.packsLoaded);
+  });
+
+  //--- Intent (what may be done on this server) ----------------------------
+  //
+  // The read side of the intent layer. `intent.allowed` is what a module
+  // consults before it acts, so a server profile that disables a group
+  // genuinely disables it. Fails closed when no validator is bound: an unknown
+  // policy must not read as "allowed".
+  install("intent.allowed", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.intents) return ScriptValue::Bool(false);
+    const IntentKind k = IntentKindFromName(args[0].AsString());
+    return ScriptValue::Bool(services_.intents->Allowed(k));
+  });
+
+  install("intent.classify", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    const IntentKind k = IntentKindFromName(args[0].AsString());
+    return ScriptValue::Str(IntentClassName(ClassifyIntent(k)));
+  });
+
+  install("intent.server", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.intents) return ScriptValue::Str("");
+    return ScriptValue::Str(services_.intents->server());
+  });
+
+  install("intent.profile", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.intents) return ScriptValue::Str("");
+    return ScriptValue::Str(services_.intents->profile().name);
+  });
+
+  install("intent.disabled_groups", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.intents) return ScriptValue::Str("");
+    return ScriptValue::Str(IntentGroupList(services_.intents->disabledGroups()));
+  });
+
+  install("intent.list", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    // Every named intent, comma separated, so a script can enumerate the
+    // vocabulary without hard-coding it.
+    std::string out;
+    for (u32 i = 1; i < (u32)IntentKind::Count; ++i) {
+      const IntentKind k = (IntentKind)i;
+      if (k == IntentKind::Unknown) continue;
+      if (!out.empty()) out += ",";
+      out += IntentKindName(k);
+    }
+    return ScriptValue::Str(out);
+  });
+
+  //--- Shader (script-registered post-processing) --------------------------
+  //
+  // Registration is validated before any GL call; a device that refuses the
+  // shader keeps the previous program. Every binding fails closed when no
+  // registry is bound.
+  install("shader.register", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.shaders) { ctx.RaiseError("shader.register: shader registry unavailable"); return ScriptValue::Bool(false); }
+    ShaderSource s;
+    s.name = args[0].AsString();
+    s.stage = ShaderStage::Fragment;
+    s.source = args[1].AsString();
+    std::string error;
+    const ShaderReject r = services_.shaders->Register(s, &error);
+    if (r != ShaderReject::None) {
+      ctx.RaiseError(std::string("shader.register: ") + ShaderRejectName(r));
+      return ScriptValue::Bool(false);
+    }
+    // A device compile failure is reported as false, but the previous program
+    // (if any) is still in place; surface the reason to the script.
+    if (!error.empty()) ctx.RaiseError("shader.register: " + error);
+    return ScriptValue::Bool(error.empty());
+  });
+
+  install("shader.unregister", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.shaders) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.shaders->Unregister(args[0].AsString()));
+  });
+
+  install("shader.has", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.shaders) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.shaders->Has(args[0].AsString()));
+  });
+
+  install("shader.list", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.shaders) return ScriptValue::Str("");
+    std::string out;
+    for (const auto& n : services_.shaders->Names()) {
+      if (!out.empty()) out += ",";
+      out += n;
+    }
+    return ScriptValue::Str(out);
+  });
+
+  install("shader.uniforms", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.shaders) return ScriptValue::Str("");
+    return ScriptValue::Str(services_.shaders->UniformNames(args[0].AsString()));
+  });
+
+  install("shader.enable", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.shaders) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(
+        services_.shaders->SetEffectEnabled(args[0].AsString(), args[1].Truthy()));
+  });
+
+  install("shader.chain", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.shaders) return ScriptValue::Str("");
+    return ScriptValue::Str(services_.shaders->ChainNames());
+  });
+
+  install("shader.set_param", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.shaders) return ScriptValue::Bool(false);
+    const f64 v = args[2].AsNumber();
+    if (!std::isfinite(v)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(
+        services_.shaders->SetParam(args[0].AsString(), args[1].AsString(), (f32)v));
+  });
+
+  install("shader.param", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.shaders) return ScriptValue::Num(0);
+    f32 v = 0;
+    if (!services_.shaders->Param(args[0].AsString(), args[1].AsString(), &v)) {
+      return ScriptValue::Num(0);
+    }
+    return ScriptValue::Num((f64)v);
+  });
+
+  install("shader.clear", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.shaders) services_.shaders->Clear();
+    return ScriptValue::Nil();
+  });
+
+  //--- Package (registry + resolver) ---------------------------------------
+  //
+  // Resolution is pure: it reads only the registered manifests, never the disk.
+  // Every binding fails closed when no registry is bound.
+  install("package.add", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.packages) {
+      ctx.RaiseError("package.add: package registry unavailable");
+      return ScriptValue::Bool(false);
+    }
+    std::string error;
+    const PackageError pe = services_.packages->AddJson(args[0].AsString(), &error);
+    if (pe != PackageError::Ok) {
+      ctx.RaiseError(std::string("package.add: ") + PackageErrorName(pe) +
+                     (error.empty() ? "" : (": " + error)));
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(true);
+  });
+
+  install("package.has", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.packages) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.packages->Has(args[0].AsString()));
+  });
+
+  install("package.versions", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.packages) return ScriptValue::Str("");
+    std::string out;
+    for (const SemVer& v : services_.packages->Versions(args[0].AsString())) {
+      if (!out.empty()) out += ",";
+      out += v.ToString();
+    }
+    return ScriptValue::Str(out);
+  });
+
+  install("package.resolve", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.packages) {
+      ctx.RaiseError("package.resolve: package registry unavailable");
+      return ScriptValue::Str("");
+    }
+    PackageDependency root;
+    root.name = args[0].AsString();
+    root.raw = args[1].AsString();
+    std::string cerr;
+    if (!VersionConstraint::Parse(root.raw, &root.constraint, &cerr)) {
+      ctx.RaiseError("package.resolve: bad constraint: " + cerr);
+      return ScriptValue::Str("");
+    }
+    const ResolveResult r = services_.packages->Resolve({root});
+    if (!r.ok()) {
+      ctx.RaiseError(std::string("package.resolve: ") + ResolveErrorName(r.error) +
+                     (r.detail.empty() ? "" : (": " + r.detail)));
+      return ScriptValue::Str("");
+    }
+    std::string out;
+    for (const auto& rp : r.order) {
+      if (!out.empty()) out += ",";
+      out += rp.name + "@" + rp.version;
+    }
+    return ScriptValue::Str(out);
+  });
+
+  install("package.require_path", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.packages) {
+      ctx.RaiseError("package.require_path: package registry unavailable");
+      return ScriptValue::Str("");
+    }
+    std::string name, entry, error;
+    if (!ResolveRequire(*services_.packages, args[0].AsString(), &name, &entry, &error)) {
+      ctx.RaiseError("package.require_path: " + error);
+      return ScriptValue::Str("");
+    }
+    return ScriptValue::Str(name + "/" + entry);
+  });
+
+  install("package.clear", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.packages) services_.packages->Clear();
+    return ScriptValue::Nil();
   });
 
   return installed_.size();

@@ -23,6 +23,13 @@ namespace Berry {
 
 enum class EntityType : u32 { Player, Mob, Projectile, Item, Vehicle, Unknown };
 
+/// The lowercase name of an entity type ("player", "mob", ...). The inverse of
+/// `ParseEntityType`, so a name round-trips through a script call.
+BERRY_API const char* EntityTypeName(EntityType t);
+/// Parses a type name. Returns false for an unknown name rather than guessing
+/// `Unknown`, so a filter typo is an error and not a silent match-everything.
+BERRY_API bool ParseEntityType(const std::string& name, EntityType* out);
+
 enum class DamageCause : u32 {
   None = 0,
   Contact, EntityAttack, EntitySweepAttack, Projectile, Suffocation, Fall,

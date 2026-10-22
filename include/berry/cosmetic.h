@@ -25,6 +25,7 @@
 #include "berry/types.h"
 #include "berry/math.h"
 #include "berry/game.h"
+#include "berry/render.h"
 
 #include <atomic>
 #include <map>
@@ -460,6 +461,23 @@ class BERRY_API CosmeticService {
 
   /// Submits a remote player's verified loadout (no-op when localOnly).
   size_t PresentRemote(const std::string& playerId, EntityId entity);
+
+  //--- draw through Berry::Render ------------------------------------------
+  /// Resolves a loadout and queues it into the immediate-mode Renderer as
+  /// world-space billboards, projected with the renderer's current camera. This
+  /// is the path that actually draws a cosmetic on screen: the geometry seam
+  /// above hands resolved items to a backend, while this turns them into the
+  /// same 2D batch every other overlay consumer uses, so a cosmetic presents
+  /// through the one RenderSeam.
+  ///
+  /// Must be called between Renderer::BeginFrame and EndFrame. Returns how many
+  /// items were drawn; 0 with no skeleton source, no camera or an empty slot.
+  size_t DrawLocal(Renderer& r, EntityId localPlayer);
+  size_t DrawRemote(Renderer& r, const std::string& playerId, EntityId entity);
+
+  /// Queues a single resolved item as a billboard. Exposed so the composition
+  /// from draw item to renderer primitive is testable on its own.
+  static bool DrawItem(Renderer& r, const CosmeticDrawItem& item);
 
   CosmeticStats stats() const;
 

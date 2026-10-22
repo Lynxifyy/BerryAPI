@@ -15,6 +15,20 @@ Capability: `combat`.
 | `combat.last_hit_damage() -> number` | `combat` | - |
 | `combat.observe(ticks: number) -> number` | `combat` | - |
 
+## Player
+
+Capability: `world`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `player.position() -> Vec3` | `world` | Read-only view of the LOCAL player. This is the client's own state, which it already holds; nothing here reveals another player. Reads fail closed when the local player is not bound. |
+| `player.rotation() -> Vec3` | `world` | - |
+| `player.velocity() -> Vec3` | `world` | - |
+| `player.health() -> number` | `world` | - |
+| `player.max_health() -> number` | `world` | - |
+| `player.alive() -> bool` | `world` | - |
+| `player.name() -> string` | `world` | - |
+
 ## Render
 
 Capability: `render`.
@@ -22,7 +36,10 @@ Capability: `render`.
 | Function | Capability | Description |
 | --- | --- | --- |
 | `render.draw_text(x: number, y: number, text: string, color: Rgba) -> nil` | `render` | Client-side drawing. Everything here is local to this screen. |
+| `render.draw_text_centered(x: number, y: number, text: string, color: Rgba) -> nil` | `render` | - |
 | `render.draw_rect(x: number, y: number, w: number, h: number, color: Rgba) -> nil` | `render` | - |
+| `render.draw_line(x1: number, y1: number, x2: number, y2: number, color: Rgba) -> nil` | `render` | - |
+| `render.draw_circle(x: number, y: number, radius: number, color: Rgba) -> nil` | `render` | - |
 | `render.screen_size() -> Vec3` | `render` | - |
 | `render.set_zoom(factor: number) -> nil` | `render` | - |
 
@@ -33,7 +50,11 @@ Capability: `world`.
 | Function | Capability | Description |
 | --- | --- | --- |
 | `world.query(within: number) -> number` | `world` | Read-only world queries. The core never hands out raw pointers. |
+| `world.entity_count() -> number` | `world` | - |
 | `world.block_at(x: number, y: number, z: number) -> string` | `world` | - |
+| `world.time() -> Table` | `world` | - |
+| `world.is_day() -> bool` | `world` | - |
+| `world.is_raining() -> bool` | `world` | - |
 
 ## Network
 
@@ -62,8 +83,11 @@ Capability: `perf`.
 | Function | Capability | Description |
 | --- | --- | --- |
 | `perf.frame_time_ms() -> number` | `perf` | Frame timing and quality controls. |
+| `perf.stats() -> Table` | `perf` | - |
+| `perf.quality() -> number` | `perf` | - |
 | `perf.set_target_fps(fps: number) -> nil` | `perf` | - |
 | `perf.set_thermal_mode(enabled: bool) -> nil` | `perf` | - |
+| `perf.set_platform(name: string) -> nil` | `perf` | Select the device profile the governor tunes itself for: generic, mobile-low, mobile-high or desktop. Unknown names are refused (fail closed). |
 
 ## Input
 
@@ -97,6 +121,53 @@ Capability: `events`.
 
 Events (await with `Events.once`):
 
-- `hit(damage: number)` — Event channels scripts may await with Events.once.
+- `hit(damage: number)` — Event channels scripts may await with Events.once. The world-diff channels are driven by the reactive world grid: entityEntered and entityLeft carry \"<id>:<type>\", entityUpdated fires when an entity's position, health or state changed between ticks, and blockChanged carries \"x,y,z,block\". A script never polls for these.
 - `kill(victim: string)` — -
 - `tick_count(count: number)` — -
+- `entityEntered(entity: string)` — -
+- `entityLeft(entity: string)` — -
+- `entityUpdated(entity: string)` — -
+- `blockChanged(change: string)` — -
+
+## Intent
+
+Capability: `input`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `intent.allowed(name: string) -> bool` | `input` | Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share. |
+| `intent.classify(name: string) -> string` | `input` | - |
+| `intent.server() -> string` | `input` | - |
+| `intent.profile() -> string` | `input` | - |
+| `intent.disabled_groups() -> string` | `input` | - |
+| `intent.list() -> string` | `input` | - |
+
+## Shader
+
+Capability: `render`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `shader.register(name: string, source: string) -> bool` | `render` | Script-registered GLES fragment shaders and the post-process chain. Registration is validated before any GL call, so a malformed or oversized shader is refused without touching the device. Reloading a shader by re-registering its name keeps its chain position and the parameters whose uniforms survive, and a shader the device refuses leaves the previous program in place. |
+| `shader.unregister(name: string) -> bool` | `render` | - |
+| `shader.has(name: string) -> bool` | `render` | - |
+| `shader.list() -> string` | `render` | - |
+| `shader.uniforms(name: string) -> string` | `render` | - |
+| `shader.enable(name: string, on: bool) -> bool` | `render` | - |
+| `shader.chain() -> string` | `render` | - |
+| `shader.set_param(name: string, param: string, value: number) -> bool` | `render` | - |
+| `shader.param(name: string, param: string) -> number` | `render` | - |
+| `shader.clear() -> nil` | `render` | - |
+
+## Package
+
+Capability: `fileio`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `package.add(manifest_json: string) -> bool` | `fileio` | Script package registry and resolver. A package is a JSON manifest plus an entry file; a script declares dependencies with version constraints. Semver is parsed (1.10.0 sorts above 1.9.0, a pre-release below its release) and caret/tilde constraints are normalised at parse time. Resolution picks one version per package and orders them dependencies-first; it fails closed on a missing package, an unsatisfiable constraint, a conflict or a cycle. This module carries the fileio grant: it names packages that live on disk, even though resolution itself is pure. |
+| `package.has(name: string) -> bool` | `fileio` | - |
+| `package.versions(name: string) -> string` | `fileio` | - |
+| `package.resolve(name: string, constraint: string) -> string` | `fileio` | - |
+| `package.require_path(path: string) -> string` | `fileio` | - |
+| `package.clear() -> nil` | `fileio` | - |

@@ -144,6 +144,7 @@ struct BERRY_API HudStats {
   u64 frames = 0;
   u64 layoutPasses = 0;       // widgets laid out (recomputed) this frame
   u64 widgetsDrawn = 0;
+  u64 widgetsCulled = 0;      // widgets skipped because they were off-screen
   u64 primitives = 0;
 };
 
@@ -210,6 +211,11 @@ class BERRY_API Hud {
   Vec2 AlignIn(Anchor a, const Vec2& base, const Vec2& size) const;
   void LayoutWidget(Widget& w, const Vec2& screen, const Vec2& origin);
   void DrawWidget(const Widget& w, Renderer& r);
+  /// True when the widget's resolved box intersects the screen (plus a small
+  /// margin), accounting for a slide tween. Off-screen widgets are skipped.
+  bool OnScreen(const Widget& w, const Vec2& screen) const;
+  /// Number of descendants under `w` (not counting `w`).
+  size_t CountSubtree(const Widget& w) const;
 
   std::map<WidgetId, Widget> widgets_;
   WidgetId nextId_ = 1;

@@ -16,11 +16,26 @@ export interface Combat {
   observe(ticks: number): number;
 }
 
+/** Capability required: world. */
+export interface Player {
+  /** Read-only view of the LOCAL player. This is the client's own state, which it already holds; nothing here reveals another player. Reads fail closed when the local player is not bound. */
+  position(): Vec3;
+  rotation(): Vec3;
+  velocity(): Vec3;
+  health(): number;
+  max_health(): number;
+  alive(): boolean;
+  name(): string;
+}
+
 /** Capability required: render. */
 export interface Render {
   /** Client-side drawing. Everything here is local to this screen. */
   draw_text(x: number, y: number, text: string, color: Rgba): void;
+  draw_text_centered(x: number, y: number, text: string, color: Rgba): void;
   draw_rect(x: number, y: number, w: number, h: number, color: Rgba): void;
+  draw_line(x1: number, y1: number, x2: number, y2: number, color: Rgba): void;
+  draw_circle(x: number, y: number, radius: number, color: Rgba): void;
   screen_size(): Vec3;
   set_zoom(factor: number): void;
 }
@@ -29,7 +44,11 @@ export interface Render {
 export interface World {
   /** Read-only world queries. The core never hands out raw pointers. */
   query(within: number): number;
+  entity_count(): number;
   block_at(x: number, y: number, z: number): string;
+  time(): Record<string, unknown>;
+  is_day(): boolean;
+  is_raining(): boolean;
 }
 
 /** Capability required: network. */
@@ -52,8 +71,12 @@ export interface Hud {
 export interface Perf {
   /** Frame timing and quality controls. */
   frame_time_ms(): number;
+  stats(): Record<string, unknown>;
+  quality(): number;
   set_target_fps(fps: number): void;
   set_thermal_mode(enabled: boolean): void;
+  /** Select the device profile the governor tunes itself for: generic, mobile-low, mobile-high or desktop. Unknown names are refused (fail closed). */
+  set_platform(name: string): void;
 }
 
 /** Capability required: input. */
@@ -80,6 +103,43 @@ export interface Cosmetic {
   reload_packs(): number;
 }
 
+/** Capability required: input. */
+export interface Intent {
+  /** Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share. */
+  allowed(name: string): boolean;
+  classify(name: string): string;
+  server(): string;
+  profile(): string;
+  disabled_groups(): string;
+  list(): string;
+}
+
+/** Capability required: render. */
+export interface Shader {
+  /** Script-registered GLES fragment shaders and the post-process chain. Registration is validated before any GL call, so a malformed or oversized shader is refused without touching the device. Reloading a shader by re-registering its name keeps its chain position and the parameters whose uniforms survive, and a shader the device refuses leaves the previous program in place. */
+  register(name: string, source: string): boolean;
+  unregister(name: string): boolean;
+  has(name: string): boolean;
+  list(): string;
+  uniforms(name: string): string;
+  enable(name: string, on: boolean): boolean;
+  chain(): string;
+  set_param(name: string, param: string, value: number): boolean;
+  param(name: string, param: string): number;
+  clear(): void;
+}
+
+/** Capability required: fileio. */
+export interface Package {
+  /** Script package registry and resolver. A package is a JSON manifest plus an entry file; a script declares dependencies with version constraints. Semver is parsed (1.10.0 sorts above 1.9.0, a pre-release below its release) and caret/tilde constraints are normalised at parse time. Resolution picks one version per package and orders them dependencies-first; it fails closed on a missing package, an unsatisfiable constraint, a conflict or a cycle. This module carries the fileio grant: it names packages that live on disk, even though resolution itself is pure. */
+  add(manifest_json: string): boolean;
+  has(name: string): boolean;
+  versions(name: string): string;
+  resolve(name: string, constraint: string): string;
+  require_path(path: string): string;
+  clear(): void;
+}
+
 /** Coroutine-native async facade (Phase 4). */
 export interface AsyncFacade {
   /** Suspend until `ticks` game ticks have elapsed. */
@@ -91,10 +151,15 @@ export interface AsyncFacade {
 }
 
 declare const Combat: Combat;
+declare const Player: Player;
 declare const Render: Render;
 declare const World: World;
 declare const Network: Network;
 declare const Hud: Hud;
 declare const Perf: Perf;
 declare const Input: Input;
+declare const Cosmetic: Cosmetic;
+declare const Intent: Intent;
+declare const Shader: Shader;
+declare const Package: Package;
 declare const async: AsyncFacade;

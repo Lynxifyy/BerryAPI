@@ -44,6 +44,10 @@ Typed service: `Renderer`.
   `BeginFrame` and `EndFrame`.
 - Camera: `Mat4` (perspective/look-at), `CameraState::WorldToScreen`,
   `Renderer::EspBoxForEntity` → ESP boxes for entity snapshots.
+- World-space billboards: `Renderer::DrawBillboard` projects a `Billboard3D`
+  (a world centre + a world size) with the current camera into the same 2D
+  batch, so world geometry presents through the one `RenderSeam`. This is the
+  bridge a cosmetic uses to draw on screen.
 - Stats: `frameCount`, `frameMs`, `primitives`.
 - Platform backend: `IRenderBackend` (see `render_backend.h`). On Android the
   GLES overlay is compiled in when `BERRY_PLATFORM_ANDROID` is defined and the
@@ -88,7 +92,10 @@ are deliberately **not** added to the strict module set. See
 - `PerformanceGovernor` (`perf.h`) — adaptive FPS governor with thermal
   awareness and a `CullPolicy` for the render hooks' keep/cull decisions.
 - `CosmeticService` (`cosmetic.h`) — slot/bone cosmetic registry, loadouts and
-  wardrobe, rendered locally through the skeleton and geometry seams.
+  wardrobe, rendered locally through the skeleton and geometry seams. It also
+  draws through `Berry::Render`: `DrawLocal`/`DrawRemote` resolve a loadout into
+  world-space billboards the `Renderer` projects with its camera, so a worn
+  asset presents through the same `RenderSeam` as every other overlay.
 - `CosmeticSyncChannel` (`cosmetic_sync.h`) — optional signed loadout channel so
   other clients can see your cosmetics; verification fails closed and applied
   loadouts are gated on provable ownership.

@@ -1,8 +1,8 @@
 // Host tests for the IDL -> service bindings (review fix 4).
 //
-// The gap these close: `api/berry.idl` declared 20 functions, but nothing
-// registered them, so the documented surface was not callable. These tests pin
-// that:
+// The gap these close: `api/berry.idl` declared the documented functions, but
+// nothing registered them, so the documented surface was not callable. These
+// tests pin that:
 //   * every binding in the generated table is installed, with the generated
 //     capability and arity enforced,
 //   * a call without the grant is denied and a call with the wrong arity fails
@@ -225,6 +225,43 @@ static void TestHudLifecycleAcrossThreads() {
   CHECK(sawHidden);
 }
 
+static void TestFrameHookDrawsCosmetics() {
+  CosmeticRegistry::Instance().Clear();
+  CosmeticRegistry::Instance().RegisterBuiltins();
+
+  Renderer renderer;
+  Berry::Test::CaptureRenderSeam seam;
+  renderer.BindSeam(&seam);
+  CameraState cam;
+  cam.width = 1280;
+  cam.height = 720;
+  cam.view = Mat4::LookAt(Vec3(10.0f, 64.0f, 15.0f), Vec3(10.0f, 64.0f, 5.0f),
+                          Vec3(0, 1, 0));
+  cam.projection = Mat4::Perspective(70, 1280.0f / 720.0f, 0.1f, 200.0f);
+  cam.valid = true;
+  renderer.SetCamera(cam);
+
+  Berry::Test::ShimSkeleton skel;
+  CosmeticService cosmetics;
+  cosmetics.SetSkeletonSource(&skel);
+  cosmetics.Equip("builtin.cape.red");
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.cosmetics = &cosmetics;
+  services.localPlayer = EntityId{1, 1};
+  ScriptApi api(services);
+
+  renderer.BeginFrame(Vec2(1280, 720));
+  Engine& eng = Engine::Instance();
+  eng.Bootstrap();
+  CHECK(eng.Attach());
+  eng.OnFrame();          // emits berry:frame; the hook draws the cape
+  renderer.EndFrame();
+  CHECK(seam.rects == 1);
+  eng.Detach();
+}
+
 static void TestQueueIsBoundedAndFailsClosed() {
   RenderCommandQueue q(2);
   int ran = 0;
@@ -426,6 +463,198 @@ static void TestWorldQueryNeedsSeamAndLocalPlayer() {
   CHECK(std::string(world->GetValue("k", "")) == "v");
 }
 
+static void TestPlayerReadsFailClosedAndResolve() {
+  std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
+  WorldHandle* world = worldMod->Service<WorldHandle>();
+  auto shim = std::make_shared<Berry::Test::ShimLevel>();
+
+  EntityId self{7, 7};
+  EntitySnapshot me;
+  me.id = self;
+  me.type = EntityType::Player;
+  me.position = Vec3(12.5f, 64.0f, -3.25f);
+  me.velocity = Vec3(0.1f, -0.2f, 0.3f);
+  me.rotation = Vec3(10.0f, 90.0f, 0.0f);
+  me.health = 18.0f;
+  me.maxHealth = 20.0f;
+  me.alive = true;
+  me.name = "Steve";
+  shim->AddEntity(self, me);
+  world->SetSeam(shim);
+
+  ScriptApi::Services services;
+  services.world = world;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  // No local player bound: every read fails closed rather than inventing state.
+  CHECK(Call(bindings, "player.position", {}, {"world"}, &out) ==
+        ScriptStatus::Error);
+  CHECK(Call(bindings, "player.health", {}, {"world"}, &out) ==
+        ScriptStatus::Error);
+
+  services.localPlayer = self;
+  api.SetServices(services);
+
+  CHECK(Call(bindings, "player.position", {}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.Field("x")->AsNumber() == 12.5);
+  CHECK(out.Field("y")->AsNumber() == 64.0);
+  CHECK(out.Field("z")->AsNumber() == -3.25);
+
+  CHECK(Call(bindings, "player.rotation", {}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.Field("y")->AsNumber() == 90.0);
+
+  CHECK(Call(bindings, "player.velocity", {}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  // f32 -> f64 widening means exact equality is wrong; compare with tolerance.
+  CHECK(std::fabs(out.Field("z")->AsNumber() - 0.3) < 1e-6);
+
+  CHECK(Call(bindings, "player.health", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 18.0);
+  CHECK(Call(bindings, "player.max_health", {}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 20.0);
+  CHECK(Call(bindings, "player.alive", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "player.name", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "Steve");
+
+  // The Player module requires the `world` capability, so a script without it
+  // cannot read the local player either.
+  CHECK(Call(bindings, "player.position", {}, {"render"}, &out) ==
+        ScriptStatus::CapabilityDenied);
+}
+
+static void TestRenderDrawHelpers() {
+  Berry::Test::CaptureRenderSeam seam;
+  Renderer renderer;
+  renderer.Attach(&seam);
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  renderer.BeginFrame(Vec2(800, 600));
+  CHECK(Call(bindings, "render.draw_line",
+             {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(10),
+              ScriptValue::Num(10), ScriptValue::Num(0xFF0000FF)},
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "render.draw_circle",
+             {ScriptValue::Num(50), ScriptValue::Num(50), ScriptValue::Num(8),
+              ScriptValue::Num(0x00FF00FF)},
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "render.draw_text_centered",
+             {ScriptValue::Num(100), ScriptValue::Num(100), ScriptValue::Str("hi"),
+              ScriptValue::Num(0xFFFFFFFF)},
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(api.DrainOnRenderThread() == 3);
+  renderer.EndFrame();
+  CHECK(seam.lines == 1);
+  CHECK(seam.circles == 1);
+  CHECK(seam.texts == 1);
+
+  // A NaN coordinate must not reach the draw list: SafeCoord maps it to 0.
+  renderer.BeginFrame(Vec2(800, 600));
+  CHECK(Call(bindings, "render.draw_line",
+             {ScriptValue::Num(std::nan("")), ScriptValue::Num(0),
+              ScriptValue::Num(10), ScriptValue::Num(10),
+              ScriptValue::Num(0xFF0000FF)},
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(api.DrainOnRenderThread() == 1);
+  renderer.EndFrame();
+  CHECK(seam.lines == 1);
+}
+
+static void TestWorldReads() {
+  std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
+  WorldHandle* world = worldMod->Service<WorldHandle>();
+  auto shim = std::make_shared<Berry::Test::ShimLevel>();
+
+  EntityId a{1, 1};
+  EntitySnapshot sa;
+  sa.id = a;
+  sa.alive = true;
+  shim->AddEntity(a, sa);
+  EntityId b{2, 2};
+  EntitySnapshot sb;
+  sb.id = b;
+  sb.alive = true;
+  shim->AddEntity(b, sb);
+
+  LevelTime t;
+  t.absolute = 6000;
+  t.daylight = 0.9f;
+  t.day = true;
+  t.rainLevel = 0.5f;
+  t.thunderLevel = 0.0f;
+  shim->SetTime(t);
+  world->SetSeam(shim);
+
+  ScriptApi::Services services;
+  services.world = world;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  CHECK(Call(bindings, "world.entity_count", {}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 2);
+  CHECK(Call(bindings, "world.is_day", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "world.is_raining", {}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "world.time", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Field("absolute")->AsNumber() == 6000);
+  CHECK(out.Field("day")->Truthy());
+  CHECK(out.Field("rain")->AsNumber() == 0.5);
+
+  // No seam bound: reads fail closed rather than answer with a default.
+  world->SetSeam(nullptr);
+  CHECK(Call(bindings, "world.entity_count", {}, {"world"}, &out) ==
+        ScriptStatus::Error);
+  CHECK(Call(bindings, "world.time", {}, {"world"}, &out) == ScriptStatus::Error);
+}
+
+static void TestPerfStatsAndPlatform() {
+  PerformanceGovernor governor;
+  ScriptApi::Services services;
+  services.governor = &governor;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  for (int i = 0; i < 10; ++i) api.PublishFrame(16.0f, Vec2(800, 600));
+  CHECK(Call(bindings, "perf.stats", {}, {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(out.Field("samples")->AsNumber() == 10);
+  CHECK(out.Field("avg_ms")->AsNumber() > 0);
+  CHECK(out.Field("fps")->AsNumber() > 0);
+
+  CHECK(Call(bindings, "perf.quality", {}, {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() > 0);
+
+  CHECK(Call(bindings, "perf.set_platform", {ScriptValue::Str("desktop")},
+             {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(api.DrainOnRenderThread() == 1);
+  CHECK(governor.platform() == PlatformClass::Desktop);
+
+  // An unknown profile name is refused and changes nothing.
+  CHECK(Call(bindings, "perf.set_platform", {ScriptValue::Str("toaster")},
+             {"perf"}, &out) == ScriptStatus::Error);
+  CHECK(api.DrainOnRenderThread() == 0);
+  CHECK(governor.platform() == PlatformClass::Desktop);
+}
+
 static void TestNetworkGetFailsClosed() {
   ScriptApi::Services services;
   ScriptApi api(services);
@@ -456,10 +685,15 @@ int main() {
   TestHudLifecycleAcrossThreads();
   TestQueueIsBoundedAndFailsClosed();
   TestFrameHookDrainsQueue();
+  TestFrameHookDrawsCosmetics();
   TestPublishedReads();
   TestGovernorAndZoomWrites();
   TestCombatAndInputReads();
   TestWorldQueryNeedsSeamAndLocalPlayer();
+  TestPlayerReadsFailClosedAndResolve();
+  TestRenderDrawHelpers();
+  TestWorldReads();
+  TestPerfStatsAndPlatform();
   if (g_fail == 0) printf("test_api_bindings: ALL OK\n");
   return g_fail;
 }

@@ -5,6 +5,7 @@
 #include "berry/manifest.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <sstream>
 
@@ -25,6 +26,15 @@ constexpr size_t kMaxMessageBytes = 64 * 1024;
 std::string AlgoFor(CosmeticSyncKey::Kind kind) {
   return kind == CosmeticSyncKey::Kind::Ed25519 ? std::string(signature_algo::Ed25519())
                                                 : std::string(signature_algo::HmacSha256());
+}
+
+/// The default clock: milliseconds from a steady source. Monotonic, so a
+/// wall-clock adjustment cannot move the replay TTL or the rate limiter.
+u64 SteadyNowMs() {
+  using namespace std::chrono;
+  return (u64)duration_cast<milliseconds>(
+             steady_clock::now().time_since_epoch())
+      .count();
 }
 
 /// Reads the value of a "key: value" header line. Returns false when the line
@@ -67,6 +77,9 @@ const char* CosmeticSyncResultName(CosmeticSyncResult r) {
     case CosmeticSyncResult::BadLoadout: return "bad loadout";
     case CosmeticSyncResult::NoTransport: return "no transport";
     case CosmeticSyncResult::NotConfigured: return "no verification key";
+    case CosmeticSyncResult::Replayed: return "replayed message";
+    case CosmeticSyncResult::RateLimited: return "rate limited";
+    case CosmeticSyncResult::Revoked: return "revoked peer";
   }
   return "unknown";
 }
@@ -160,6 +173,20 @@ bool CosmeticSyncSignHmac(const std::string& playerId,
 // Channel
 //----------------------------------------------------------------------------
 
+void CosmeticSyncChannel::SetConfig(const CosmeticSyncConfig& config) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  config_ = config;
+  // Drop state whose meaning depended on the old limits, so a shrunk window
+  // takes effect at once rather than after the old entries age out.
+  seen_.clear();
+  peers_.clear();
+}
+
+void CosmeticSyncChannel::SetClock(std::function<u64()> nowMs) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  clock_ = std::move(nowMs);
+}
+
 void CosmeticSyncChannel::SetVerifyKey(const CosmeticSyncKey& key) {
   std::lock_guard<std::mutex> lk(mutex_);
   key_ = key;
@@ -175,6 +202,108 @@ void CosmeticSyncChannel::ClearVerifyKey() {
   std::lock_guard<std::mutex> lk(mutex_);
   key_ = CosmeticSyncKey();
   hasKey_ = false;
+}
+
+void CosmeticSyncChannel::RevokePeer(const std::string& playerId) {
+  if (playerId.empty()) return;
+  std::lock_guard<std::mutex> lk(mutex_);
+  for (const auto& p : revokedPeers_) {
+    if (p == playerId) return;
+  }
+  revokedPeers_.push_back(playerId);
+}
+
+bool CosmeticSyncChannel::IsPeerRevoked(const std::string& playerId) const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  for (const auto& p : revokedPeers_) {
+    if (p == playerId) return true;
+  }
+  return false;
+}
+
+void CosmeticSyncChannel::ClearRevocations() {
+  std::lock_guard<std::mutex> lk(mutex_);
+  revokedPeers_.clear();
+}
+
+size_t CosmeticSyncChannel::trackedPeers() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return peers_.size();
+}
+
+size_t CosmeticSyncChannel::replayWindowSize() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return seen_.size();
+}
+
+void CosmeticSyncChannel::ExpireReplayLocked(u64 now) {
+  // Drop entries older than the TTL. `seen_` is oldest-first, so the expired
+  // ones are a prefix.
+  const u64 ttl = config_.replayTtlMs;
+  size_t drop = 0;
+  while (drop < seen_.size() && now - seen_[drop].atMs > ttl) ++drop;
+  if (drop) seen_.erase(seen_.begin(), seen_.begin() + (long)drop);
+}
+
+CosmeticSyncChannel::PeerState& CosmeticSyncChannel::PeerLocked(
+    const std::string& playerId, u64 now) {
+  auto it = peers_.find(playerId);
+  if (it != peers_.end()) {
+    it->second.lastSeen = ++peerClock_;
+    return it->second;
+  }
+  // A new peer needs a slot. When the table is full, evict the
+  // least-recently-seen one, so an unbounded flood of distinct ids cannot grow
+  // the table without limit.
+  if (config_.maxPeers > 0 && peers_.size() >= config_.maxPeers) {
+    auto victim = peers_.begin();
+    for (auto it2 = peers_.begin(); it2 != peers_.end(); ++it2) {
+      if (it2->second.lastSeen < victim->second.lastSeen) victim = it2;
+    }
+    peers_.erase(victim);
+  }
+  PeerState st;
+  st.tokens = config_.rateBurst;
+  st.lastMs = now;
+  st.lastSeen = ++peerClock_;
+  auto res = peers_.emplace(playerId, st);
+  return res.first->second;
+}
+
+CosmeticSyncResult CosmeticSyncChannel::AdmitLocked(
+    const std::string& playerId, const std::string& message, u64 now) {
+  // Revocation first: a revoked peer is refused regardless of anything else.
+  for (const auto& p : revokedPeers_) {
+    if (p == playerId) return CosmeticSyncResult::Revoked;
+  }
+
+  // Rate limit: a per-peer token bucket. Refill by elapsed time, cap at the
+  // burst, then spend one token. No token means "too fast".
+  PeerState& peer = PeerLocked(playerId, now);
+  const u64 elapsed = now >= peer.lastMs ? now - peer.lastMs : 0;
+  peer.lastMs = now;
+  if (elapsed) {
+    peer.tokens = std::min(config_.rateBurst,
+                           peer.tokens + (double)elapsed * config_.ratePerSecond / 1000.0);
+  }
+  if (peer.tokens < 1.0) return CosmeticSyncResult::RateLimited;
+  peer.tokens -= 1.0;
+
+  // Replay: refuse a message we have already accepted within the TTL. Check
+  // after the rate limit so a replay flood costs the peer its budget rather
+  // than filling the window.
+  ExpireReplayLocked(now);
+  const std::string digest = crypto::Sha256Hex(message);
+  for (const auto& s : seen_) {
+    if (s.digest == digest) return CosmeticSyncResult::Replayed;
+  }
+  seen_.push_back(SeenDigest{digest, now});
+  // Trim to the window size (oldest first).
+  if (config_.replayWindow > 0 && seen_.size() > config_.replayWindow) {
+    seen_.erase(seen_.begin(),
+                seen_.begin() + (long)(seen_.size() - config_.replayWindow));
+  }
+  return CosmeticSyncResult::Ok;
 }
 
 bool CosmeticSyncChannel::Publish(const std::string& playerId,
@@ -312,7 +441,24 @@ CosmeticSyncResult CosmeticSyncChannel::Receive(const std::string& message,
                                                 CosmeticService* service,
                                                 size_t* applied) {
   CosmeticSyncMessage msg;
-  const CosmeticSyncResult r = Verify(message, &msg);
+  const CosmeticSyncResult vr = Verify(message, &msg);
+
+  // Post-signature defences, applied under the lock so the replay window and
+  // the rate limiter see a consistent order. Only a message whose signature
+  // already verified can consume a token or enter the window, so an
+  // unauthenticated flood cannot starve a real peer.
+  CosmeticSyncResult r = vr;
+  if (vr == CosmeticSyncResult::Ok) {
+    std::function<u64()> clock;
+    {
+      std::lock_guard<std::mutex> lk(mutex_);
+      clock = clock_;
+    }
+    const u64 now = clock ? clock() : SteadyNowMs();
+    std::lock_guard<std::mutex> lk(mutex_);
+    r = AdmitLocked(msg.playerId, message, now);
+  }
+
   {
     std::lock_guard<std::mutex> lk(mutex_);
     last_ = r;

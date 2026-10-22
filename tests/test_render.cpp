@@ -135,6 +135,51 @@ int main() {
   // No seam -> no present; primitive count zeroed.
   CHECK(capture->lines == 0);
 
+  // --- Billboard projection ---
+  {
+    Renderer br;
+    auto bcap = std::make_shared<Berry::Test::CaptureRenderSeam>();
+    br.BindSeam(bcap.get());
+    CameraState cam;
+    cam.width = 1280;
+    cam.height = 720;
+    cam.view = Mat4::LookAt(Vec3(0, 0, -10), Vec3(0, 0, 0), Vec3(0, 1, 0));
+    cam.projection = Mat4::Perspective(70, 1280.0f / 720.0f, 0.1f, 200.0f);
+    cam.valid = true;
+
+    // No camera bound: the billboard is refused rather than drawn blind.
+    br.BeginFrame(Vec2(1280, 720));
+    Billboard3D bb;
+    bb.position = Vec3(0, 0, 0);
+    bb.size = Vec2(1, 1);
+    CHECK(!br.DrawBillboard(bb));
+    br.EndFrame();
+    CHECK(bcap->rects == 0);
+
+    // With the camera bound, a unit quad at the frustum centre projects to one
+    // rect around screen centre.
+    br.SetCamera(cam);
+    br.BeginFrame(Vec2(1280, 720));
+    CHECK(br.DrawBillboard(bb));
+    br.EndFrame();
+    CHECK(bcap->rects == 1);
+
+    // A zero or negative size is refused (nothing to draw).
+    br.BeginFrame(Vec2(1280, 720));
+    bb.size = Vec2(0, 1);
+    CHECK(!br.DrawBillboard(bb));
+    br.EndFrame();
+    CHECK(bcap->rects == 0);
+
+    // Behind the camera: no projection, no draw.
+    br.BeginFrame(Vec2(1280, 720));
+    bb.size = Vec2(1, 1);
+    bb.position = Vec3(0, 0, -50);
+    CHECK(!br.DrawBillboard(bb));
+    br.EndFrame();
+    CHECK(bcap->rects == 0);
+  }
+
   // --- Platform backend factory (host) ---
   {
     std::unique_ptr<IRenderBackend> bk(CreateRenderBackend());

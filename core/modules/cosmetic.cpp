@@ -722,6 +722,84 @@ CosmeticStats CosmeticService::stats() const {
 }
 
 //----------------------------------------------------------------------------
+// Draw through Berry::Render
+//----------------------------------------------------------------------------
+
+bool CosmeticService::DrawItem(Renderer& r, const CosmeticDrawItem& item) {
+  // An asset's draw item carries a world position, a scale and a tint. The
+  // renderer needs a world size: a cosmetic asset is modelled at roughly one
+  // block, so the quad is one block scaled by the item. A non-positive or
+  // non-finite scale would make the quad vanish or invert, so it is refused
+  // rather than drawn wrong.
+  if (!std::isfinite(item.scale) || item.scale <= 0.0f) return false;
+  Billboard3D bb;
+  bb.position = item.position;
+  bb.size = Vec2(item.scale, item.scale);
+  bb.rollDeg = item.rotation.z;   // roll about the view axis, from the item
+  const f32 cr = Mathf::Clamp(item.tint.x, 0.0f, 1.0f);
+  const f32 cg = Mathf::Clamp(item.tint.y, 0.0f, 1.0f);
+  const f32 cb = Mathf::Clamp(item.tint.z, 0.0f, 1.0f);
+  bb.tint = Rgba((u8)(cr * 255.0f), (u8)(cg * 255.0f), (u8)(cb * 255.0f), 255);
+  bb.geometry = item.geometry;
+  bb.texture = item.texture;
+  bb.entity = item.entity;
+  return r.DrawBillboard(bb);
+}
+
+size_t CosmeticService::DrawLocal(Renderer& r, EntityId localPlayer) {
+  CosmeticSkeletonSource* skel = skeleton_;
+  if (!skel) return 0;
+  CosmeticLoadout snapshot;
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    ++stats_.frames;
+    snapshot = local_;
+  }
+  u64 skipped = 0;
+  bool hit = false;
+  const auto items = ResolveWithCache(localPlayer, snapshot, skel, &skipped, &hit);
+  size_t drawn = 0;
+  for (const auto& item : items) {
+    if (DrawItem(r, item)) ++drawn;
+  }
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    stats_.submitted += drawn;
+    stats_.skippedNoBone += skipped;
+    if (hit) ++stats_.cacheHits; else ++stats_.cacheMisses;
+  }
+  return drawn;
+}
+
+size_t CosmeticService::DrawRemote(Renderer& r, const std::string& playerId,
+                                   EntityId entity) {
+  CosmeticSkeletonSource* skel = skeleton_;
+  if (!skel) return 0;
+  CosmeticLoadout snapshot;
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (localOnly_.load()) return 0;
+    auto it = remote_.find(playerId);
+    if (it == remote_.end()) return 0;
+    snapshot = it->second;
+  }
+  u64 skipped = 0;
+  bool hit = false;
+  const auto items = ResolveWithCache(entity, snapshot, skel, &skipped, &hit);
+  size_t drawn = 0;
+  for (const auto& item : items) {
+    if (DrawItem(r, item)) ++drawn;
+  }
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    stats_.submitted += drawn;
+    stats_.skippedNoBone += skipped;
+    if (hit) ++stats_.cacheHits; else ++stats_.cacheMisses;
+  }
+  return drawn;
+}
+
+//----------------------------------------------------------------------------
 // Ownership
 //----------------------------------------------------------------------------
 
