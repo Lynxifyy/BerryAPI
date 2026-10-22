@@ -106,6 +106,14 @@ make lib             # builds build/libBerryAPI.so
 - `make test` and `make test-sanitize` (ASan+UBSan) must both stay green; the
   sanitizer build is slow (several minutes) — run it in the background and poll
   a log file rather than blocking the terminal.
+- Header dependency tracking is real but fragile: the `-include` of the
+  generated `*.d` files must stay *below* `include tools/sources.mk`, because
+  `CORE_SRC`/`TEST_SRC` are empty above it and the include then expands to
+  nothing (a silent no-op that leaves stale objects). Every compile rule passes
+  `-MMD -MP`.
+- `WsClientPool` callbacks capture a `weak_ptr<Conn>`, never a `shared_ptr`: the
+  connection owns its socket, so a strong capture is a cycle that leaks the
+  connection and its socket. Keep the same shape in any new owner/callback pair.
 
 ## Pull requests
 
