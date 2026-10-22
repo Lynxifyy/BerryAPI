@@ -28,7 +28,8 @@ MANIFEST = {
     "version": "1.0.0",
     "entry": "main.luau",
     "author": "Lynxifyy",
-    "capabilities": ["render", "hud", "input", "network:api.example.com"],
+    "capabilities": ["render", "hud", "input", "network:api.example.com",
+                     "packets"],
 }
 
 

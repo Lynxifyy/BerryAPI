@@ -30,16 +30,23 @@
 
 #include "berry/export.h"
 #include "berry/types.h"
+#include "berry/audio.h"
 #include "berry/combat.h"
 #include "berry/cosmetic.h"
+#include "berry/event.h"
+#include "berry/fs.h"
 #include "berry/hud.h"
 #include "berry/input.h"
 #include "berry/intent.h"
 #include "berry/perf.h"
+#include "berry/packet.h"
+#include "berry/pvp.h"
 #include "berry/pack.h"
 #include "berry/package.h"
 #include "berry/render.h"
 #include "berry/script.h"
+#include "berry/scriptmod.h"
+#include "berry/session_recorder.h"
 #include "berry/shader.h"
 #include "berry/services.h"
 #include "berry/url.h"
@@ -129,9 +136,31 @@ class BERRY_API ScriptApi {
     /// Script package registry and resolver. Null makes the `package.*`
     /// bindings fail closed (registration reports false).
     PackageRegistry* packages = nullptr;
+    /// Script module + settings registry. Null makes the `mod.*` bindings fail
+    /// closed (creation returns 0 and the rest report false).
+    ScriptModuleRegistry* modules = nullptr;
+    /// Sandboxed per-script file store. Null makes the `fs.*` bindings fail
+    /// closed (writes report false, reads return empty).
+    ScriptFileStore* files = nullptr;
+    /// Client-side audio cues. Null makes the `audio.*` bindings fail closed
+    /// (a play reports false).
+    AudioService* audio = nullptr;
+    /// The PvP overlay (CPS, keystrokes, combo, armor, effects, ping/FPS,
+    /// target, session stats). Null makes the `pvp.*` bindings fail closed and
+    /// the frame hook skip the overlay.
+    PvpOverlay* pvp = nullptr;
+    /// The read-only packet log. Null makes the `packets.*` bindings fail
+    /// closed (empty tables, zero counts).
+    PacketLog* packets = nullptr;
+    /// The process profiler. Null makes the `perf.flame`/`perf.spans`/
+    /// `perf.flame_reset` bindings fail closed ("profiler unavailable").
+    Profiler* profiler = nullptr;
     /// The local player's entity id, used as the origin for `world.query`.
     /// Default 0 means "unknown", which makes the query fail closed.
     EntityId localPlayer;
+    /// The session recorder (record & replay of the world stream). Null makes
+    /// the `record.*` bindings fail closed (start/save report failure).
+    SessionRecorder* recorder = nullptr;
     /// Egress policy for `network.get`. The harness relaxes it for loopback.
     UrlPolicy networkPolicy;
   };
@@ -232,6 +261,9 @@ class BERRY_API ScriptApi {
 
   EventBus::ListenerId frameListener_ = 0;
   EventBus::ListenerId combatListener_ = 0;
+  /// The wall-clock ms of the last presented frame, for the PvP overlay's
+  /// animation delta. Render thread only.
+  u64 lastFrameMs_ = 0;
 };
 
 }  // namespace Berry

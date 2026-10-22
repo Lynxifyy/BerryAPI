@@ -28,6 +28,7 @@
 #include "berry/render.h"
 
 #include <atomic>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -525,16 +526,23 @@ class BERRY_API CosmeticService {
   /// One cached resolve, keyed by (raw, runtime) entity id; invalidated when
   /// the loadout key, the skeleton pose revision, or the injected local
   /// velocity changes.
+  ///
+  /// Recency is an intrusive list so eviction is O(1): the entry's position in
+  /// `lru_` is tracked by an iterator stored in the entry itself, so a hit or an
+  /// insert moves it to the front without scanning. A previous O(n) scan for
+  /// the minimum `lastUse` made every eviction cost a full table walk.
   struct ResolveCacheEntry {
     u64 poseRevision = 0;
     Vec3 localVelocity;
     std::string loadoutKey;
     std::vector<CosmeticDrawItem> items;
-    u64 lastUse = 0;
+    std::list<std::pair<u64, u16>>::iterator lruIt;
   };
+  using ResolveCacheKey = std::pair<u64, u16>;
   mutable std::mutex cacheMutex_;
-  mutable std::map<std::pair<u64, u16>, ResolveCacheEntry> resolveCache_;
-  mutable u64 cacheClock_ = 0;
+  mutable std::map<ResolveCacheKey, ResolveCacheEntry> resolveCache_;
+  /// Most-recently-used at the front. Holds the keys, mirroring resolveCache_.
+  mutable std::list<ResolveCacheKey> lru_;
 };
 
 //----------------------------------------------------------------------------

@@ -44,6 +44,9 @@ struct BERRY_API HttpResponse {
   std::string reason;
   std::string body;
   std::vector<std::pair<std::string, std::string>> headers;
+  /// Set when the body hit the request's byte cap and the rest was discarded,
+  /// so a caller can tell a complete response from a clipped one.
+  bool truncated = false;
 
   const char* Header(const char* name) const;
   bool ok() const { return status >= 200 && status < 300; }
@@ -57,13 +60,23 @@ class BERRY_API HttpRequest {
   HttpRequest& Body(const std::string& data) { body_ = data; return *this; }
   HttpRequest& JsonBody(const char* json) { body_ = json; Header("Content-Type", "application/json"); return *this; }
   HttpRequest& Timeout(int ms) { timeoutMs_ = ms; return *this; }
+  /// Caps how many response-body bytes are buffered. A hostile or broken server
+  /// that streams without end would otherwise make the caller buffer without
+  /// limit; the read stops (and the response is marked truncated) at the cap.
+  HttpRequest& MaxBodyBytes(size_t n) { maxBodyBytes_ = n; return *this; }
+  /// True when the URL named a scheme this client cannot serve (https/wss,
+  /// since TLS is not implemented). Do() then refuses instead of downgrading.
+  bool badScheme() const { return badScheme_; }
 
   HttpResponse Do();
 
  private:
   std::string url_, method_ = "GET", body_, host_, path_;
   u16 port_ = 80;
-  bool tls_ = false;
+  bool badScheme_ = false;
+  /// Default 4 MiB: comfortably larger than any JSON/config response, small
+  /// enough that a streaming server cannot exhaust the worker's memory.
+  size_t maxBodyBytes_ = 4u * 1024 * 1024;
   int timeoutMs_ = 8000;
   std::vector<std::pair<std::string, std::string>> headers_;
 };

@@ -407,6 +407,81 @@ std::string ResolveRedirect(const std::string& base, const Url& baseParsed,
 // HttpGetBlocking
 //----------------------------------------------------------------------------
 
+ScriptValue HttpRequestBlocking(ScriptContext& ctx, const std::string& method,
+                                const std::string& url, const std::string& body,
+                                long timeoutMs, const UrlPolicy& policy,
+                                size_t maxBodyBytes) {
+  // Same clamping as the raising path: NaN/huge casts are UB and a negative
+  // timeout would park the worker forever.
+  long timeout = 8000;
+  if (std::isfinite((double)timeoutMs)) timeout = (long)timeoutMs;
+  if (timeout < 1000) timeout = 1000;
+  if (timeout > 60000) timeout = 60000;
+  if (maxBodyBytes == 0) maxBodyBytes = 4u * 1024 * 1024;
+
+  auto fail = [](const std::string& why) {
+    ScriptTable t;
+    t["status"] = ScriptValue::Num(0);
+    t["ok"] = ScriptValue::Bool(false);
+    t["headers"] = ScriptValue::Str("");
+    t["body"] = ScriptValue::Str("");
+    t["error"] = ScriptValue::Str(why);
+    t["truncated"] = ScriptValue::Bool(false);
+    return ScriptValue::Tbl(std::move(t));
+  };
+
+  std::string current = url;
+  for (int hop = 0; hop <= kMaxRedirects; ++hop) {
+    Url parsed;
+    std::string parseErr;
+    if (!parsed.Parse(current, &parseErr)) return fail("bad url: " + parseErr);
+    const UrlReject reject = policy.Check(parsed);
+    if (reject != UrlReject::None) {
+      return fail(std::string("destination refused (") + UrlRejectName(reject) +
+                  "): " + parsed.host);
+    }
+    if (!HostGranted(ctx, parsed.host)) {
+      return fail("host not granted: " + parsed.host);
+    }
+
+    HttpRequest req(current.c_str());
+    req.Method(method.c_str()).Timeout((int)timeout).MaxBodyBytes(maxBodyBytes);
+    if (!body.empty()) {
+      req.Body(body);
+      req.Header("Content-Type", "application/json");
+    }
+    HttpResponse resp = req.Do();
+    if (resp.status == 0) return fail("request failed: " + resp.reason);
+
+    if (resp.status >= 300 && resp.status < 400) {
+      const char* loc = resp.Header("Location");
+      if (!loc || !*loc) return fail("redirect without Location");
+      if (hop == kMaxRedirects) return fail("too many redirects");
+      std::string next = ResolveRedirect(current, parsed, loc);
+      if (next.empty()) return fail("unresolvable redirect");
+      current = next;
+      continue;
+    }
+
+    // Flatten the headers into a "Name: value" line list so the surface needs
+    // no array type, mirroring how cosmetic.* returns newline-joined strings.
+    std::string headerText;
+    for (const auto& h : resp.headers) {
+      if (!headerText.empty()) headerText += '\n';
+      headerText += h.first + ": " + h.second;
+    }
+    ScriptTable t;
+    t["status"] = ScriptValue::Num((f64)resp.status);
+    t["ok"] = ScriptValue::Bool(resp.ok());
+    t["headers"] = ScriptValue::Str(headerText);
+    t["body"] = ScriptValue::Str(resp.body);
+    t["error"] = ScriptValue::Str("");
+    t["truncated"] = ScriptValue::Bool(resp.truncated);
+    return ScriptValue::Tbl(std::move(t));
+  }
+  return fail("too many redirects");
+}
+
 ScriptValue HttpGetBlocking(ScriptContext& ctx, const std::string& url,
                             long timeoutMs, const UrlPolicy& policy) {
   // Clamp before any conversion: NaN or a huge value cast to long is

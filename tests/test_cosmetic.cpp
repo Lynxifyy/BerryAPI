@@ -475,6 +475,28 @@ static void TestOffsetCache() {
   }
   CHECK(svc.resolveCacheSize() <= CosmeticService::kMaxResolveCacheEntries);
 
+  // Recency, not insertion order, drives eviction. Fill exactly to the cap,
+  // touch the oldest entry (entity 0) to promote it, then insert one more: the
+  // victim must be the next-oldest (entity 1), and entity 0 must survive.
+  svc.ClearResolveCache();
+  for (u64 i = 0; i < CosmeticService::kMaxResolveCacheEntries; ++i) {
+    svc.Resolve(EntityId{i, 1}, lo);
+  }
+  CHECK(svc.resolveCacheSize() == CosmeticService::kMaxResolveCacheEntries);
+  seam.Clear();
+  svc.Resolve(EntityId{0, 1}, lo);                     // hit: promotes entity 0
+  svc.Resolve(EntityId{999999, 1}, lo);                // overflow: evicts LRU
+  CHECK(svc.resolveCacheSize() == CosmeticService::kMaxResolveCacheEntries);
+
+  const u64 hitsBefore = svc.stats().cacheHits;
+  const u64 missesBefore = svc.stats().cacheMisses;
+  seam.Clear();
+  svc.Resolve(EntityId{0, 1}, lo);                     // promoted: still cached
+  CHECK(svc.stats().cacheHits == hitsBefore + 1);
+  seam.Clear();
+  svc.Resolve(EntityId{1, 1}, lo);                     // evicted: must miss
+  CHECK(svc.stats().cacheMisses == missesBefore + 1);
+
   svc.ClearResolveCache();
   CHECK(svc.resolveCacheSize() == 0);
 }

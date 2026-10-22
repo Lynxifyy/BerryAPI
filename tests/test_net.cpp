@@ -84,6 +84,49 @@ int main() {
   auto notif = JsonRpc::MakeNotification("tick", "{\"n\":1}");
   CHECK(notif.find("\"method\":\"tick\"") != std::string::npos);
 
+  // --- TLS is not implemented: https/wss must fail closed, not downgrade ---
+  {
+    // An https request must NOT open a plaintext socket to port 443. Do()
+    // refuses and reports it, so a caller who asked for TLS never gets a
+    // silent plaintext connection.
+    HttpRequest httpsReq("https://example.com/x");
+    CHECK(httpsReq.badScheme());
+    HttpResponse httpsResp = httpsReq.Do();
+    CHECK(httpsResp.status == 0);
+    CHECK(httpsResp.body.empty());
+    CHECK(httpsResp.reason.find("unsupported scheme") != std::string::npos);
+
+    // A scheme the client does not know is refused the same way.
+    HttpRequest weirdReq("ftp://example.com/x");
+    CHECK(weirdReq.badScheme());
+
+    // A wss:// websocket is refused before any socket is opened.
+    WebSocket wss;
+    CHECK(!wss.Connect("wss://example.com/ws"));
+    // A malformed ws url is refused too.
+    WebSocket bad;
+    CHECK(!bad.Connect("http://example.com/ws"));
+  }
+
+  // --- Response body cap ---
+  {
+    // A server that streams far more than the cap must not make the client
+    // buffer it all; the response is clipped and flagged truncated.
+    TinyHttpServer big;
+    int bigPort = big.Start(18083);
+    CHECK(bigPort > 0);
+    if (bigPort > 0) {
+      std::string base = "http://127.0.0.1:" + std::to_string(bigPort);
+      HttpRequest req((base + "/big").c_str());
+      req.MaxBodyBytes(1024);
+      HttpResponse resp = req.Do();
+      CHECK(resp.status == 200);
+      CHECK(resp.body.size() <= 1024);
+      CHECK(resp.truncated);
+      big.Stop();
+    }
+  }
+
   if (g_fail == 0) printf("test_net: ALL OK\n");
   return g_fail;
 }

@@ -177,7 +177,7 @@ def verify(signature, message, public_key):
 # sides or the signature will not verify.
 CAP_KINDS = frozenset([
     "network", "render", "fileio", "world", "combat", "input", "hud", "perf",
-    "events", "audio", "cosmetic",
+    "events", "audio", "cosmetic", "packets",
 ])
 
 

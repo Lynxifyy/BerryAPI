@@ -6,7 +6,7 @@ export type WidgetId = number
 export type ActorHandle = { id: number }
 export type Vec3 = { x: number, y: number, z: number }
 export type Rgba = { r: number, g: number, b: number, a: number }
-export type HttpResult = { status: number, body: string, ok: boolean }
+export type HttpResult = { status: number, ok: boolean, headers: string, body: string, error: string, truncated: boolean }
 
 -- Capability required: combat.
 export type Combat = {
@@ -42,19 +42,135 @@ export type Render = {
 
 -- Capability required: world.
 export type World = {
-  -- Read-only world queries. The core never hands out raw pointers.
+  -- Read-only world queries. The core never hands out raw pointers. `entities_within` returns a table keyed \"0\",\"1\",… each an entity table (id, type, x, y, z, health, alive, distance), sorted by id so the order is stable across ticks; a `type` of \"\" or \"any\" matches every type, and an unknown type name is refused rather than matching everything. The raycast helpers cast from the local player's eye along its look direction and return {hit, x, y, z, block, id, distance}.
   query: (within: number) -> number,
   entity_count: () -> number,
   block_at: (x: number, y: number, z: number) -> string,
   time: () -> {[string]: any},
   is_day: () -> boolean,
   is_raining: () -> boolean,
+  entities_within: (within: number, type: string) -> {[string]: any},
+  raycast_block: (max_dist: number) -> {[string]: any},
+  raycast_entity: (max_dist: number) -> {[string]: any},
+}
+
+-- Capability required: world.
+export type Entity = {
+  -- Read-only access to one entity by its raw id, plus neighbourhood lookups. Nothing here mutates an entity; the id is the raw engine id an entity table or an event carries. Reads fail closed (a zero id, an unknown id, or an unbound seam) rather than fabricating state.
+  get: (id: number) -> {[string]: any},
+  type_name: (id: number) -> string,
+  position: (id: number) -> Vec3,
+  velocity: (id: number) -> Vec3,
+  health: (id: number) -> number,
+  alive: (id: number) -> boolean,
+  distance_to: (id: number) -> number,
+  -- The raw id of the nearest alive entity of `type` to the local player, or 0 when none is in range. An unknown type name is refused (fails closed) rather than returning an arbitrary entity.
+  nearest: (type: string) -> number,
+}
+
+-- Capability required: fileio.
+export type Fs = {
+  -- Sandboxed file store. A script gets its own directory and nothing else: a path is validated before use (no absolute path, no backslash, no drive letter, no control character, no empty segment, no \".\" or \"..\", a bounded length and depth), so a path cannot escape the sandbox however it is spelled. Writes are capped per file, in total and in count, so a write loop cannot exhaust memory. Every call fails closed (false / empty) rather than throwing.
+  write: (path: string, data: string) -> boolean,
+  read: (path: string) -> string,
+  append: (path: string, data: string) -> boolean,
+  exists: (path: string) -> boolean,
+  remove: (path: string) -> boolean,
+  size: (path: string) -> number,
+  -- Every path in the sandbox, sorted, newline-separated. `prefix` filters to paths that start with it; an empty prefix lists everything.
+  list: (prefix: string) -> string,
+  count: () -> number,
+  total_bytes: () -> number,
+  clear: () -> (),
+}
+
+-- Capability required: audio.
+export type Audio = {
+  -- Client-side sound cues. A script plays a named cue; the device backend decides what the name means. This is a sound the local player hears, so nothing here is authoritative. An unknown or malformed cue name is refused, and a muted play is dropped rather than queued. Volume and pitch are clamped into range.
+  play: (name: string, volume: number, pitch: number) -> boolean,
+  set_volume: (volume: number) -> (),
+  volume: () -> number,
+  set_muted: (muted: boolean) -> (),
+  muted: () -> boolean,
+  -- The recent cues that would have played, newest last, newline-separated as \"name:volume:pitch\".
+  history: () -> string,
+  history_count: () -> number,
+  clear_history: () -> (),
+}
+
+-- Capability required: hud.
+export type Pvp = {
+  -- The clicks-per-second for \"left\" or \"right\", from the same rolling window the CPS widget reads.
+  cps: (button: string) -> number,
+  combo: () -> number,
+  combo_active: () -> boolean,
+  session: () -> {[string]: any},
+  armor: () -> {[string]: any},
+  effects: () -> {[string]: any},
+  net: () -> {[string]: any},
+  target: () -> {[string]: any},
+  health: () -> number,
+  max_health: () -> number,
+  -- Turns overlay sections on and off. `flags` is a newline-separated list of enabled keys from: cps, keystrokes, combo, armor, effects, net, target, session, popups, hitflash, vignette. A key that is not in the list is turned off, so the call fully describes the config; an unknown key is refused (fail closed) and leaves the config unchanged.
+  set_config: (flags: string) -> boolean,
+  -- The enabled section keys, newline-separated, in a stable order.
+  config: () -> string,
+  attach: () -> boolean,
+  detach: () -> (),
+  attached: () -> boolean,
+  -- True while the local player is under the low-health threshold and the vignette is on.
+  low_health: () -> boolean,
+}
+
+-- Capability required: packets.
+export type Packets = {
+  -- Read-only packet inspection. The log holds packet METADATA only — a sequence number, direction, protocol id, a name and a byte length — and never payload bytes, so it cannot become a collection surface. It answers the diagnostic questions (am I being spammed, is this id new since the update, how much am I sending) without exposing anyone's data. Fed by the network layer; a script only reads it. `recent` returns a table keyed \"0\",\"1\",…, newest first, each {seq, dir, id, name, bytes, time_ms}; `summary` is the same shape per id, highest count first. `dir` is \"inbound\", \"outbound\" or \"\" for both.
+  recent: (max: number) -> {[string]: any},
+  last: () -> {[string]: any},
+  totals: () -> {[string]: any},
+  summary: (dir: string) -> {[string]: any},
+  count_of: (id: number) -> number,
+  size: () -> number,
+  clear: () -> (),
+}
+
+-- Capability required: hud.
+export type Mod = {
+  -- Script module + settings system. A script declares a module with metadata and a set of TYPED settings (toggle, slider, select, keybind, text, button); the client renders them and the user configures them. Every write is validated against the setting's declared kind and range and fails closed, so a toggle can never receive an out-of-range slider value. Handles are numbers; a setting is addressed by its module handle and key. `options` for a select is a newline-separated list of labels.
+  create: (name: string, description: string) -> number,
+  -- Sets a module's version and author after creation. Fails closed on an unknown handle.
+  set_meta: (handle: number, version: string, author: string) -> boolean,
+  add_toggle: (handle: number, key: string, label: string, default: boolean) -> boolean,
+  add_slider: (handle: number, key: string, label: string, min: number, max: number, default: number) -> boolean,
+  add_select: (handle: number, key: string, label: string, options: string, default: number) -> boolean,
+  add_keybind: (handle: number, key: string, label: string, default: string) -> boolean,
+  add_text: (handle: number, key: string, label: string, default: string) -> boolean,
+  add_button: (handle: number, key: string, label: string) -> boolean,
+  set_number: (handle: number, key: string, value: number) -> boolean,
+  set_text: (handle: number, key: string, value: string) -> boolean,
+  -- Raises a button setting's one-shot press. The next `mod.get` / `mod.number` read consumes it.
+  press: (handle: number, key: string) -> boolean,
+  number: (handle: number, key: string) -> number,
+  text: (handle: number, key: string) -> string,
+  enabled: (handle: number) -> boolean,
+  set_enabled: (handle: number, on: boolean) -> boolean,
+  count: () -> number,
+  -- One setting as a table: {key, label, kind, number, text, pressed, min, max, options}.
+  get: (handle: number, key: string) -> {[string]: any},
+  -- A module's metadata and its settings as a table: {handle, name, description, version, author, enabled, count, settings}.
+  info: (handle: number) -> {[string]: any},
+  list: () -> string,
+  settings: (handle: number) -> string,
+  clear: () -> (),
+  set_overlay: (on: boolean) -> (),
+  overlay: () -> boolean,
 }
 
 -- Capability required: network.
 export type Network = {
-  -- Outbound requests. Requires a network grant scoped to the host.
+  -- Outbound requests. Requires a network grant scoped to the host. Both calls return an HttpResult table (status, ok, headers, body, error, truncated) rather than raising, so a script can branch on the outcome; headers is a newline-separated \"Name: value\" list. A refused destination (bad URL, egress policy, or a host outside the grant) comes back with status 0 and a non-empty error. TLS is not implemented, so an https destination is refused rather than downgraded to plaintext.
   get: (url: string, timeout_ms: number) -> HttpResult,
+  post: (url: string, body: string, timeout_ms: number) -> HttpResult,
 }
 
 -- Capability required: hud.
@@ -77,6 +193,12 @@ export type Perf = {
   set_thermal_mode: (enabled: boolean) -> (),
   -- Select the device profile the governor tunes itself for: generic, mobile-low, mobile-high or desktop. Unknown names are refused (fail closed).
   set_platform: (name: string) -> (),
+  -- The aggregated span call tree since the last `perf.flame_reset`, as a nested table: each node is {name, self_ms, total_ms, count, children}, and `children` is ordered by total time descending so the expensive branch reads first. `self_ms` excludes child spans, so a parent's `total_ms` is the time actually spent inside it. Populated by the profiler spans the modules and hooks raise.
+  flame: () -> {[string]: any},
+  -- The flat span list, highest total time first: a table keyed \"0\",\"1\",… each {name, total_ms, count, max_ms}. The list view of the same data `flame` nests.
+  spans: () -> {[string]: any},
+  -- Drops the flame tree, the span stats and the per-frame ring, starting the profiler over.
+  flame_reset: () -> (),
 }
 
 -- Capability required: input.
@@ -138,6 +260,33 @@ export type Package = {
   resolve: (name: string, constraint: string) -> string,
   require_path: (path: string) -> string,
   clear: () -> (),
+}
+
+-- Capability required: world.
+export type Record = {
+  -- Begins a fresh recording, clearing any previous tape. False when already recording.
+  start: () -> boolean,
+  -- Ends the session and keeps the tape. False when not recording.
+  stop: () -> boolean,
+  recording: () -> boolean,
+  -- The number of frames on the tape.
+  frames: () -> number,
+  -- True when a capture hit a cap and dropped data.
+  overflowed: () -> boolean,
+  -- The tape as one JSON document, ready to save or attach to a bug report.
+  save: () -> string,
+  -- Replaces the tape from a JSON document. Rejects the whole document on any error and leaves the current tape untouched.
+  load: (json: string) -> boolean,
+  clear: () -> (),
+  -- Advances the replay one frame. False at the end of the tape.
+  replay_step: () -> boolean,
+  replay_seek: (index: number) -> boolean,
+  replay_rewind: () -> (),
+  -- The tick of the current replay frame, or 0 when there is none.
+  replay_tick: () -> number,
+  -- The current replay frame index, or -1 before the first step.
+  replay_index: () -> number,
+  replay_end: () -> boolean,
 }
 
 export type AsyncFacade = {

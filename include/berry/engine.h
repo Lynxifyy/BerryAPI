@@ -15,6 +15,8 @@
 
 namespace Berry {
 
+class SessionRecorder;
+
 //----------------------------------------------------------------------------
 // Engine — central BerryAPI instance.
 //
@@ -55,6 +57,10 @@ class BERRY_API Engine {
   Scheduler& Sched() { return sched_; }
   ModuleRegistry& Modules() { return modules_; }
 
+  /// The session recorder: record-and-replay of the world stream. Always
+  /// present; recording is off until `SessionRecorder::Start`.
+  SessionRecorder& Recorder() { return *recorder_; }
+
   // Tick -------------------------------------------------------------------
   /// Called from the game's RTT simulation tick each frame.
   void OnGameTick(GameTick tick);
@@ -71,7 +77,7 @@ class BERRY_API Engine {
   EngineConfig& Config() { return cfg_; }
 
  private:
-  Engine() = default;
+  Engine();
   ~Engine();
   Engine(const Engine&) = delete;
   Engine& operator=(const Engine&) = delete;
@@ -82,6 +88,7 @@ class BERRY_API Engine {
   HookManager hooks_;
   Scheduler sched_;
   ModuleRegistry modules_;
+  std::unique_ptr<SessionRecorder> recorder_;
   std::atomic<GameTick> currentTick_{0};
   std::atomic<bool> attached_{false};
   EngineConfig cfg_;

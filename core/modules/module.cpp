@@ -1,4 +1,5 @@
 #include "berry/module.h"
+#include "berry/event.h"
 #include "berry/logger.h"
 #include <algorithm>
 
@@ -101,7 +102,12 @@ void ModuleRegistry::DetachAll(Engine& e) {
 
 void ModuleRegistry::TickAll(GameTick tick) {
   std::lock_guard<std::mutex> lk(mutex_);
-  for (auto& m : modules_) m->OnTick(tick);
+  for (auto& m : modules_) {
+    // One span per module per tick, so the flame graph shows which module is
+    // eating the tick rather than just that the tick was slow.
+    ProfilerScope span(m->Name());
+    m->OnTick(tick);
+  }
 }
 
 }  // namespace Berry

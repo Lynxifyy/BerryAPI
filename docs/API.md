@@ -49,12 +49,129 @@ Capability: `world`.
 
 | Function | Capability | Description |
 | --- | --- | --- |
-| `world.query(within: number) -> number` | `world` | Read-only world queries. The core never hands out raw pointers. |
+| `world.query(within: number) -> number` | `world` | Read-only world queries. The core never hands out raw pointers. `entities_within` returns a table keyed \"0\",\"1\",… each an entity table (id, type, x, y, z, health, alive, distance), sorted by id so the order is stable across ticks; a `type` of \"\" or \"any\" matches every type, and an unknown type name is refused rather than matching everything. The raycast helpers cast from the local player's eye along its look direction and return {hit, x, y, z, block, id, distance}. |
 | `world.entity_count() -> number` | `world` | - |
 | `world.block_at(x: number, y: number, z: number) -> string` | `world` | - |
 | `world.time() -> Table` | `world` | - |
 | `world.is_day() -> bool` | `world` | - |
 | `world.is_raining() -> bool` | `world` | - |
+| `world.entities_within(within: number, type: string) -> Table` | `world` | - |
+| `world.raycast_block(max_dist: number) -> Table` | `world` | - |
+| `world.raycast_entity(max_dist: number) -> Table` | `world` | - |
+
+## Entity
+
+Capability: `world`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `entity.get(id: number) -> Table` | `world` | Read-only access to one entity by its raw id, plus neighbourhood lookups. Nothing here mutates an entity; the id is the raw engine id an entity table or an event carries. Reads fail closed (a zero id, an unknown id, or an unbound seam) rather than fabricating state. |
+| `entity.type_name(id: number) -> string` | `world` | - |
+| `entity.position(id: number) -> Vec3` | `world` | - |
+| `entity.velocity(id: number) -> Vec3` | `world` | - |
+| `entity.health(id: number) -> number` | `world` | - |
+| `entity.alive(id: number) -> bool` | `world` | - |
+| `entity.distance_to(id: number) -> number` | `world` | - |
+| `entity.nearest(type: string) -> number` | `world` | The raw id of the nearest alive entity of `type` to the local player, or 0 when none is in range. An unknown type name is refused (fails closed) rather than returning an arbitrary entity. |
+
+## Fs
+
+Capability: `fileio`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `fs.write(path: string, data: string) -> bool` | `fileio` | Sandboxed file store. A script gets its own directory and nothing else: a path is validated before use (no absolute path, no backslash, no drive letter, no control character, no empty segment, no \".\" or \"..\", a bounded length and depth), so a path cannot escape the sandbox however it is spelled. Writes are capped per file, in total and in count, so a write loop cannot exhaust memory. Every call fails closed (false / empty) rather than throwing. |
+| `fs.read(path: string) -> string` | `fileio` | - |
+| `fs.append(path: string, data: string) -> bool` | `fileio` | - |
+| `fs.exists(path: string) -> bool` | `fileio` | - |
+| `fs.remove(path: string) -> bool` | `fileio` | - |
+| `fs.size(path: string) -> number` | `fileio` | - |
+| `fs.list(prefix: string) -> string` | `fileio` | Every path in the sandbox, sorted, newline-separated. `prefix` filters to paths that start with it; an empty prefix lists everything. |
+| `fs.count() -> number` | `fileio` | - |
+| `fs.total_bytes() -> number` | `fileio` | - |
+| `fs.clear() -> nil` | `fileio` | - |
+
+## Audio
+
+Capability: `audio`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `audio.play(name: string, volume: number, pitch: number) -> bool` | `audio` | Client-side sound cues. A script plays a named cue; the device backend decides what the name means. This is a sound the local player hears, so nothing here is authoritative. An unknown or malformed cue name is refused, and a muted play is dropped rather than queued. Volume and pitch are clamped into range. |
+| `audio.set_volume(volume: number) -> nil` | `audio` | - |
+| `audio.volume() -> number` | `audio` | - |
+| `audio.set_muted(muted: bool) -> nil` | `audio` | - |
+| `audio.muted() -> bool` | `audio` | - |
+| `audio.history() -> string` | `audio` | The recent cues that would have played, newest last, newline-separated as \"name:volume:pitch\". |
+| `audio.history_count() -> number` | `audio` | - |
+| `audio.clear_history() -> nil` | `audio` | - |
+
+## Pvp
+
+Capability: `hud`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `pvp.cps(button: string) -> number` | `hud` | The clicks-per-second for \"left\" or \"right\", from the same rolling window the CPS widget reads. |
+| `pvp.combo() -> number` | `hud` | - |
+| `pvp.combo_active() -> bool` | `hud` | - |
+| `pvp.session() -> Table` | `hud` | - |
+| `pvp.armor() -> Table` | `hud` | - |
+| `pvp.effects() -> Table` | `hud` | - |
+| `pvp.net() -> Table` | `hud` | - |
+| `pvp.target() -> Table` | `hud` | - |
+| `pvp.health() -> number` | `hud` | - |
+| `pvp.max_health() -> number` | `hud` | - |
+| `pvp.set_config(flags: string) -> bool` | `hud` | Turns overlay sections on and off. `flags` is a newline-separated list of enabled keys from: cps, keystrokes, combo, armor, effects, net, target, session, popups, hitflash, vignette. A key that is not in the list is turned off, so the call fully describes the config; an unknown key is refused (fail closed) and leaves the config unchanged. |
+| `pvp.config() -> string` | `hud` | The enabled section keys, newline-separated, in a stable order. |
+| `pvp.attach() -> bool` | `hud` | - |
+| `pvp.detach() -> nil` | `hud` | - |
+| `pvp.attached() -> bool` | `hud` | - |
+| `pvp.low_health() -> bool` | `hud` | True while the local player is under the low-health threshold and the vignette is on. |
+
+## Packets
+
+Capability: `packets`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `packets.recent(max: number) -> Table` | `packets` | Read-only packet inspection. The log holds packet METADATA only — a sequence number, direction, protocol id, a name and a byte length — and never payload bytes, so it cannot become a collection surface. It answers the diagnostic questions (am I being spammed, is this id new since the update, how much am I sending) without exposing anyone's data. Fed by the network layer; a script only reads it. `recent` returns a table keyed \"0\",\"1\",…, newest first, each {seq, dir, id, name, bytes, time_ms}; `summary` is the same shape per id, highest count first. `dir` is \"inbound\", \"outbound\" or \"\" for both. |
+| `packets.last() -> Table` | `packets` | - |
+| `packets.totals() -> Table` | `packets` | - |
+| `packets.summary(dir: string) -> Table` | `packets` | - |
+| `packets.count_of(id: number) -> number` | `packets` | - |
+| `packets.size() -> number` | `packets` | - |
+| `packets.clear() -> nil` | `packets` | - |
+
+## Mod
+
+Capability: `hud`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `mod.create(name: string, description: string) -> number` | `hud` | Script module + settings system. A script declares a module with metadata and a set of TYPED settings (toggle, slider, select, keybind, text, button); the client renders them and the user configures them. Every write is validated against the setting's declared kind and range and fails closed, so a toggle can never receive an out-of-range slider value. Handles are numbers; a setting is addressed by its module handle and key. `options` for a select is a newline-separated list of labels. |
+| `mod.set_meta(handle: number, version: string, author: string) -> bool` | `hud` | Sets a module's version and author after creation. Fails closed on an unknown handle. |
+| `mod.add_toggle(handle: number, key: string, label: string, default: bool) -> bool` | `hud` | - |
+| `mod.add_slider(handle: number, key: string, label: string, min: number, max: number, default: number) -> bool` | `hud` | - |
+| `mod.add_select(handle: number, key: string, label: string, options: string, default: number) -> bool` | `hud` | - |
+| `mod.add_keybind(handle: number, key: string, label: string, default: string) -> bool` | `hud` | - |
+| `mod.add_text(handle: number, key: string, label: string, default: string) -> bool` | `hud` | - |
+| `mod.add_button(handle: number, key: string, label: string) -> bool` | `hud` | - |
+| `mod.set_number(handle: number, key: string, value: number) -> bool` | `hud` | - |
+| `mod.set_text(handle: number, key: string, value: string) -> bool` | `hud` | - |
+| `mod.press(handle: number, key: string) -> bool` | `hud` | Raises a button setting's one-shot press. The next `mod.get` / `mod.number` read consumes it. |
+| `mod.number(handle: number, key: string) -> number` | `hud` | - |
+| `mod.text(handle: number, key: string) -> string` | `hud` | - |
+| `mod.enabled(handle: number) -> bool` | `hud` | - |
+| `mod.set_enabled(handle: number, on: bool) -> bool` | `hud` | - |
+| `mod.count() -> number` | `hud` | - |
+| `mod.get(handle: number, key: string) -> Table` | `hud` | One setting as a table: {key, label, kind, number, text, pressed, min, max, options}. |
+| `mod.info(handle: number) -> Table` | `hud` | A module's metadata and its settings as a table: {handle, name, description, version, author, enabled, count, settings}. |
+| `mod.list() -> string` | `hud` | - |
+| `mod.settings(handle: number) -> string` | `hud` | - |
+| `mod.clear() -> nil` | `hud` | - |
+| `mod.set_overlay(on: bool) -> nil` | `hud` | - |
+| `mod.overlay() -> bool` | `hud` | - |
 
 ## Network
 
@@ -62,7 +179,8 @@ Capability: `network`.
 
 | Function | Capability | Description |
 | --- | --- | --- |
-| `network.get(url: string, timeout_ms: number) -> HttpResult` | `network` | Outbound requests. Requires a network grant scoped to the host. |
+| `network.get(url: string, timeout_ms: number) -> HttpResult` | `network` | Outbound requests. Requires a network grant scoped to the host. Both calls return an HttpResult table (status, ok, headers, body, error, truncated) rather than raising, so a script can branch on the outcome; headers is a newline-separated \"Name: value\" list. A refused destination (bad URL, egress policy, or a host outside the grant) comes back with status 0 and a non-empty error. TLS is not implemented, so an https destination is refused rather than downgraded to plaintext. |
+| `network.post(url: string, body: string, timeout_ms: number) -> HttpResult` | `network` | - |
 
 ## Hud
 
@@ -88,6 +206,9 @@ Capability: `perf`.
 | `perf.set_target_fps(fps: number) -> nil` | `perf` | - |
 | `perf.set_thermal_mode(enabled: bool) -> nil` | `perf` | - |
 | `perf.set_platform(name: string) -> nil` | `perf` | Select the device profile the governor tunes itself for: generic, mobile-low, mobile-high or desktop. Unknown names are refused (fail closed). |
+| `perf.flame() -> Table` | `perf` | The aggregated span call tree since the last `perf.flame_reset`, as a nested table: each node is {name, self_ms, total_ms, count, children}, and `children` is ordered by total time descending so the expensive branch reads first. `self_ms` excludes child spans, so a parent's `total_ms` is the time actually spent inside it. Populated by the profiler spans the modules and hooks raise. |
+| `perf.spans() -> Table` | `perf` | The flat span list, highest total time first: a table keyed \"0\",\"1\",… each {name, total_ms, count, max_ms}. The list view of the same data `flame` nests. |
+| `perf.flame_reset() -> nil` | `perf` | Drops the flame tree, the span stats and the per-frame ring, starting the profiler over. |
 
 ## Input
 
@@ -171,3 +292,24 @@ Capability: `fileio`.
 | `package.resolve(name: string, constraint: string) -> string` | `fileio` | - |
 | `package.require_path(path: string) -> string` | `fileio` | - |
 | `package.clear() -> nil` | `fileio` | - |
+
+## Record
+
+Capability: `world`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `record.start() -> bool` | `world` | Begins a fresh recording, clearing any previous tape. False when already recording. |
+| `record.stop() -> bool` | `world` | Ends the session and keeps the tape. False when not recording. |
+| `record.recording() -> bool` | `world` | - |
+| `record.frames() -> number` | `world` | The number of frames on the tape. |
+| `record.overflowed() -> bool` | `world` | True when a capture hit a cap and dropped data. |
+| `record.save() -> string` | `world` | The tape as one JSON document, ready to save or attach to a bug report. |
+| `record.load(json: string) -> bool` | `world` | Replaces the tape from a JSON document. Rejects the whole document on any error and leaves the current tape untouched. |
+| `record.clear() -> nil` | `world` | - |
+| `record.replay_step() -> bool` | `world` | Advances the replay one frame. False at the end of the tape. |
+| `record.replay_seek(index: number) -> bool` | `world` | - |
+| `record.replay_rewind() -> nil` | `world` | - |
+| `record.replay_tick() -> number` | `world` | The tick of the current replay frame, or 0 when there is none. |
+| `record.replay_index() -> number` | `world` | The current replay frame index, or -1 before the first step. |
+| `record.replay_end() -> bool` | `world` | - |

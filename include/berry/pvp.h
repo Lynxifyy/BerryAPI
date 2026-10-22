@@ -153,6 +153,17 @@ class BERRY_API PvpOverlay {
   size_t popupCount() const { return popups_.size(); }
   f32 hitFlash() const { return hitFlash_; }
   const std::vector<KeyStroke>& keystrokes() const { return keystrokes_; }
+  const std::vector<ArmorPiece>& armor() const { return armor_; }
+  const std::vector<EffectState>& effects() const { return effects_; }
+  const NetStats& netStats() const { return net_; }
+  const TargetInfo& target() const { return target_; }
+  f32 health() const { return health_; }
+  f32 maxHealth() const { return maxHealth_; }
+  /// The clicks-per-second the overlay currently shows, from the same rolling
+  /// window the CPS widget reads. Read-only: it observes local input.
+  f64 clicksPerSecond(MouseButton button) const {
+    return input_.clicksPerSecond(button);
+  }
 
   /// Seconds a combo stays alive after the last kill.
   static constexpr f32 kComboWindowSec = 4.0f;

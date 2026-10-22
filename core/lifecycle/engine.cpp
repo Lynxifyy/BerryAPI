@@ -1,6 +1,7 @@
 #include "berry/engine.h"
 #include "berry/event.h"
 #include "berry/services.h"
+#include "berry/session_recorder.h"
 #include "berry/thread.h"
 
 #include <cstring>
@@ -27,6 +28,8 @@ Engine& Engine::Instance() {
   static Engine eng;
   return eng;
 }
+
+Engine::Engine() : recorder_(std::make_unique<SessionRecorder>()) {}
 
 Engine::~Engine() {
   Detach();

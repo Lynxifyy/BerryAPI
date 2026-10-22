@@ -54,19 +54,136 @@ module Render {
 
 module World {
   capability world
-  doc "Read-only world queries. The core never hands out raw pointers."
+  doc "Read-only world queries. The core never hands out raw pointers. `entities_within` returns a table keyed \"0\",\"1\",… each an entity table (id, type, x, y, z, health, alive, distance), sorted by id so the order is stable across ticks; a `type` of \"\" or \"any\" matches every type, and an unknown type name is refused rather than matching everything. The raycast helpers cast from the local player's eye along its look direction and return {hit, x, y, z, block, id, distance}."
   fn query(within: number) -> number
   fn entity_count() -> number
   fn block_at(x: number, y: number, z: number) -> string
   fn time() -> Table
   fn is_day() -> bool
   fn is_raining() -> bool
+  fn entities_within(within: number, type: string) -> Table
+  fn raycast_block(max_dist: number) -> Table
+  fn raycast_entity(max_dist: number) -> Table
+}
+
+module Entity {
+  capability world
+  doc "Read-only access to one entity by its raw id, plus neighbourhood lookups. Nothing here mutates an entity; the id is the raw engine id an entity table or an event carries. Reads fail closed (a zero id, an unknown id, or an unbound seam) rather than fabricating state."
+  fn get(id: number) -> Table
+  fn type_name(id: number) -> string
+  fn position(id: number) -> Vec3
+  fn velocity(id: number) -> Vec3
+  fn health(id: number) -> number
+  fn alive(id: number) -> bool
+  fn distance_to(id: number) -> number
+  doc "The raw id of the nearest alive entity of `type` to the local player, or 0 when none is in range. An unknown type name is refused (fails closed) rather than returning an arbitrary entity."
+  fn nearest(type: string) -> number
+}
+
+module Fs {
+  capability fileio
+  doc "Sandboxed file store. A script gets its own directory and nothing else: a path is validated before use (no absolute path, no backslash, no drive letter, no control character, no empty segment, no \".\" or \"..\", a bounded length and depth), so a path cannot escape the sandbox however it is spelled. Writes are capped per file, in total and in count, so a write loop cannot exhaust memory. Every call fails closed (false / empty) rather than throwing."
+  fn write(path: string, data: string) -> bool
+  fn read(path: string) -> string
+  fn append(path: string, data: string) -> bool
+  fn exists(path: string) -> bool
+  fn remove(path: string) -> bool
+  fn size(path: string) -> number
+  doc "Every path in the sandbox, sorted, newline-separated. `prefix` filters to paths that start with it; an empty prefix lists everything."
+  fn list(prefix: string) -> string
+  fn count() -> number
+  fn total_bytes() -> number
+  fn clear() -> nil
+}
+
+module Audio {
+  capability audio
+  doc "Client-side sound cues. A script plays a named cue; the device backend decides what the name means. This is a sound the local player hears, so nothing here is authoritative. An unknown or malformed cue name is refused, and a muted play is dropped rather than queued. Volume and pitch are clamped into range."
+  fn play(name: string, volume: number, pitch: number) -> bool
+  fn set_volume(volume: number) -> nil
+  fn volume() -> number
+  fn set_muted(muted: bool) -> nil
+  fn muted() -> bool
+  doc "The recent cues that would have played, newest last, newline-separated as \"name:volume:pitch\"."
+  fn history() -> string
+  fn history_count() -> number
+  fn clear_history() -> nil
+}
+
+module Pvp {
+  capability hud
+  doc "The PvP overlay: the client-side read-outs a normal client could already see — CPS, keystrokes, a combo counter, armor/durability, active effects, ping/TPS/FPS, the current target and rolling session stats. All local, all read-only; nothing here reveals another player beyond what a fight already shows, and nothing writes game state. `session` returns {damage_dealt, damage_taken, kills, deaths, hits, peak_dps, kd}; `armor` and `effects` are tables keyed \"0\",\"1\",… ; `net` returns {ping_ms, tps, fps}; `target` returns {name, health, max_health, distance, armor, valid}."
+  doc "The clicks-per-second for \"left\" or \"right\", from the same rolling window the CPS widget reads."
+  fn cps(button: string) -> number
+  fn combo() -> number
+  fn combo_active() -> bool
+  fn session() -> Table
+  fn armor() -> Table
+  fn effects() -> Table
+  fn net() -> Table
+  fn target() -> Table
+  fn health() -> number
+  fn max_health() -> number
+  doc "Turns overlay sections on and off. `flags` is a newline-separated list of enabled keys from: cps, keystrokes, combo, armor, effects, net, target, session, popups, hitflash, vignette. A key that is not in the list is turned off, so the call fully describes the config; an unknown key is refused (fail closed) and leaves the config unchanged."
+  fn set_config(flags: string) -> bool
+  doc "The enabled section keys, newline-separated, in a stable order."
+  fn config() -> string
+  fn attach() -> bool
+  fn detach() -> nil
+  fn attached() -> bool
+  doc "True while the local player is under the low-health threshold and the vignette is on."
+  fn low_health() -> bool
+}
+
+module Packets {
+  capability packets
+  doc "Read-only packet inspection. The log holds packet METADATA only — a sequence number, direction, protocol id, a name and a byte length — and never payload bytes, so it cannot become a collection surface. It answers the diagnostic questions (am I being spammed, is this id new since the update, how much am I sending) without exposing anyone's data. Fed by the network layer; a script only reads it. `recent` returns a table keyed \"0\",\"1\",…, newest first, each {seq, dir, id, name, bytes, time_ms}; `summary` is the same shape per id, highest count first. `dir` is \"inbound\", \"outbound\" or \"\" for both."
+  fn recent(max: number) -> Table
+  fn last() -> Table
+  fn totals() -> Table
+  fn summary(dir: string) -> Table
+  fn count_of(id: number) -> number
+  fn size() -> number
+  fn clear() -> nil
+}
+
+module Mod {
+  capability hud
+  doc "Script module + settings system. A script declares a module with metadata and a set of TYPED settings (toggle, slider, select, keybind, text, button); the client renders them and the user configures them. Every write is validated against the setting's declared kind and range and fails closed, so a toggle can never receive an out-of-range slider value. Handles are numbers; a setting is addressed by its module handle and key. `options` for a select is a newline-separated list of labels."
+  fn create(name: string, description: string) -> number
+  doc "Sets a module's version and author after creation. Fails closed on an unknown handle."
+  fn set_meta(handle: number, version: string, author: string) -> bool
+  fn add_toggle(handle: number, key: string, label: string, default: bool) -> bool
+  fn add_slider(handle: number, key: string, label: string, min: number, max: number, default: number) -> bool
+  fn add_select(handle: number, key: string, label: string, options: string, default: number) -> bool
+  fn add_keybind(handle: number, key: string, label: string, default: string) -> bool
+  fn add_text(handle: number, key: string, label: string, default: string) -> bool
+  fn add_button(handle: number, key: string, label: string) -> bool
+  fn set_number(handle: number, key: string, value: number) -> bool
+  fn set_text(handle: number, key: string, value: string) -> bool
+  doc "Raises a button setting's one-shot press. The next `mod.get` / `mod.number` read consumes it."
+  fn press(handle: number, key: string) -> bool
+  fn number(handle: number, key: string) -> number
+  fn text(handle: number, key: string) -> string
+  fn enabled(handle: number) -> bool
+  fn set_enabled(handle: number, on: bool) -> bool
+  fn count() -> number
+  doc "One setting as a table: {key, label, kind, number, text, pressed, min, max, options}."
+  fn get(handle: number, key: string) -> Table
+  doc "A module's metadata and its settings as a table: {handle, name, description, version, author, enabled, count, settings}."
+  fn info(handle: number) -> Table
+  fn list() -> string
+  fn settings(handle: number) -> string
+  fn clear() -> nil
+  fn set_overlay(on: bool) -> nil
+  fn overlay() -> bool
 }
 
 module Network {
   capability network
-  doc "Outbound requests. Requires a network grant scoped to the host."
+  doc "Outbound requests. Requires a network grant scoped to the host. Both calls return an HttpResult table (status, ok, headers, body, error, truncated) rather than raising, so a script can branch on the outcome; headers is a newline-separated \"Name: value\" list. A refused destination (bad URL, egress policy, or a host outside the grant) comes back with status 0 and a non-empty error. TLS is not implemented, so an https destination is refused rather than downgraded to plaintext."
   fn get(url: string, timeout_ms: number) -> HttpResult
+  fn post(url: string, body: string, timeout_ms: number) -> HttpResult
 }
 
 module Hud {
@@ -89,6 +206,12 @@ module Perf {
   fn set_thermal_mode(enabled: bool) -> nil
   doc "Select the device profile the governor tunes itself for: generic, mobile-low, mobile-high or desktop. Unknown names are refused (fail closed)."
   fn set_platform(name: string) -> nil
+  doc "The aggregated span call tree since the last `perf.flame_reset`, as a nested table: each node is {name, self_ms, total_ms, count, children}, and `children` is ordered by total time descending so the expensive branch reads first. `self_ms` excludes child spans, so a parent's `total_ms` is the time actually spent inside it. Populated by the profiler spans the modules and hooks raise."
+  fn flame() -> Table
+  doc "The flat span list, highest total time first: a table keyed \"0\",\"1\",… each {name, total_ms, count, max_ms}. The list view of the same data `flame` nests."
+  fn spans() -> Table
+  doc "Drops the flame tree, the span stats and the per-frame ring, starting the profiler over."
+  fn flame_reset() -> nil
 }
 
 module Input {
@@ -162,4 +285,32 @@ module Package {
   fn resolve(name: string, constraint: string) -> string
   fn require_path(path: string) -> string
   fn clear() -> nil
+}
+
+module Record {
+  capability world
+  doc "Record & replay of this client's world stream. `start` begins capturing one frame per tick — the level time, every entity the world grid already read, and the entered/left/updated transitions — into an in-memory tape; `stop` ends the session and keeps the tape. `save` returns the tape as one JSON document and `load` replaces the tape from one (rejecting the whole document on any error). `replay_*` drives a replay seam that answers the world queries from the tape instead of the game, so a script can be regression-tested with no game running. Recording reads the world read-only and never writes to it; a tape is what this client saw, a debugging aid, not a network protocol."
+  doc "Begins a fresh recording, clearing any previous tape. False when already recording."
+  fn start() -> bool
+  doc "Ends the session and keeps the tape. False when not recording."
+  fn stop() -> bool
+  fn recording() -> bool
+  doc "The number of frames on the tape."
+  fn frames() -> number
+  doc "True when a capture hit a cap and dropped data."
+  fn overflowed() -> bool
+  doc "The tape as one JSON document, ready to save or attach to a bug report."
+  fn save() -> string
+  doc "Replaces the tape from a JSON document. Rejects the whole document on any error and leaves the current tape untouched."
+  fn load(json: string) -> bool
+  fn clear() -> nil
+  doc "Advances the replay one frame. False at the end of the tape."
+  fn replay_step() -> bool
+  fn replay_seek(index: number) -> bool
+  fn replay_rewind() -> nil
+  doc "The tick of the current replay frame, or 0 when there is none."
+  fn replay_tick() -> number
+  doc "The current replay frame index, or -1 before the first step."
+  fn replay_index() -> number
+  fn replay_end() -> bool
 }

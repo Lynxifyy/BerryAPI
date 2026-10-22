@@ -145,6 +145,24 @@ f32 SafeCoord(const ScriptValue& v, f32 fallback = 0.0f) {
   return (f32)n;
 }
 
+/// A profiler flame node as a script table, recursing into children. Children
+/// are keyed "0","1",… in the order the profiler sorted them (total time
+/// descending), so a script that walks the table sees the expensive branch
+/// first without sorting.
+ScriptValue FlameToTable(const Profiler::FlameNode& node) {
+  ScriptTable t;
+  t["name"] = ScriptValue::Str(node.name);
+  t["self_ms"] = ScriptValue::Num(node.selfMs);
+  t["total_ms"] = ScriptValue::Num(node.totalMs);
+  t["count"] = ScriptValue::Num((f64)node.count);
+  ScriptTable kids;
+  for (size_t i = 0; i < node.children.size(); ++i) {
+    kids[std::to_string(i)] = FlameToTable(node.children[i]);
+  }
+  t["children"] = ScriptValue::Tbl(std::move(kids));
+  return ScriptValue::Tbl(std::move(t));
+}
+
 /// Named input keys the observer tracks. Returns null for anything else so the
 /// caller fails closed rather than guessing a mapping.
 const char* KeyField(const std::string& key, bool* out) {
@@ -157,6 +175,53 @@ const char* KeyField(const std::string& key, bool* out) {
   if (k == "shift") { *out = true; return "sneak"; }
   if (k == "ctrl") { *out = true; return "sprint"; }
   return nullptr;
+}
+
+/// One entity as a script table. `from`, when non-zero, adds a `distance`
+/// field measured from that point, so a caller that already knows the origin
+/// (the local player) does not recompute it per entity.
+ScriptValue EntityTableValue(const EntitySnapshot& s, const Vec3* from = nullptr) {
+  ScriptTable t;
+  t["id"] = ScriptValue::Num((f64)s.id.raw);
+  t["runtime"] = ScriptValue::Num((f64)s.id.runtime);
+  t["type"] = ScriptValue::Str(EntityTypeName(s.type));
+  t["x"] = ScriptValue::Num((f64)s.position.x);
+  t["y"] = ScriptValue::Num((f64)s.position.y);
+  t["z"] = ScriptValue::Num((f64)s.position.z);
+  t["vx"] = ScriptValue::Num((f64)s.velocity.x);
+  t["vy"] = ScriptValue::Num((f64)s.velocity.y);
+  t["vz"] = ScriptValue::Num((f64)s.velocity.z);
+  t["yaw"] = ScriptValue::Num((f64)s.rotation.y);
+  t["pitch"] = ScriptValue::Num((f64)s.rotation.x);
+  t["health"] = ScriptValue::Num((f64)s.health);
+  t["max_health"] = ScriptValue::Num((f64)s.maxHealth);
+  t["alive"] = ScriptValue::Bool(s.alive);
+  t["on_ground"] = ScriptValue::Bool(s.onGround);
+  t["name"] = ScriptValue::Str(s.name);
+  if (from) t["distance"] = ScriptValue::Num((f64)s.position.Distance(*from));
+  return ScriptValue::Tbl(std::move(t));
+}
+
+/// Parses the type filter an `entities_within` / `nearest` call carries. An
+/// empty string or "any" means "no filter" (Unknown). Returns false for an
+/// unknown name, so a typo is an error rather than a silent match-everything.
+bool ParseTypeFilter(const std::string& raw, EntityType* out) {
+  const std::string name = Lower(raw);
+  if (name.empty() || name == "any" || name == "*") {
+    *out = EntityType::Unknown;
+    return true;
+  }
+  return ParseEntityType(name, out);
+}
+
+/// The local player's look direction from its (pitch, yaw) rotation, matching
+/// the MCPE convention (yaw about +Y, pitch up positive): the direction a
+/// raycast from the eye would follow.
+Vec3 LookDirection(const Vec3& rotationDeg) {
+  const f32 pitch = rotationDeg.x * 3.14159265358979f / 180.0f;
+  const f32 yaw = rotationDeg.y * 3.14159265358979f / 180.0f;
+  const f32 cp = std::cos(pitch);
+  return Vec3(-std::sin(yaw) * cp, -std::sin(pitch), std::cos(yaw) * cp).Normalized();
 }
 
 }  // namespace
@@ -192,6 +257,34 @@ void ScriptApi::InitFrameHook() {
         // DrawLocal needs no skeleton bound: it resolves nothing and returns 0.
         if (services_.cosmetics && services_.renderer) {
           services_.cosmetics->DrawLocal(*services_.renderer, services_.localPlayer);
+        }
+        // The PvP overlay presents its widget tree through the HUD, then draws
+        // its popups/flash through the Renderer. Its animation is advanced from
+        // the frame delta so keystroke fades and popups track wall time.
+        if (services_.pvp && services_.hud && services_.renderer) {
+          const Vec2 screen = screenSize();
+          if (screen.x > 0 && screen.y > 0) {
+            const u64 now = NowMs();
+            f32 dt = 0.0f;
+            if (lastFrameMs_ != 0 && now > lastFrameMs_) {
+              dt = (f32)(now - lastFrameMs_);
+              // A long stall (a breakpoint, a pause) must not fast-forward every
+              // animation; clamp the step to a couple of frames' worth.
+              if (dt > 100.0f) dt = 100.0f;
+            }
+            lastFrameMs_ = now;
+            services_.pvp->Update(dt, now);
+            services_.pvp->Present(*services_.hud, *services_.renderer, screen);
+          }
+        }
+        // The script-module overlay draws last, on top, when a user turned it
+        // on. It reads a snapshot, so a module declared this frame is next
+        // frame's line rather than a torn draw.
+        if (services_.modules && services_.renderer) {
+          const Vec2 screen = screenSize();
+          if (screen.x > 0 && screen.y > 0) {
+            services_.modules->DrawOverlay(*services_.renderer, screen);
+          }
         }
         return EventResult::Continue;
       });
@@ -516,13 +609,237 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Bool(seam->GetTime().rainLevel > 0.0f);
   });
 
+  //--- World: richer read-only queries --------------------------------------
+  //
+  // These return tables rather than counts so a script can build a HUD from
+  // them without a second call per entity. Every one of them resolves through
+  // the seam and fails closed when it is unbound, exactly like the scalar
+  // reads above: no raw pointer ever leaves the core.
+  install("world.entities_within", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("world.entities_within: world unavailable"); return ScriptValue::Nil(); }
+    const f32 within = (f32)args[0].AsNumber();
+    if (!std::isfinite(within) || within < 0) {
+      ctx.RaiseError("world.entities_within: radius must be a non-negative number");
+      return ScriptValue::Nil();
+    }
+    EntityType filter = EntityType::Unknown;
+    if (!ParseTypeFilter(args[1].ToDisplay(), &filter)) {
+      ctx.RaiseError("world.entities_within: unknown entity type '" + args[1].ToDisplay() + "'");
+      return ScriptValue::Nil();
+    }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("world.entities_within: no level seam bound"); return ScriptValue::Nil(); }
+    const EntitySnapshot self = services_.world->GetEntity(services_.localPlayer);
+    if (!self.id.raw && !self.id.runtime) {
+      ctx.RaiseError("world.entities_within: no local player bound");
+      return ScriptValue::Nil();
+    }
+    // The seam returns ids; snapshot each and filter by type here so the shim
+    // and the device adapter share one definition of "within and matching".
+    std::vector<EntitySnapshot> found;
+    for (const EntityId& id : seam->EntitiesInRadius(self.position, within)) {
+      EntitySnapshot s;
+      if (!seam->GetEntity(id, &s)) continue;
+      if (filter != EntityType::Unknown && s.type != filter) continue;
+      found.push_back(s);
+    }
+    std::sort(found.begin(), found.end(), [](const EntitySnapshot& a, const EntitySnapshot& b) {
+      if (a.id.raw != b.id.raw) return a.id.raw < b.id.raw;
+      return a.id.runtime < b.id.runtime;
+    });
+    ScriptTable out;
+    int n = 0;
+    for (const EntitySnapshot& s : found) {
+      out[std::to_string(n++)] = EntityTableValue(s, &self.position);
+    }
+    out["count"] = ScriptValue::Num((f64)found.size());
+    return ScriptValue::Tbl(std::move(out));
+  });
+
+  // A raycast needs an origin and a direction. Both casts use the local
+  // player's eye (position + ~1.6 blocks) and look vector, so a script asks
+  // "what am I looking at" without ever naming a direction the client could not
+  // already see.
+  auto localEye = [this](ScriptContext& ctx, const char* who, Vec3* eye,
+                         Vec3* dir) -> bool {
+    if (!services_.world) { ctx.RaiseError(std::string(who) + ": world unavailable"); return false; }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError(std::string(who) + ": no level seam bound"); return false; }
+    const EntitySnapshot self = services_.world->GetEntity(services_.localPlayer);
+    if (!self.id.raw && !self.id.runtime) {
+      ctx.RaiseError(std::string(who) + ": no local player bound");
+      return false;
+    }
+    *eye = self.position + Vec3(0.0f, 1.62f, 0.0f);
+    *dir = LookDirection(self.rotation);
+    return true;
+  };
+
+  install("world.raycast_block", [this, localEye](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    const f32 maxDist = (f32)args[0].AsNumber();
+    if (!std::isfinite(maxDist) || maxDist <= 0) {
+      ctx.RaiseError("world.raycast_block: distance must be positive");
+      return ScriptValue::Nil();
+    }
+    Vec3 eye, dir;
+    if (!localEye(ctx, "world.raycast_block", &eye, &dir)) return ScriptValue::Nil();
+    auto seam = services_.world->Seam();
+    Vec3 pos;
+    u32 block = 0;
+    const bool hit = seam->RaycastBlock(eye, dir, maxDist, &pos, &block);
+    ScriptTable t;
+    t["hit"] = ScriptValue::Bool(hit);
+    t["x"] = ScriptValue::Num((f64)pos.x);
+    t["y"] = ScriptValue::Num((f64)pos.y);
+    t["z"] = ScriptValue::Num((f64)pos.z);
+    t["block"] = ScriptValue::Num((f64)block);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("world.raycast_entity", [this, localEye](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    const f32 maxDist = (f32)args[0].AsNumber();
+    if (!std::isfinite(maxDist) || maxDist <= 0) {
+      ctx.RaiseError("world.raycast_entity: distance must be positive");
+      return ScriptValue::Nil();
+    }
+    Vec3 eye, dir;
+    if (!localEye(ctx, "world.raycast_entity", &eye, &dir)) return ScriptValue::Nil();
+    auto seam = services_.world->Seam();
+    EntityId id;
+    f32 dist = 0;
+    const bool hit = seam->RaycastEntity(eye, dir, maxDist, &id, &dist);
+    ScriptTable t;
+    t["hit"] = ScriptValue::Bool(hit);
+    t["id"] = ScriptValue::Num((f64)id.raw);
+    t["runtime"] = ScriptValue::Num((f64)id.runtime);
+    t["distance"] = ScriptValue::Num((f64)dist);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  //--- Entity (read-only, by raw id) ---------------------------------------
+  //
+  // The id a script carries is the raw engine id: the one an entity table or an
+  // event payload holds. Reads fail closed on a zero/unknown id or an unbound
+  // seam, so a stale id yields "absent", never another entity's state.
+  auto entitySnapshot = [this](ScriptContext& ctx, const char* who,
+                               const std::vector<ScriptValue>& args,
+                               EntitySnapshot* out) -> bool {
+    if (!services_.world) { ctx.RaiseError(std::string(who) + ": world unavailable"); return false; }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError(std::string(who) + ": no level seam bound"); return false; }
+    const f64 raw = args[0].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0) {
+      ctx.RaiseError(std::string(who) + ": entity id must be a positive number");
+      return false;
+    }
+    EntityId id;
+    id.raw = (u64)raw;
+    // Resolve the runtime id through the seam when the caller only has the raw
+    // id: AllEntities gives the (raw, runtime) pairing the engine knows.
+    for (const EntityId& cand : seam->AllEntities()) {
+      if (cand.raw == id.raw) { id = cand; break; }
+    }
+    if (!seam->GetEntity(id, out)) {
+      ctx.RaiseError(std::string(who) + ": entity not present");
+      return false;
+    }
+    return true;
+  };
+
+  install("entity.get", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.get", args, &s)) return ScriptValue::Nil();
+    return EntityTableValue(s);
+  });
+
+  install("entity.type_name", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.type_name", args, &s)) return ScriptValue::Str("");
+    return ScriptValue::Str(EntityTypeName(s.type));
+  });
+
+  install("entity.position", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.position", args, &s)) return Vec3Value(Vec3());
+    return Vec3Value(s.position);
+  });
+
+  install("entity.velocity", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.velocity", args, &s)) return Vec3Value(Vec3());
+    return Vec3Value(s.velocity);
+  });
+
+  install("entity.health", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.health", args, &s)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)s.health);
+  });
+
+  install("entity.alive", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.alive", args, &s)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(s.alive);
+  });
+
+  install("entity.distance_to", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.distance_to", args, &s)) return ScriptValue::Num(-1);
+    if (!services_.world) return ScriptValue::Num(-1);
+    const EntitySnapshot self = services_.world->GetEntity(services_.localPlayer);
+    if (!self.id.raw && !self.id.runtime) {
+      ctx.RaiseError("entity.distance_to: no local player bound");
+      return ScriptValue::Num(-1);
+    }
+    return ScriptValue::Num((f64)s.position.Distance(self.position));
+  });
+
+  install("entity.nearest", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("entity.nearest: world unavailable"); return ScriptValue::Num(0); }
+    EntityType filter = EntityType::Unknown;
+    if (!ParseTypeFilter(args[0].ToDisplay(), &filter)) {
+      ctx.RaiseError("entity.nearest: unknown entity type '" + args[0].ToDisplay() + "'");
+      return ScriptValue::Num(0);
+    }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("entity.nearest: no level seam bound"); return ScriptValue::Num(0); }
+    const EntitySnapshot self = services_.world->GetEntity(services_.localPlayer);
+    if (!self.id.raw && !self.id.runtime) {
+      ctx.RaiseError("entity.nearest: no local player bound");
+      return ScriptValue::Num(0);
+    }
+    EntityId best;
+    f32 bestDist = 0;
+    bool found = false;
+    for (const EntityId& id : seam->AllEntities()) {
+      if (id.raw == self.id.raw) continue;   // never "the nearest entity is me"
+      EntitySnapshot s;
+      if (!seam->GetEntity(id, &s)) continue;
+      if (!s.alive) continue;
+      if (filter != EntityType::Unknown && s.type != filter) continue;
+      const f32 d = s.position.Distance(self.position);
+      if (!found || d < bestDist) { best = s.id; bestDist = d; found = true; }
+    }
+    return ScriptValue::Num(found ? (f64)best.raw : 0.0);
+  });
+
   //--- Network (granted, host-scoped) --------------------------------------
-  // Shares the async layer's egress path, so the grant is checked here and on
-  // every redirect hop. Returns the body, exactly as `await Http.get` does.
+  // Both calls go through the async layer's egress path, so the grant is
+  // checked here and on every redirect hop. They return an HttpResult table
+  // rather than raising, so a script can branch on the outcome.
   install("network.get", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
     const std::string url = args[0].ToDisplay();
     const f64 timeout = args[1].AsNumber();
-    return HttpGetBlocking(ctx, url, (long)timeout, services_.networkPolicy);
+    return HttpRequestBlocking(ctx, "GET", url, "", (long)timeout,
+                               services_.networkPolicy);
+  });
+
+  install("network.post", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    const std::string url = args[0].ToDisplay();
+    const std::string body = args[1].ToDisplay();
+    const f64 timeout = args[2].AsNumber();
+    return HttpRequestBlocking(ctx, "POST", url, body, (long)timeout,
+                               services_.networkPolicy);
   });
 
   //--- HUD (retained-mode widgets) -----------------------------------------
@@ -667,6 +984,38 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
       // real Serious thermal report triggers, and clears it when disabled.
       services_.governor->OnThermal(enabled ? ThermalState::Serious : ThermalState::Nominal);
     });
+    return ScriptValue::Nil();
+  });
+
+  //--- Profiler (flame graph) ----------------------------------------------
+  //
+  // Built on the module/hook spans in `Profiler`. The tree is aggregated since
+  // the last reset, so a script can see where a frame actually goes rather than
+  // just the frame time. Read-only: a script inspects the profiler, it cannot
+  // fabricate spans.
+  install("perf.flame", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.profiler) { ctx.RaiseError("perf.flame: profiler unavailable"); return ScriptValue::Nil(); }
+    return FlameToTable(services_.profiler->Flame());
+  });
+
+  install("perf.spans", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.profiler) { ctx.RaiseError("perf.spans: profiler unavailable"); return ScriptValue::Nil(); }
+    ScriptTable t;
+    int i = 0;
+    for (const auto& row : services_.profiler->Spans()) {
+      ScriptTable e;
+      e["name"] = ScriptValue::Str(row.first);
+      e["total_ms"] = ScriptValue::Num(row.second.totalMs);
+      e["count"] = ScriptValue::Num((f64)row.second.count);
+      e["max_ms"] = ScriptValue::Num(row.second.maxMs);
+      t[std::to_string(i++)] = ScriptValue::Tbl(std::move(e));
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("perf.flame_reset", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.profiler) { ctx.RaiseError("perf.flame_reset: profiler unavailable"); return ScriptValue::Nil(); }
+    services_.profiler->FlameReset();
     return ScriptValue::Nil();
   });
 
@@ -995,6 +1344,737 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
   install("package.clear", [this](ScriptContext&, const std::vector<ScriptValue>&) {
     if (services_.packages) services_.packages->Clear();
     return ScriptValue::Nil();
+  });
+
+  //--- Record (record & replay the world stream) ----------------------------
+  //
+  // The recorder is driven by the World module tick; these bindings only
+  // control the session and read the tape. `record.save` returns a whole JSON
+  // document a script can hand to `fs.write`, so a failing session is captured
+  // for a bug report. Everything fails closed when no recorder is bound.
+  install("record.start", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) { ctx.RaiseError("record.start: recorder unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.recorder->Start());
+  });
+
+  install("record.stop", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) { ctx.RaiseError("record.stop: recorder unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.recorder->Stop());
+  });
+
+  install("record.recording", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.recorder->recording());
+  });
+
+  install("record.frames", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.recorder->frames());
+  });
+
+  install("record.overflowed", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.recorder->overflowed());
+  });
+
+  install("record.save", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) { ctx.RaiseError("record.save: recorder unavailable"); return ScriptValue::Str(""); }
+    return ScriptValue::Str(services_.recorder->Save());
+  });
+
+  install("record.load", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.recorder) { ctx.RaiseError("record.load: recorder unavailable"); return ScriptValue::Bool(false); }
+    // The whole document is validated before anything is adopted, so a bad tape
+    // never half-loads and never disturbs the current one.
+    return ScriptValue::Bool(services_.recorder->Load(args[0].ToDisplay()));
+  });
+
+  install("record.clear", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.recorder) services_.recorder->Clear();
+    return ScriptValue::Nil();
+  });
+
+  install("record.replay_step", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.recorder->ReplayStep());
+  });
+
+  install("record.replay_seek", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.recorder) { ctx.RaiseError("record.replay_seek: recorder unavailable"); return ScriptValue::Bool(false); }
+    const f64 n = args[0].AsNumber();
+    // A negative or non-finite index cannot name a frame; refuse it rather than
+    // casting an out-of-range float to size_t.
+    if (!std::isfinite(n) || n < 0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.recorder->ReplaySeek((size_t)n));
+  });
+
+  install("record.replay_rewind", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.recorder) services_.recorder->ReplayRewind();
+    return ScriptValue::Nil();
+  });
+
+  install("record.replay_tick", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.recorder->ReplayTick());
+  });
+
+  install("record.replay_index", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)services_.recorder->ReplayIndex());
+  });
+
+  install("record.replay_end", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.recorder) return ScriptValue::Bool(true);
+    return ScriptValue::Bool(services_.recorder->ReplayAtEnd());
+  });
+
+  //--- Fs (sandboxed file store) --------------------------------------------
+  //
+  // The store validates every path and enforces the size/count caps, so these
+  // bindings only translate values. A refused path or an over-cap write reports
+  // false; nothing here throws for a script's own bad input.
+  install("fs.write", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.files) { ctx.RaiseError("fs.write: file store unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.files->Write(args[0].ToDisplay(), args[1].ToDisplay()));
+  });
+
+  install("fs.read", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.files) { ctx.RaiseError("fs.read: file store unavailable"); return ScriptValue::Str(""); }
+    std::string data;
+    if (!services_.files->Read(args[0].ToDisplay(), &data)) return ScriptValue::Str("");
+    return ScriptValue::Str(data);
+  });
+
+  install("fs.append", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.files) { ctx.RaiseError("fs.append: file store unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.files->Append(args[0].ToDisplay(), args[1].ToDisplay()));
+  });
+
+  install("fs.exists", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.files) { ctx.RaiseError("fs.exists: file store unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.files->Exists(args[0].ToDisplay()));
+  });
+
+  install("fs.remove", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.files) { ctx.RaiseError("fs.remove: file store unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.files->Remove(args[0].ToDisplay()));
+  });
+
+  install("fs.size", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.files) { ctx.RaiseError("fs.size: file store unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.files->Size(args[0].ToDisplay()));
+  });
+
+  install("fs.list", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.files) { ctx.RaiseError("fs.list: file store unavailable"); return ScriptValue::Str(""); }
+    return ScriptValue::Str(services_.files->List(args[0].ToDisplay()));
+  });
+
+  install("fs.count", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.files) { ctx.RaiseError("fs.count: file store unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.files->FileCount());
+  });
+
+  install("fs.total_bytes", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.files) { ctx.RaiseError("fs.total_bytes: file store unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.files->TotalBytes());
+  });
+
+  install("fs.clear", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.files) { ctx.RaiseError("fs.clear: file store unavailable"); return ScriptValue::Nil(); }
+    services_.files->Clear();
+    return ScriptValue::Nil();
+  });
+
+  //--- Audio (client-side cues) ---------------------------------------------
+  install("audio.play", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.audio) { ctx.RaiseError("audio.play: audio unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.audio->Play(args[0].ToDisplay(),
+                                                   (f32)args[1].AsNumber(),
+                                                   (f32)args[2].AsNumber()));
+  });
+
+  install("audio.set_volume", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.audio) { ctx.RaiseError("audio.set_volume: audio unavailable"); return ScriptValue::Nil(); }
+    services_.audio->SetVolume((f32)args[0].AsNumber());
+    return ScriptValue::Nil();
+  });
+
+  install("audio.volume", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.audio) { ctx.RaiseError("audio.volume: audio unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.audio->volume());
+  });
+
+  install("audio.set_muted", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.audio) { ctx.RaiseError("audio.set_muted: audio unavailable"); return ScriptValue::Nil(); }
+    services_.audio->SetMuted(args[0].Truthy());
+    return ScriptValue::Nil();
+  });
+
+  install("audio.muted", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.audio) { ctx.RaiseError("audio.muted: audio unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.audio->muted());
+  });
+
+  install("audio.history", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.audio) { ctx.RaiseError("audio.history: audio unavailable"); return ScriptValue::Str(""); }
+    std::string out;
+    for (const AudioCue& c : services_.audio->History()) {
+      if (!out.empty()) out += '\n';
+      out += c.name + ":" + std::to_string(c.volume) + ":" + std::to_string(c.pitch);
+    }
+    return ScriptValue::Str(out);
+  });
+
+  install("audio.history_count", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.audio) { ctx.RaiseError("audio.history_count: audio unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.audio->HistoryCount());
+  });
+
+  install("audio.clear_history", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.audio) { ctx.RaiseError("audio.clear_history: audio unavailable"); return ScriptValue::Nil(); }
+    services_.audio->ClearHistory();
+    return ScriptValue::Nil();
+  });
+
+  //--- Pvp (the client-side overlay read-outs) ------------------------------
+  //
+  // The overlay owns the widgets and turns local data into draw calls; these
+  // bindings expose its read-outs and its section switches. Nothing here writes
+  // game state: a script reads what a normal client already shows.
+  install("pvp.cps", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.cps: pvp overlay unavailable"); return ScriptValue::Num(0); }
+    const std::string b = Lower(args[0].ToDisplay());
+    MouseButton button;
+    if (b == "left") button = MouseButton::Left;
+    else if (b == "right") button = MouseButton::Right;
+    else {
+      ctx.RaiseError("pvp.cps: button must be \"left\" or \"right\"");
+      return ScriptValue::Num(0);
+    }
+    return ScriptValue::Num(services_.pvp->clicksPerSecond(button));
+  });
+
+  install("pvp.combo", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.combo: pvp overlay unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.pvp->combo());
+  });
+
+  install("pvp.combo_active", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.combo_active: pvp overlay unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.pvp->comboActive());
+  });
+
+  install("pvp.session", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.session: pvp overlay unavailable"); return ScriptValue::Nil(); }
+    const SessionStats& s = services_.pvp->session();
+    ScriptTable t;
+    t["damage_dealt"] = ScriptValue::Num(s.damageDealt);
+    t["damage_taken"] = ScriptValue::Num(s.damageTaken);
+    t["kills"] = ScriptValue::Num((f64)s.kills);
+    t["deaths"] = ScriptValue::Num((f64)s.deaths);
+    t["hits"] = ScriptValue::Num((f64)s.hits);
+    t["peak_dps"] = ScriptValue::Num((f64)s.peakDps);
+    t["kd"] = ScriptValue::Num(s.Kd());
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("pvp.armor", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.armor: pvp overlay unavailable"); return ScriptValue::Nil(); }
+    ScriptTable t;
+    int n = 0;
+    for (const ArmorPiece& p : services_.pvp->armor()) {
+      ScriptTable e;
+      e["name"] = ScriptValue::Str(p.name);
+      e["durability"] = ScriptValue::Num((f64)p.durability);
+      e["max_durability"] = ScriptValue::Num((f64)p.maxDurability);
+      e["fraction"] = ScriptValue::Num((f64)p.Fraction());
+      t[std::to_string(n++)] = ScriptValue::Tbl(std::move(e));
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("pvp.effects", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.effects: pvp overlay unavailable"); return ScriptValue::Nil(); }
+    ScriptTable t;
+    int n = 0;
+    for (const EffectState& e : services_.pvp->effects()) {
+      ScriptTable s;
+      s["name"] = ScriptValue::Str(e.name);
+      s["amplifier"] = ScriptValue::Num((f64)e.amplifier);
+      s["seconds_left"] = ScriptValue::Num((f64)e.secondsLeft);
+      s["ambient"] = ScriptValue::Bool(e.ambient);
+      t[std::to_string(n++)] = ScriptValue::Tbl(std::move(s));
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("pvp.net", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.net: pvp overlay unavailable"); return ScriptValue::Nil(); }
+    const NetStats& s = services_.pvp->netStats();
+    ScriptTable t;
+    t["ping_ms"] = ScriptValue::Num((f64)s.pingMs);
+    t["tps"] = ScriptValue::Num((f64)s.tps);
+    t["fps"] = ScriptValue::Num((f64)s.fps);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("pvp.target", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.target: pvp overlay unavailable"); return ScriptValue::Nil(); }
+    const TargetInfo& g = services_.pvp->target();
+    ScriptTable t;
+    t["name"] = ScriptValue::Str(g.name);
+    t["health"] = ScriptValue::Num((f64)g.health);
+    t["max_health"] = ScriptValue::Num((f64)g.maxHealth);
+    t["distance"] = ScriptValue::Num((f64)g.distance);
+    t["armor"] = ScriptValue::Num((f64)g.armorPoints);
+    t["valid"] = ScriptValue::Bool(g.valid);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("pvp.health", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.health: pvp overlay unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.pvp->health());
+  });
+
+  install("pvp.max_health", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.max_health: pvp overlay unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.pvp->maxHealth());
+  });
+
+  install("pvp.set_config", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.set_config: pvp overlay unavailable"); return ScriptValue::Bool(false); }
+    // The call fully describes the config: start from all-off, enable the named
+    // sections. An unknown key is refused and nothing changes, so a typo cannot
+    // silently turn a section off.
+    PvpConfig c;
+    c.showCps = c.showKeystrokes = c.showCombo = c.showArmor = false;
+    c.showEffects = c.showNetStats = c.showTarget = c.showSession = false;
+    c.showDamagePopups = c.hitFlash = c.lowHealthVignette = false;
+
+    std::string cur;
+    auto apply = [&](const std::string& key) -> bool {
+      if (key.empty()) return true;
+      if (key == "cps") c.showCps = true;
+      else if (key == "keystrokes") c.showKeystrokes = true;
+      else if (key == "combo") c.showCombo = true;
+      else if (key == "armor") c.showArmor = true;
+      else if (key == "effects") c.showEffects = true;
+      else if (key == "net") c.showNetStats = true;
+      else if (key == "target") c.showTarget = true;
+      else if (key == "session") c.showSession = true;
+      else if (key == "popups") c.showDamagePopups = true;
+      else if (key == "hitflash") c.hitFlash = true;
+      else if (key == "vignette") c.lowHealthVignette = true;
+      else return false;
+      return true;
+    };
+    bool ok = true;
+    for (char ch : args[0].ToDisplay()) {
+      if (ch == '\n') {
+        if (!apply(cur)) { ok = false; break; }
+        cur.clear();
+      } else {
+        cur += ch;
+      }
+    }
+    if (ok && !apply(cur)) ok = false;
+    if (!ok) {
+      ctx.RaiseError("pvp.set_config: unknown section key");
+      return ScriptValue::Bool(false);
+    }
+    c.lowHealthThreshold = services_.pvp->config().lowHealthThreshold;
+    services_.pvp->SetConfig(c);
+    return ScriptValue::Bool(true);
+  });
+
+  install("pvp.config", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.config: pvp overlay unavailable"); return ScriptValue::Str(""); }
+    const PvpConfig& c = services_.pvp->config();
+    std::string out;
+    auto add = [&](const char* k, bool on) {
+      if (!on) return;
+      if (!out.empty()) out += '\n';
+      out += k;
+    };
+    add("cps", c.showCps);
+    add("keystrokes", c.showKeystrokes);
+    add("combo", c.showCombo);
+    add("armor", c.showArmor);
+    add("effects", c.showEffects);
+    add("net", c.showNetStats);
+    add("target", c.showTarget);
+    add("session", c.showSession);
+    add("popups", c.showDamagePopups);
+    add("hitflash", c.hitFlash);
+    add("vignette", c.lowHealthVignette);
+    return ScriptValue::Str(out);
+  });
+
+  install("pvp.attach", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp || !services_.hud) { ctx.RaiseError("pvp.attach: pvp overlay unavailable"); return ScriptValue::Bool(false); }
+    services_.pvp->Attach(*services_.hud);
+    return ScriptValue::Bool(services_.pvp->attached());
+  });
+
+  install("pvp.detach", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.detach: pvp overlay unavailable"); return ScriptValue::Nil(); }
+    services_.pvp->Detach();
+    return ScriptValue::Nil();
+  });
+
+  install("pvp.attached", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.attached: pvp overlay unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.pvp->attached());
+  });
+
+  install("pvp.low_health", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.pvp) { ctx.RaiseError("pvp.low_health: pvp overlay unavailable"); return ScriptValue::Bool(false); }
+    const f32 maxH = services_.pvp->maxHealth();
+    if (maxH <= 0) return ScriptValue::Bool(false);
+    const f32 frac = services_.pvp->health() / maxH;
+    const PvpConfig& c = services_.pvp->config();
+    return ScriptValue::Bool(c.lowHealthVignette && frac < c.lowHealthThreshold);
+  });
+
+  //--- Packets (read-only metadata inspection) ------------------------------
+  //
+  // The log holds headers, never payloads, so this cannot leak anyone's data.
+  // A script reads it to diagnose a connection; it can never write to it.
+  install("packets.recent", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.packets) { ctx.RaiseError("packets.recent: packet log unavailable"); return ScriptValue::Nil(); }
+    const f64 n = args[0].AsNumber();
+    // A negative or non-finite count means "all held"; otherwise take the last
+    // n records (newest first).
+    size_t max = 0;
+    if (std::isfinite(n) && n > 0) max = (size_t)n;
+    ScriptTable t;
+    int i = 0;
+    for (const PacketRecord& r : services_.packets->Recent(max)) {
+      ScriptTable e;
+      e["seq"] = ScriptValue::Num((f64)r.seq);
+      e["dir"] = ScriptValue::Str(PacketDirName(r.dir));
+      e["id"] = ScriptValue::Num((f64)r.id);
+      e["name"] = ScriptValue::Str(r.name);
+      e["bytes"] = ScriptValue::Num((f64)r.payloadLen);
+      e["time_ms"] = ScriptValue::Num((f64)r.timeMs);
+      t[std::to_string(i++)] = ScriptValue::Tbl(std::move(e));
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("packets.last", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.packets) { ctx.RaiseError("packets.last: packet log unavailable"); return ScriptValue::Nil(); }
+    PacketRecord r;
+    if (!services_.packets->Last(&r)) return ScriptValue::Nil();
+    ScriptTable e;
+    e["seq"] = ScriptValue::Num((f64)r.seq);
+    e["dir"] = ScriptValue::Str(PacketDirName(r.dir));
+    e["id"] = ScriptValue::Num((f64)r.id);
+    e["name"] = ScriptValue::Str(r.name);
+    e["bytes"] = ScriptValue::Num((f64)r.payloadLen);
+    e["time_ms"] = ScriptValue::Num((f64)r.timeMs);
+    return ScriptValue::Tbl(std::move(e));
+  });
+
+  install("packets.totals", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.packets) { ctx.RaiseError("packets.totals: packet log unavailable"); return ScriptValue::Nil(); }
+    const PacketTotals t = services_.packets->totals();
+    ScriptTable out;
+    out["inbound"] = ScriptValue::Num((f64)t.inbound);
+    out["outbound"] = ScriptValue::Num((f64)t.outbound);
+    out["inbound_bytes"] = ScriptValue::Num((f64)t.inboundBytes);
+    out["outbound_bytes"] = ScriptValue::Num((f64)t.outboundBytes);
+    out["dropped"] = ScriptValue::Num((f64)t.dropped);
+    out["total"] = ScriptValue::Num((f64)t.total());
+    return ScriptValue::Tbl(std::move(out));
+  });
+
+  install("packets.summary", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.packets) { ctx.RaiseError("packets.summary: packet log unavailable"); return ScriptValue::Nil(); }
+    const std::string d = Lower(args[0].AsString());
+    PacketDir dir = PacketDir::Count;
+    if (d == "inbound") dir = PacketDir::Inbound;
+    else if (d == "outbound") dir = PacketDir::Outbound;
+    else if (!d.empty()) {
+      ctx.RaiseError("packets.summary: dir must be \"inbound\", \"outbound\" or \"\"");
+      return ScriptValue::Nil();
+    }
+    ScriptTable t;
+    int i = 0;
+    for (const PacketIdStat& s : services_.packets->Summary(dir)) {
+      ScriptTable e;
+      e["id"] = ScriptValue::Num((f64)s.id);
+      e["name"] = ScriptValue::Str(s.name);
+      e["dir"] = ScriptValue::Str(PacketDirName(s.dir));
+      e["count"] = ScriptValue::Num((f64)s.count);
+      e["bytes"] = ScriptValue::Num((f64)s.bytes);
+      t[std::to_string(i++)] = ScriptValue::Tbl(std::move(e));
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("packets.count_of", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.packets) { ctx.RaiseError("packets.count_of: packet log unavailable"); return ScriptValue::Num(0); }
+    const f64 n = args[0].AsNumber();
+    if (!std::isfinite(n) || n < 0 || n > 4294967295.0) {
+      ctx.RaiseError("packets.count_of: id must be a non-negative 32-bit integer");
+      return ScriptValue::Num(0);
+    }
+    return ScriptValue::Num((f64)services_.packets->CountOf((u32)n));
+  });
+
+  install("packets.size", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.packets) { ctx.RaiseError("packets.size: packet log unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.packets->size());
+  });
+
+  install("packets.clear", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.packets) { ctx.RaiseError("packets.clear: packet log unavailable"); return ScriptValue::Nil(); }
+    services_.packets->Clear();
+    return ScriptValue::Nil();
+  });
+
+  //--- Mod (script modules + typed settings) --------------------------------
+  //
+  // The registry is pure data; a script declares its module and settings, the
+  // client renders them. Every write is validated against the declared kind and
+  // range inside the registry, so a bad value fails closed here too.
+  install("mod.create", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.create: module registry unavailable"); return ScriptValue::Num(0); }
+    const u64 h = services_.modules->Create(args[0].ToDisplay(), args[1].ToDisplay(),
+                                            "", "");
+    if (h == 0) {
+      // A zero handle means the name was empty or already taken; report why
+      // rather than handing back a handle that names nothing.
+      ctx.RaiseError("mod.create: module name is empty or already in use");
+      return ScriptValue::Num(0);
+    }
+    return ScriptValue::Num((f64)h);
+  });
+
+  install("mod.set_meta", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.set_meta: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->SetMeta((u64)args[0].AsNumber(),
+                                                        args[1].ToDisplay(),
+                                                        args[2].ToDisplay()));
+  });
+
+  install("mod.add_toggle", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.add_toggle: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->AddToggle((u64)args[0].AsNumber(),
+                                                          args[1].ToDisplay(),
+                                                          args[2].ToDisplay(),
+                                                          args[3].Truthy()));
+  });
+
+  install("mod.add_slider", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.add_slider: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->AddSlider((u64)args[0].AsNumber(),
+                                                          args[1].ToDisplay(),
+                                                          args[2].ToDisplay(),
+                                                          args[3].AsNumber(),
+                                                          args[4].AsNumber(),
+                                                          args[5].AsNumber()));
+  });
+
+  install("mod.add_select", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.add_select: module registry unavailable"); return ScriptValue::Bool(false); }
+    // Options arrive as a newline-separated list, the same shape the settings
+    // and module listings use, so a script builds one string either way.
+    std::vector<std::string> options;
+    std::string cur;
+    for (char c : args[3].ToDisplay()) {
+      if (c == '\n') { options.push_back(cur); cur.clear(); }
+      else cur += c;
+    }
+    options.push_back(cur);
+    return ScriptValue::Bool(services_.modules->AddSelect((u64)args[0].AsNumber(),
+                                                          args[1].ToDisplay(),
+                                                          args[2].ToDisplay(),
+                                                          options,
+                                                          (i64)args[4].AsNumber()));
+  });
+
+  install("mod.add_keybind", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.add_keybind: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->AddKeybind((u64)args[0].AsNumber(),
+                                                           args[1].ToDisplay(),
+                                                           args[2].ToDisplay(),
+                                                           args[3].ToDisplay()));
+  });
+
+  install("mod.add_text", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.add_text: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->AddText((u64)args[0].AsNumber(),
+                                                        args[1].ToDisplay(),
+                                                        args[2].ToDisplay(),
+                                                        args[3].ToDisplay()));
+  });
+
+  install("mod.add_button", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.add_button: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->AddButton((u64)args[0].AsNumber(),
+                                                          args[1].ToDisplay(),
+                                                          args[2].ToDisplay()));
+  });
+
+  install("mod.set_number", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.set_number: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->SetNumber((u64)args[0].AsNumber(),
+                                                          args[1].ToDisplay(),
+                                                          args[2].AsNumber()));
+  });
+
+  install("mod.set_text", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.set_text: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->SetText((u64)args[0].AsNumber(),
+                                                        args[1].ToDisplay(),
+                                                        args[2].ToDisplay()));
+  });
+
+  install("mod.press", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.press: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->Press((u64)args[0].AsNumber(),
+                                                      args[1].ToDisplay()));
+  });
+
+  install("mod.number", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.number: module registry unavailable"); return ScriptValue::Num(0); }
+    f64 v = 0;
+    if (!services_.modules->GetNumber((u64)args[0].AsNumber(), args[1].ToDisplay(), &v)) {
+      ctx.RaiseError("mod.number: no such setting");
+      return ScriptValue::Num(0);
+    }
+    return ScriptValue::Num(v);
+  });
+
+  install("mod.text", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.text: module registry unavailable"); return ScriptValue::Str(""); }
+    std::string v;
+    if (!services_.modules->GetText((u64)args[0].AsNumber(), args[1].ToDisplay(), &v)) {
+      ctx.RaiseError("mod.text: no such setting");
+      return ScriptValue::Str("");
+    }
+    return ScriptValue::Str(v);
+  });
+
+  install("mod.enabled", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.enabled: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->IsEnabled((u64)args[0].AsNumber()));
+  });
+
+  install("mod.set_enabled", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.set_enabled: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->SetEnabled((u64)args[0].AsNumber(),
+                                                           args[1].Truthy()));
+  });
+
+  install("mod.count", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.modules) { ctx.RaiseError("mod.count: module registry unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.modules->Count());
+  });
+
+  install("mod.get", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.get: module registry unavailable"); return ScriptValue::Nil(); }
+    const u64 h = (u64)args[0].AsNumber();
+    const std::string key = args[1].ToDisplay();
+    ScriptModuleInfo info;
+    if (!services_.modules->GetModule(h, &info)) {
+      ctx.RaiseError("mod.get: no such module");
+      return ScriptValue::Nil();
+    }
+    const SettingDef* def = nullptr;
+    for (const SettingDef& d : info.settings) {
+      if (d.key == key) { def = &d; break; }
+    }
+    if (!def) {
+      ctx.RaiseError("mod.get: no such setting");
+      return ScriptValue::Nil();
+    }
+    SettingValue v;
+    if (!services_.modules->Get(h, key, &v)) {
+      ctx.RaiseError("mod.get: no such setting");
+      return ScriptValue::Nil();
+    }
+    ScriptTable t;
+    t["key"] = ScriptValue::Str(def->key);
+    t["label"] = ScriptValue::Str(def->label);
+    t["kind"] = ScriptValue::Str(SettingKindName(def->kind));
+    t["number"] = ScriptValue::Num(v.number);
+    t["text"] = ScriptValue::Str(v.text);
+    t["pressed"] = ScriptValue::Bool(v.pressed);
+    t["min"] = ScriptValue::Num(def->min);
+    t["max"] = ScriptValue::Num(def->max);
+    std::string opts;
+    for (size_t i = 0; i < def->options.size(); ++i) {
+      if (i) opts += '\n';
+      opts += def->options[i];
+    }
+    t["options"] = ScriptValue::Str(opts);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("mod.info", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.info: module registry unavailable"); return ScriptValue::Nil(); }
+    ScriptModuleInfo info;
+    if (!services_.modules->GetModule((u64)args[0].AsNumber(), &info)) {
+      ctx.RaiseError("mod.info: no such module");
+      return ScriptValue::Nil();
+    }
+    ScriptTable t;
+    t["handle"] = ScriptValue::Num((f64)info.handle);
+    t["name"] = ScriptValue::Str(info.name);
+    t["description"] = ScriptValue::Str(info.description);
+    t["version"] = ScriptValue::Str(info.version);
+    t["author"] = ScriptValue::Str(info.author);
+    t["enabled"] = ScriptValue::Bool(info.enabled);
+    t["count"] = ScriptValue::Num((f64)info.settings.size());
+    ScriptTable settings;
+    int n = 0;
+    for (const SettingDef& d : info.settings) {
+      SettingValue v;
+      services_.modules->Get(info.handle, d.key, &v);
+      ScriptTable s;
+      s["key"] = ScriptValue::Str(d.key);
+      s["label"] = ScriptValue::Str(d.label);
+      s["kind"] = ScriptValue::Str(SettingKindName(d.kind));
+      s["number"] = ScriptValue::Num(v.number);
+      s["text"] = ScriptValue::Str(v.text);
+      s["pressed"] = ScriptValue::Bool(v.pressed);
+      s["min"] = ScriptValue::Num(d.min);
+      s["max"] = ScriptValue::Num(d.max);
+      settings[std::to_string(n++)] = ScriptValue::Tbl(std::move(s));
+    }
+    t["settings"] = ScriptValue::Tbl(std::move(settings));
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("mod.list", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.modules) { ctx.RaiseError("mod.list: module registry unavailable"); return ScriptValue::Str(""); }
+    return ScriptValue::Str(services_.modules->List());
+  });
+
+  install("mod.settings", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.settings: module registry unavailable"); return ScriptValue::Str(""); }
+    return ScriptValue::Str(services_.modules->SettingsOf((u64)args[0].AsNumber()));
+  });
+
+  install("mod.clear", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.modules) { ctx.RaiseError("mod.clear: module registry unavailable"); return ScriptValue::Nil(); }
+    services_.modules->Clear();
+    return ScriptValue::Nil();
+  });
+
+  install("mod.set_overlay", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.modules) { ctx.RaiseError("mod.set_overlay: module registry unavailable"); return ScriptValue::Nil(); }
+    services_.modules->SetOverlayVisible(args[0].Truthy());
+    return ScriptValue::Nil();
+  });
+
+  install("mod.overlay", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.modules) { ctx.RaiseError("mod.overlay: module registry unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.modules->overlayVisible());
   });
 
   return installed_.size();

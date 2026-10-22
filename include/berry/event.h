@@ -123,9 +123,22 @@ class BERRY_API Profiler {
     f64 maxMs = 0;
   };
 
+  /// One node of the aggregated call tree. `selfMs` excludes children;
+  /// `totalMs` is `selfMs` plus every descendant, so a parent's total is the
+  /// time actually spent inside it.
+  struct FlameNode {
+    std::string name;
+    f64 selfMs = 0;
+    f64 totalMs = 0;
+    u64 count = 0;
+    std::vector<FlameNode> children;
+  };
+
   static Profiler& Instance();
 
-  /// Start a named span; returns a token to end it.
+  /// Start a named span; returns a token to end it. Spans nest: a span opened
+  /// while another is open on the same thread becomes its child, so the tree
+  /// reflects the real call structure.
   u64 Begin(const char* name);
   /// Ends a span; records milliseconds and pushes to the ring for rendering.
   void End(u64 token);
@@ -135,15 +148,40 @@ class BERRY_API Profiler {
   void FrameClear();
   const std::unordered_map<std::string, f64>& LastFrame() const { return lastFrame_; }
 
+  /// The aggregated call tree since the last FlameReset. Children are sorted by
+  /// total time descending, so the expensive branch reads first.
+  FlameNode Flame() const;
+  /// Every named span's cumulative stats, highest total first. The flat view of
+  /// the same data, for a list-style display.
+  std::vector<std::pair<std::string, SpanStats>> Spans() const;
+  /// Drops the flame tree, the span stats and the last-frame ring, starting the
+  /// profiler over.
+  void FlameReset();
+
   void SetEnabled(bool e) { enabled_ = e; }
   bool enabled() const { return enabled_; }
 
  private:
   Profiler() = default;
-  struct Span { const char* name; u64 startNs; };
+  struct Span { std::string name; u64 startNs; void* node; };
+  /// Aggregation node with stable storage: children live behind unique_ptr so a
+  /// pointer taken while a span is open stays valid as siblings are added.
+  struct Agg {
+    std::string name;
+    f64 selfMs = 0;
+    u64 count = 0;
+    std::vector<std::unique_ptr<Agg>> children;
+  };
+
+  /// The per-thread open-span stack, so Begin knows a span's parent.
+  static std::vector<Agg*>& TlsStack();
+  static Agg* ChildFor(Agg* parent, const std::string& name);
+  static void CopyFlame(const Agg& src, FlameNode* out);
+
   std::unordered_map<u64, Span> active_;
   std::unordered_map<std::string, SpanStats> stats_;
   std::unordered_map<std::string, f64> lastFrame_;
+  Agg root_;
   mutable std::mutex mutex_;
   u64 nextId_ = 1;
   bool enabled_ = true;

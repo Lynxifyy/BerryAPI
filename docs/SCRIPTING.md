@@ -133,6 +133,16 @@ A network grant names a host, and the host is enforced on every request:
 - Redirects are followed by the caller, not the client, and every hop is
   re-checked against both the policy and the grant. A granted host cannot
   bounce a request to a host the script was never granted.
+- **TLS is not implemented yet.** Because the egress policy requires `https`
+  for public hosts, a real public request currently fails closed: the client
+  refuses `https://` rather than opening a plaintext socket to port 443. Only
+  the harness path (loopback, where the policy is relaxed to permit `http`)
+  completes end to end. This is deliberate — a silent downgrade would send the
+  grant's traffic in the clear — and it is the reason `network.get` and
+  `network.post` report a `status` of 0 with an `error` rather than raising.
+- The response body is capped (4 MiB by default); a larger body is clipped and
+  the `truncated` field is set, so a streaming server cannot exhaust the
+  script worker's memory.
 
 The policy is a pure function (`UrlPolicy::Check`), so it is unit-testable and
 reproducible; the harness relaxes it for loopback only.
@@ -227,14 +237,30 @@ order they execute. Invalid arguments (a non-positive zoom, an out-of-range
 target FPS, an unknown tween property) fail the call instead of silently
 clamping.
 
-#### Read-only local reads (`Player`, `World`, `Perf`)
+#### Read-only local reads (`Player`, `World`, `Entity`, `Perf`)
 
 The read-only surface exposes state the local client already holds, and nothing
 else. `Player.*` resolves the *local* player through the World seam; every read
 fails closed (raises an error) when no local player is bound, so a script sees
 "no player" rather than another entity's state or a fabricated vector. `World.*`
 adds `entity_count`, `time`, `is_day` and `is_raining`, all through the same
-seam. `Perf.*` adds `stats` (avg/p95/p99/min/max/FPS), `quality` and
+seam, plus three richer reads:
+
+- `world.entities_within(within, type)` returns a table keyed `"0"`, `"1"`, … of
+  entity tables (`id`, `runtime`, `type`, `x/y/z`, `vx/vy/vz`, `yaw/pitch`,
+  `health`, `max_health`, `alive`, `on_ground`, `name`, `distance`), sorted by id
+  so the order is stable across ticks, with a `count` field. `type` is `""`,
+  `"any"` or a name; an unknown name is refused rather than matching everything.
+- `world.raycast_block(max_dist)` / `world.raycast_entity(max_dist)` cast from
+  the local player's eye (feet + 1.62) along its look direction and return
+  `{hit, …}`.
+- `Entity.*` reads one entity by its **raw** id: `get`, `type_name`, `position`,
+  `velocity`, `health`, `alive`, `distance_to`, and `nearest(type)` (the closest
+  alive entity of a type, never the local player). A zero or unknown id, or an
+  unbound seam, fails closed — a stale id yields "absent", never another
+  entity's state.
+
+`Perf.*` adds `stats` (avg/p95/p99/min/max/FPS), `quality` and
 `set_platform`. Coordinates a script hands to the renderer are sanitised: a NaN
 or infinity becomes 0 before it can reach the draw list.
 
@@ -243,6 +269,37 @@ or infinity becomes 0 before it can reach the draw list.
 The client-facing modules are services that draw through `Berry::Render`, not
 new strict modules — the strict module set stays
 `Combat`/`Render`/`World`/`Network`.
+
+### Sandboxed file store (`fs.h`)
+
+A script gets its own directory and nothing else. `ValidateScriptPath` is the
+whole sandbox and it is a pure function of the path: no absolute path, no
+backslash, no drive letter, no control character, no empty segment, no `.` and
+no `..`, a bounded length and depth. On top of that sit caps — per file, in
+total and on the file count — so a write loop cannot exhaust memory. Every
+`fs.*` call fails closed (false / empty) rather than throwing.
+
+### Audio cues (`audio.h`)
+
+`audio.play` plays a named cue; the device backend decides what the name means.
+A cue is a sound the local player hears, so nothing here is authoritative and
+nothing leaves the client. A malformed name is refused, a muted play is dropped
+rather than queued, and volume/pitch are clamped. With no backend bound, a play
+reports false.
+
+### Script modules + settings (`scriptmod.h`)
+
+A script ships a MODULE: a named unit with metadata and a set of typed settings
+(toggle, slider, select, keybind, text, button). The registry is pure data — it
+never reads game memory — so it runs headless, and it is what the UI renders.
+A setting's type is fixed at declaration, so a later write is validated against
+it: a toggle accepts only 0/1, a slider rejects an out-of-range value, a select
+rejects an out-of-range index, and a slider whose `max` is below its `min`, a
+select with no options, or a duplicate/illegal key is refused outright. Nothing
+clamps silently. A Button press is a one-shot edge, consumed by the read, so a
+polling caller cannot see the same press twice. The `mod.*` bindings expose all
+of this to a script; the module overlay (off by default) draws the list through
+`Berry::Render`.
 
 ### HUD (`hud.h`)
 
@@ -268,6 +325,37 @@ rows, ping/TPS/FPS line, target panel, session stats, floating damage numbers,
 hit flash and a low-health vignette. Every widget renders state the local
 client already owns, so the overlay cannot become an ESP.
 
+The `pvp.*` bindings (capability `hud`) expose the read-outs — `cps`, `combo`,
+`session`, `armor`, `effects`, `net`, `target`, `health` — and the section
+switches. `pvp.set_config` fully describes the config from a newline list of
+enabled keys, so a key that is not named is off; an unknown key is refused and
+leaves the config unchanged rather than silently dropping a section.
+
+### Packet inspection (`packet.h`)
+
+A read-only log of packet metadata: a sequence number, direction, protocol id,
+a name, a byte length and a timestamp. It never stores payload bytes, and it is
+built so it cannot — a packet's body is other players' data, and the useful
+questions (am I being packet-spammed, is this id new since the update, how much
+am I sending) are all answered by the header.
+
+The log is bounded: a fixed ring of the most recent records plus running
+totals, so a flood cannot grow it without limit. An oversized payload length is
+refused rather than counted, so a hostile header cannot inflate the byte totals.
+
+The `packets.*` bindings carry the distinct `packets` capability — inspecting
+packets is a different authority from sending them, so it is not reachable with
+a `network` grant:
+
+- `packets.recent(max)` — newest first, `max` of 0 means all held; each entry is
+  `{seq, dir, id, name, bytes, time_ms}`.
+- `packets.last()` — the most recent entry, or nil.
+- `packets.totals()` — `{inbound, outbound, inbound_bytes, outbound_bytes,
+  dropped, total}`.
+- `packets.summary(dir)` — per-id totals, highest count first, capped; `dir` is
+  `"inbound"`, `"outbound"` or `""` for both.
+- `packets.count_of(id)`, `packets.size()`, `packets.clear()`.
+
 ### Performance governor (`perf.h`)
 
 The adaptive FPS governor: it watches rolling frame time and trades quality for
@@ -291,6 +379,26 @@ for a device class (`MobileLow`/`MobileHigh`/`Desktop`/`Generic`), and
 animate/don't and spawn/don't decisions, including per-category particle caps
 and a screen-size cull for ambient particles. `FrameStats` reports p99 and
 `FrameHistogram` shows the shape of the tail.
+
+### Profiler flame graph (`event.h`)
+
+`Profiler` aggregates named spans into a call tree. `ProfilerScope` opens a span
+for the life of a scope; spans nest, so a span opened while another is open on
+the same thread becomes its child. Each node carries `selfMs` (time excluding
+children) and `totalMs` (self plus descendants), so a parent's total is the time
+actually spent inside it. Repeats of a name aggregate into one node, and
+children are ordered by total time descending so the expensive branch reads
+first. The open-span stack is per-thread: the render thread, the script worker
+and the game tick nest independently, and an `End` on a different thread charges
+the node its `Begin` opened without unbalancing the local stack.
+
+Spans are raised where work happens: one per module per tick (`TickAll`, named
+`Berry::Combat` etc.) and one per script hook (`RunHook`, named
+`<script>:<hook>`), including the resumed half of an async hook. The `perf.*`
+bindings read it back — `perf.flame` returns the nested tree, `perf.spans` the
+flat list, and `perf.flame_reset` starts it over. The read is a snapshot taken
+under the profiler lock, so a script can inspect the tree while the game keeps
+running.
 
 ### Cosmetics (`cosmetic.h`, `cosmetic_sync.h`, `pack.h`)
 
@@ -557,7 +665,9 @@ cell is not reported every tick.
 
 `UpdateWorldGrid(grid, seam, tick, bus)` is the one call a module makes each
 tick: it snapshots every entity the seam reports, ends the tick, and publishes
-the diff. From a script, the diff arrives as events, no polling:
+the diff. `Berry::World`'s tick handler drives it against the same seam the
+read-only queries use, so the grid is fed every tick the engine runs. From a
+script, the diff arrives as events, no polling:
 
 ```
 await Events.once("entityEntered")   -- "<id>:<type>"
@@ -623,6 +733,42 @@ replay raycasts only what was recorded and can never invent a block.
 
 A tape records what this client saw. It is a debugging aid and a test fixture,
 not a network protocol.
+
+### Driving a session from the tick (`session_recorder.h`)
+
+`SessionRecorder` is the piece that connects `record.h` to the running client.
+The World module feeds it the same seam and world-diff it already computed each
+tick, so a session records with no extra call site and no second read of the
+world:
+
+```
+engine.Recorder().Start();        // clears any previous tape
+// ... ticks run; the World module calls CaptureTick(seam, diff) each one ...
+engine.Recorder().Stop();         // keeps the tape
+std::string tape = engine.Recorder().Save();
+```
+
+It also owns the replay. `ReplaySeamHandle()` returns the `LevelSeam` over the
+current tape; hand it to the World module (`world->SetSeam(...)`) and every
+read-only query a script makes answers from the recording:
+
+```
+auto seam = engine.Recorder().ReplaySeamHandle();
+world->SetSeam(seam);
+while (engine.Recorder().ReplayStep()) {
+  // world.query / entity.* now answer from the tape, tick by tick
+}
+```
+
+Captured transitions are recorded on the same channels the grid publishes
+(`entityEntered`/`entityLeft`/`entityUpdated`), with the same `"<id>:<type>"`
+payload, so a replayed event feeds an `Events.once` listener unchanged.
+
+Scripts reach it through the `record.*` bindings (`api/berry.idl`): `start`,
+`stop`, `frames`, `save`, `load`, `clear`, and the `replay_*` controls. The
+whole surface carries the `world` grant, since it reads the world stream and
+nothing more; `save` returns one JSON document a script can hand to `fs.write`.
+Every binding fails closed when no recorder is bound.
 
 ## Local RPC & REPL (`rpc.h`)
 
