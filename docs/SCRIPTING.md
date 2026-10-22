@@ -562,3 +562,53 @@ pointer into game memory.
 A grid that fills to `kMaxEntities` refuses further adds rather than growing
 without bound, and `overflowed()` reports it. A full grid is a bug or a broken
 seam, not something to paper over.
+
+## Record & replay (`record.h`)
+
+The recorder sits between the seam and the world grid. Each tick it takes the
+same `EntitySnapshot`s the grid would see, plus any script events a module
+emits, and appends them to an in-memory tape. The tape serialises to one JSON
+document, so a failing session can be saved, attached to a bug report, and
+replayed on a developer machine.
+
+Replay is a `LevelSeam` implementation (`ReplaySeam`). Feed it a tape and it
+answers `AllEntities`/`GetEntity`/`GetTime`/`GetBlock`/raycasts from
+the recorded frames, advancing one frame per `Step()`. Because it implements the
+same seam every module already talks to, a script under test cannot tell it
+apart from the live game, which is the whole point.
+
+```
+Recording tape;
+Recorder rec(&tape);
+rec.BeginFrame(tick, seam.GetTime());
+rec.CaptureFrom(seam);           // every entity the seam reports
+rec.AddEvent("entityEntered", "42:player");
+rec.AddBlock(0, 64, 0, seam.GetBlock(Vec3(0, 64, 0)));
+rec.CommitFrame();
+...
+Recording back;
+Recording::FromJson(tape.ToJson(), &back);
+ReplaySeam replay(&back);
+while (replay.Step()) { /* the seam now answers frame by frame */ }
+```
+
+The tape is deliberately dumb and total:
+
+* it stores snapshots, not pointers, so it is portable across builds and carries
+  nothing that could be dereferenced on playback
+* a malformed tape is rejected wholesale, like every other data document in
+  BerryAPI; a partially-loaded tape never plays
+* it is bounded (`kMaxFrames`, `kMaxEntitiesPerFrame`, `kMaxEventsPerFrame`,
+  `kMaxBlocksPerFrame`), so a runaway recorder cannot exhaust memory
+* ticks must strictly increase, so a tape always replays in order
+* playback is read-only: `ReplaySeam` answers queries, it never writes to game
+  memory and never mutates the tape
+
+Before the first `Step` (and after the last frame) the seam reports an empty
+world, so a consumer that runs past the tape ends up with nothing rather than a
+stale frame. Blocks are recorded sparsely — only the coordinates a script
+actually read — so a tape stays small and never tries to snapshot the world; a
+replay raycasts only what was recorded and can never invent a block.
+
+A tape records what this client saw. It is a debugging aid and a test fixture,
+not a network protocol.
