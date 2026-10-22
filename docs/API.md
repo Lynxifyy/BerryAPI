@@ -121,9 +121,13 @@ Capability: `events`.
 
 Events (await with `Events.once`):
 
-- `hit(damage: number)` — Event channels scripts may await with Events.once.
+- `hit(damage: number)` — Event channels scripts may await with Events.once. The world-diff channels are driven by the reactive world grid: entityEntered and entityLeft carry \"<id>:<type>\", entityUpdated fires when an entity's position, health or state changed between ticks, and blockChanged carries \"x,y,z,block\". A script never polls for these.
 - `kill(victim: string)` — -
 - `tick_count(count: number)` — -
+- `entityEntered(entity: string)` — -
+- `entityLeft(entity: string)` — -
+- `entityUpdated(entity: string)` — -
+- `blockChanged(change: string)` — -
 
 ## Intent
 

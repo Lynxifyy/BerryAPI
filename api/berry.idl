@@ -117,10 +117,14 @@ module Cosmetic {
 
 module Events {
   capability events
-  doc "Event channels scripts may await with Events.once."
+  doc "Event channels scripts may await with Events.once. The world-diff channels are driven by the reactive world grid: entityEntered and entityLeft carry \"<id>:<type>\", entityUpdated fires when an entity's position, health or state changed between ticks, and blockChanged carries \"x,y,z,block\". A script never polls for these."
   event hit(damage: number)
   event kill(victim: string)
   event tick_count(count: number)
+  event entityEntered(entity: string)
+  event entityLeft(entity: string)
+  event entityUpdated(entity: string)
+  event blockChanged(change: string)
 }
 
 module Intent {

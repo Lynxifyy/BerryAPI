@@ -525,3 +525,40 @@ exposed through `berry.*` on purpose: a script surface that read arbitrary
 struct offsets would be an information leak and a crash waiting to happen. The
 layout table is what a module uses internally to decode a hooked argument; a
 script sees the decoded, already-vetted value.
+
+## Reactive world queries (`world_query.h`)
+
+Polling `world.query` every frame walks every entity every time. `SpatialGrid`
+keeps a uniform grid keyed by cell, so a radius query touches only the cells the
+radius overlaps, and a per-tick rebuild diffs against the previous tick.
+
+It is a pure data structure: it never reads game memory, the caller feeds it
+snapshots through `BeginTick`/`Add`/`EndTick`. That keeps `Berry::World`
+read-only, makes the whole thing testable on the host with no game running, and
+means the grid is a cache of what the seam already said, never a second source
+of truth about the world.
+
+Determinism matters as much as speed here. Query results come back sorted by id,
+and the diff is computed against a stable previous set, so the same input always
+produces the same events in the same order. `Updated` fires only when an
+observable field actually changed, so an entity that merely moved within its
+cell is not reported every tick.
+
+`UpdateWorldGrid(grid, seam, tick, bus)` is the one call a module makes each
+tick: it snapshots every entity the seam reports, ends the tick, and publishes
+the diff. From a script, the diff arrives as events, no polling:
+
+```
+await Events.once("entityEntered")   -- "<id>:<type>"
+await Events.once("entityLeft")      -- "<id>:<type>"
+await Events.once("entityUpdated")   -- "<id>:<type>"
+await Events.once("blockChanged")    -- "x,y,z,block"
+```
+
+`PublishWorldDiffToEvents` bridges the grid to the existing `Events` channels,
+so no new script module is needed. The payload is a short copied string, never a
+pointer into game memory.
+
+A grid that fills to `kMaxEntities` refuses further adds rather than growing
+without bound, and `overflowed()` reports it. A full grid is a bug or a broken
+seam, not something to paper over.

@@ -4,6 +4,34 @@
 namespace Berry {
 
 //----------------------------------------------------------------------------
+// EntityType names.
+//----------------------------------------------------------------------------
+
+const char* EntityTypeName(EntityType t) {
+  switch (t) {
+    case EntityType::Player: return "player";
+    case EntityType::Mob: return "mob";
+    case EntityType::Projectile: return "projectile";
+    case EntityType::Item: return "item";
+    case EntityType::Vehicle: return "vehicle";
+    case EntityType::Unknown: return "unknown";
+  }
+  return "unknown";
+}
+
+bool ParseEntityType(const std::string& name, EntityType* out) {
+  static const struct { const char* n; EntityType t; } kTable[] = {
+      {"player", EntityType::Player},     {"mob", EntityType::Mob},
+      {"projectile", EntityType::Projectile}, {"item", EntityType::Item},
+      {"vehicle", EntityType::Vehicle},   {"unknown", EntityType::Unknown},
+  };
+  for (const auto& e : kTable) {
+    if (name == e.n) { *out = e.t; return true; }
+  }
+  return false;
+}
+
+//----------------------------------------------------------------------------
 // ActorController impls.
 //
 // The Berry::World module logic (LevelSeam wiring, entity cache, KV store)
