@@ -84,11 +84,17 @@ inline const BindingSpec* BindingSpecs() {
       {"shader.set_param", CapKind::Render, 3, "Shader"},
       {"shader.param", CapKind::Render, 2, "Shader"},
       {"shader.clear", CapKind::Render, 0, "Shader"},
+      {"package.add", CapKind::FileIO, 1, "Package"},
+      {"package.has", CapKind::FileIO, 1, "Package"},
+      {"package.versions", CapKind::FileIO, 1, "Package"},
+      {"package.resolve", CapKind::FileIO, 2, "Package"},
+      {"package.require_path", CapKind::FileIO, 1, "Package"},
+      {"package.clear", CapKind::FileIO, 0, "Package"},
   };
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 63; }
+inline size_t BindingSpecCount() { return 69; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -192,6 +198,14 @@ inline const char* const kShaderNames[] = {
     "shader.param",
     "shader.clear",
 };
+inline const char* const kPackageNames[] = {
+    "package.add",
+    "package.has",
+    "package.versions",
+    "package.resolve",
+    "package.require_path",
+    "package.clear",
+};
 
 inline const ModuleBindings* ModuleBindingTable() {
   static const ModuleBindings kModules[] = {
@@ -206,11 +220,12 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Cosmetic", kCosmeticNames, 9},
       {"Intent", kIntentNames, 6},
       {"Shader", kShaderNames, 10},
+      {"Package", kPackageNames, 6},
   };
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 11; }
+inline size_t ModuleBindingCount() { return 12; }
 
 }  // namespace api
 }  // namespace Berry

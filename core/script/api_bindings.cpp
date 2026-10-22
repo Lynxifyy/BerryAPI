@@ -912,6 +912,85 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Nil();
   });
 
+  //--- Package (registry + resolver) ---------------------------------------
+  //
+  // Resolution is pure: it reads only the registered manifests, never the disk.
+  // Every binding fails closed when no registry is bound.
+  install("package.add", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.packages) {
+      ctx.RaiseError("package.add: package registry unavailable");
+      return ScriptValue::Bool(false);
+    }
+    std::string error;
+    const PackageError pe = services_.packages->AddJson(args[0].AsString(), &error);
+    if (pe != PackageError::Ok) {
+      ctx.RaiseError(std::string("package.add: ") + PackageErrorName(pe) +
+                     (error.empty() ? "" : (": " + error)));
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(true);
+  });
+
+  install("package.has", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.packages) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.packages->Has(args[0].AsString()));
+  });
+
+  install("package.versions", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.packages) return ScriptValue::Str("");
+    std::string out;
+    for (const SemVer& v : services_.packages->Versions(args[0].AsString())) {
+      if (!out.empty()) out += ",";
+      out += v.ToString();
+    }
+    return ScriptValue::Str(out);
+  });
+
+  install("package.resolve", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.packages) {
+      ctx.RaiseError("package.resolve: package registry unavailable");
+      return ScriptValue::Str("");
+    }
+    PackageDependency root;
+    root.name = args[0].AsString();
+    root.raw = args[1].AsString();
+    std::string cerr;
+    if (!VersionConstraint::Parse(root.raw, &root.constraint, &cerr)) {
+      ctx.RaiseError("package.resolve: bad constraint: " + cerr);
+      return ScriptValue::Str("");
+    }
+    const ResolveResult r = services_.packages->Resolve({root});
+    if (!r.ok()) {
+      ctx.RaiseError(std::string("package.resolve: ") + ResolveErrorName(r.error) +
+                     (r.detail.empty() ? "" : (": " + r.detail)));
+      return ScriptValue::Str("");
+    }
+    std::string out;
+    for (const auto& rp : r.order) {
+      if (!out.empty()) out += ",";
+      out += rp.name + "@" + rp.version;
+    }
+    return ScriptValue::Str(out);
+  });
+
+  install("package.require_path", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.packages) {
+      ctx.RaiseError("package.require_path: package registry unavailable");
+      return ScriptValue::Str("");
+    }
+    std::string name, entry, error;
+    if (!ResolveRequire(*services_.packages, args[0].AsString(), &name, &entry, &error)) {
+      ctx.RaiseError("package.require_path: " + error);
+      return ScriptValue::Str("");
+    }
+    return ScriptValue::Str(name + "/" + entry);
+  });
+
+  install("package.clear", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.packages) services_.packages->Clear();
+    return ScriptValue::Nil();
+  });
+
   return installed_.size();
 }
 

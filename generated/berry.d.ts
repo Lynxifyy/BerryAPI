@@ -129,6 +129,17 @@ export interface Shader {
   clear(): void;
 }
 
+/** Capability required: fileio. */
+export interface Package {
+  /** Script package registry and resolver. A package is a JSON manifest plus an entry file; a script declares dependencies with version constraints. Semver is parsed (1.10.0 sorts above 1.9.0, a pre-release below its release) and caret/tilde constraints are normalised at parse time. Resolution picks one version per package and orders them dependencies-first; it fails closed on a missing package, an unsatisfiable constraint, a conflict or a cycle. This module carries the fileio grant: it names packages that live on disk, even though resolution itself is pure. */
+  add(manifest_json: string): boolean;
+  has(name: string): boolean;
+  versions(name: string): string;
+  resolve(name: string, constraint: string): string;
+  require_path(path: string): string;
+  clear(): void;
+}
+
 /** Coroutine-native async facade (Phase 4). */
 export interface AsyncFacade {
   /** Suspend until `ticks` game ticks have elapsed. */
@@ -150,4 +161,5 @@ declare const Input: Input;
 declare const Cosmetic: Cosmetic;
 declare const Intent: Intent;
 declare const Shader: Shader;
+declare const Package: Package;
 declare const async: AsyncFacade;

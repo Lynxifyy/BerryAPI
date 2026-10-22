@@ -451,3 +451,40 @@ Scripts drive it through `shader.*` (see [API.md](API.md)): `register`,
 `param` and `clear`. The module carries the `render` grant, and every binding
 fails closed when no registry is bound.
 
+## Script packages (`package.h`)
+
+A package is a JSON manifest plus an entry file. A script declares the packages
+it needs and a version constraint for each; the resolver picks one version per
+package, orders them so dependencies load first, and fails closed when no
+consistent choice exists.
+
+Three deliberate choices:
+
+* **Semver is parsed, not string-compared.** `1.10.0` is newer than `1.9.0`, and
+  a pre-release (`1.0.0-rc.1`) sorts before its release. Build metadata
+  (`+sha.abc`) is accepted and dropped from the ordering, per the spec.
+* **Constraints are normalised at parse time.** `^1.2.3` and `~1.2.3` become
+  concrete `>=`/`<` pairs immediately, so satisfaction is a plain comparison and
+  the parser and the resolver cannot drift. `,` is AND, `||` is OR, `*` is any.
+* **Resolution is deterministic and bounded.** It is a fixpoint: recompute the
+  constraints implied by the currently chosen versions, re-pick the highest
+  version for each, repeat. If it does not stabilise within `kMaxRounds` it
+  reports a conflict rather than guessing, and a cycle is reported as a cycle.
+
+Nothing in the resolver touches the disk. A `PackageRegistry` is a set of
+manifests handed to it, so resolution is testable without a filesystem and a
+hostile manifest cannot cause I/O. Reading manifests is the loader's job.
+
+The manifest is validated wholesale, the way a pack is: an unknown key, a
+duplicate dependency, a bad name/version/entry or a malformed constraint
+registers nothing. `entry` must be a safe relative path, the same rule the
+script loader uses.
+
+`ResolveRequire` maps a `require` path — `"pkg"` or `"pkg/sub/file.luau"` — to a
+package and a file within it. A bare name resolves to the highest registered
+version's entry; a sub-path must stay inside the package.
+
+Scripts read the registry through `package.*` (see [API.md](API.md)): `add`,
+`has`, `versions`, `resolve`, `require_path` and `clear`. The module carries the
+`fileio` grant — it names packages that live on disk — and every binding fails
+closed when no registry is bound.

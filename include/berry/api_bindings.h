@@ -37,6 +37,7 @@
 #include "berry/intent.h"
 #include "berry/perf.h"
 #include "berry/pack.h"
+#include "berry/package.h"
 #include "berry/render.h"
 #include "berry/script.h"
 #include "berry/shader.h"
@@ -125,6 +126,9 @@ class BERRY_API ScriptApi {
     /// Script shader registry and post-process chain. Null makes the `shader.*`
     /// bindings fail closed (registration reports false).
     ShaderRegistry* shaders = nullptr;
+    /// Script package registry and resolver. Null makes the `package.*`
+    /// bindings fail closed (registration reports false).
+    PackageRegistry* packages = nullptr;
     /// The local player's entity id, used as the origin for `world.query`.
     /// Default 0 means "unknown", which makes the query fail closed.
     EntityId localPlayer;

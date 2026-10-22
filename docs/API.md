@@ -154,3 +154,16 @@ Capability: `render`.
 | `shader.set_param(name: string, param: string, value: number) -> bool` | `render` | - |
 | `shader.param(name: string, param: string) -> number` | `render` | - |
 | `shader.clear() -> nil` | `render` | - |
+
+## Package
+
+Capability: `fileio`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `package.add(manifest_json: string) -> bool` | `fileio` | Script package registry and resolver. A package is a JSON manifest plus an entry file; a script declares dependencies with version constraints. Semver is parsed (1.10.0 sorts above 1.9.0, a pre-release below its release) and caret/tilde constraints are normalised at parse time. Resolution picks one version per package and orders them dependencies-first; it fails closed on a missing package, an unsatisfiable constraint, a conflict or a cycle. This module carries the fileio grant: it names packages that live on disk, even though resolution itself is pure. |
+| `package.has(name: string) -> bool` | `fileio` | - |
+| `package.versions(name: string) -> string` | `fileio` | - |
+| `package.resolve(name: string, constraint: string) -> string` | `fileio` | - |
+| `package.require_path(path: string) -> string` | `fileio` | - |
+| `package.clear() -> nil` | `fileio` | - |
