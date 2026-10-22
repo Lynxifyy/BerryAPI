@@ -187,6 +187,12 @@ void ScriptApi::InitFrameHook() {
             services_.hud->Present(*services_.renderer, screen);
           }
         }
+        // Cosmetics draw through the same Renderer, after the HUD, so a worn
+        // asset presents through the one RenderSeam like every other overlay.
+        // DrawLocal needs no skeleton bound: it resolves nothing and returns 0.
+        if (services_.cosmetics && services_.renderer) {
+          services_.cosmetics->DrawLocal(*services_.renderer, services_.localPlayer);
+        }
         return EventResult::Continue;
       });
 }

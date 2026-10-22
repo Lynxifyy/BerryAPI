@@ -144,6 +144,44 @@ void Renderer::DrawCircle(const Vec2& c, f32 radius, const Rgba& color, i32 segm
   circles_.push_back(Circle2D{c, radius, color, segments});
 }
 
+bool Renderer::DrawBillboard(const Billboard3D& bb) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  if (!inFrame_ || !cam_.valid) return false;
+  if (!(bb.size.x > 0.0f) || !(bb.size.y > 0.0f)) return false;
+
+  // Project the centre, then a point offset by half the size along the camera's
+  // right and up axes, so the quad's screen size tracks perspective instead of
+  // assuming a fixed pixels-per-block. The axes come from the view matrix's
+  // rows, which are the world-space right/up of the camera.
+  Vec2 center;
+  if (!cam_.WorldToScreen(bb.position, &center)) return false;
+  const Vec3 right(cam_.view.m[0], cam_.view.m[4], cam_.view.m[8]);
+  const Vec3 up(cam_.view.m[1], cam_.view.m[5], cam_.view.m[9]);
+  Vec2 rx, ry;
+  if (!cam_.WorldToScreen(bb.position + right * (bb.size.x * 0.5f), &rx)) return false;
+  if (!cam_.WorldToScreen(bb.position + up * (bb.size.y * 0.5f), &ry)) return false;
+
+  const f32 halfW = std::fabs(rx.x - center.x);
+  const f32 halfH = std::fabs(ry.y - center.y);
+  if (!(halfW > 0.0f) || !(halfH > 0.0f)) return false;
+
+  // Rotate the half-extents by the roll to get the quad's corners.
+  const f32 roll = bb.rollDeg * Mathf::DEG2RAD;
+  const f32 cr = std::cos(roll), sr = std::sin(roll);
+  const Vec2 ex(halfW * cr, halfW * sr);
+  const Vec2 ey(-halfH * sr, halfH * cr);
+  Rect2D quad;
+  quad.min = Vec2(center.x - std::fabs(ex.x) - std::fabs(ey.x),
+                  center.y - std::fabs(ex.y) - std::fabs(ey.y));
+  quad.max = Vec2(center.x + std::fabs(ex.x) + std::fabs(ey.x),
+                  center.y + std::fabs(ex.y) + std::fabs(ey.y));
+  quad.color = bb.tint;
+  quad.fill = bb.tint;
+  quad.filled = true;
+  rects_.push_back(quad);
+  return true;
+}
+
 void Renderer::DrawTextCentered(const Vec2& center, const char* text, const Rgba& color, f32 scale) {
   // NOTE: without measuring glyph widths, horizontal centering is approximate
   // (assumes ~8px/char at scale 1). Acceptable for debug overlays.

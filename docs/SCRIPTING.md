@@ -309,6 +309,17 @@ by the bone and rotates it by the bone's yaw so a cape stays behind the back as
 the player turns. Nothing is drawn for a remote player until a verified loadout
 arrives.
 
+A seam is the device backend, not the on-screen path. To actually draw, a
+cosmetic goes through `Berry::Render` like every other overlay consumer:
+`DrawLocal`/`DrawRemote` resolve the loadout and queue each item as a
+world-space `Billboard3D`, and `Renderer::DrawBillboard` projects it with the
+renderer's camera into the same 2D batch that presents through the one
+`RenderSeam`. So a worn asset costs one projected quad per item and needs no new
+3D state in the backend; a billboard the camera cannot see (invalid camera,
+behind the camera, off-frustum, non-positive scale) is refused rather than drawn
+at a bogus spot. `ScriptApi`'s frame hook calls `DrawLocal` after the HUD, so a
+script that equips an asset sees it the same frame.
+
 Attached assets follow the player's motion. A `CosmeticAsset` carries a `trail`
 factor (0 rigid .. 1 fully slack); `ComposeAttach` folds in a trailing pose —
 lean back and lag opposite the motion, saturating at `CosmeticTrailFullSpeed`.

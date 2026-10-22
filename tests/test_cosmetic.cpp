@@ -1067,6 +1067,112 @@ static void TestVelocityBinding() {
   CHECK(z && Near((f32)z->at("z").AsNumber(), 0.0f));
 }
 
+//----------------------------------------------------------------------------
+// Drawing through Berry::Render
+//
+// A cosmetic must present through the one RenderSeam, like every other overlay
+// consumer: the service resolves its loadout into draw items and queues them as
+// world-space billboards the Renderer projects with its camera.
+//----------------------------------------------------------------------------
+
+static void TestDrawThroughRenderer() {
+  FreshRegistry();
+  Berry::Test::ShimSkeleton skel;
+  CosmeticService svc;
+  svc.SetSkeletonSource(&skel);
+  svc.Equip("builtin.cape.red");
+
+  Renderer r;
+  Berry::Test::CaptureRenderSeam seam;
+  r.BindSeam(&seam);
+
+  const EntityId e{1, 1};
+
+  // No camera yet: a billboard cannot be projected, so nothing is drawn and
+  // DrawLocal reports zero rather than drawing at a bogus spot.
+  r.BeginFrame(Vec2(1280, 720));
+  CHECK(svc.DrawLocal(r, e) == 0);
+  r.EndFrame();
+  CHECK(seam.rects == 0);
+
+  // A camera aimed at the rig's bone makes the cape project as one quad.
+  CameraState cam;
+  cam.width = 1280;
+  cam.height = 720;
+  cam.view = Mat4::LookAt(Vec3(10.0f, 64.0f, 15.0f), Vec3(10.0f, 64.0f, 5.0f),
+                          Vec3(0, 1, 0));
+  cam.projection = Mat4::Perspective(70, 1280.0f / 720.0f, 0.1f, 200.0f);
+  cam.valid = true;
+  r.SetCamera(cam);
+
+  r.BeginFrame(Vec2(1280, 720));
+  CHECK(svc.DrawLocal(r, e) == 1);
+  r.EndFrame();
+  CHECK(seam.rects == 1);
+  CHECK(seam.lines == 0 && seam.texts == 0 && seam.circles == 0);
+
+  // With no skeleton source there is nothing to resolve; still zero, no crash.
+  svc.SetSkeletonSource(nullptr);
+  r.BeginFrame(Vec2(1280, 720));
+  CHECK(svc.DrawLocal(r, e) == 0);
+  r.EndFrame();
+
+  // A non-positive scale is refused by the item composer, not drawn inverted.
+  svc.SetSkeletonSource(&skel);
+  CosmeticDrawItem bad;
+  bad.position = Vec3(10, 64, 5);
+  bad.scale = 0.0f;
+  r.BeginFrame(Vec2(1280, 720));
+  CHECK(!CosmeticService::DrawItem(r, bad));
+  r.EndFrame();
+  CHECK(seam.rects == 0);
+}
+
+static void TestDrawRemoteGated() {
+  FreshRegistry();
+  Berry::Test::ShimSkeleton skel;
+  CosmeticService svc;
+  svc.SetSkeletonSource(&skel);
+
+  Renderer r;
+  Berry::Test::CaptureRenderSeam seam;
+  r.BindSeam(&seam);
+  CameraState cam;
+  cam.width = 1280;
+  cam.height = 720;
+  cam.view = Mat4::LookAt(Vec3(10.0f, 64.0f, 15.0f), Vec3(10.0f, 64.0f, 5.0f),
+                          Vec3(0, 1, 0));
+  cam.projection = Mat4::Perspective(70, 1280.0f / 720.0f, 0.1f, 200.0f);
+  cam.valid = true;
+  r.SetCamera(cam);
+
+  const std::string peer = "alex";
+  CosmeticLoadout loadout;
+  CHECK(loadout.Equip(CosmeticRegistry::Instance().All()[0].id));
+  CosmeticOwnership::Instance().Grant(peer, CosmeticRegistry::Instance().All()[0].id);
+  CHECK(svc.SetRemoteLoadout(peer, loadout) == 1);
+
+  // Local-only (the default) draws nothing for a remote player.
+  r.BeginFrame(Vec2(1280, 720));
+  CHECK(svc.DrawRemote(r, peer, EntityId{2, 2}) == 0);
+  r.EndFrame();
+  CHECK(seam.rects == 0);
+
+  // Turning local-only off renders the verified remote loadout.
+  svc.SetLocalOnly(false);
+  r.BeginFrame(Vec2(1280, 720));
+  CHECK(svc.DrawRemote(r, peer, EntityId{2, 2}) == 1);
+  r.EndFrame();
+  CHECK(seam.rects == 1);
+
+  // An unknown peer still draws nothing.
+  r.BeginFrame(Vec2(1280, 720));
+  CHECK(svc.DrawRemote(r, "nobody", EntityId{3, 3}) == 0);
+  r.EndFrame();
+
+  CosmeticOwnership::Instance().Clear();
+}
+
 int main() {
   TestRegistryFailClosed();
   TestBuiltins();
@@ -1092,6 +1198,8 @@ int main() {
   TestSyncRevocation();
   TestCosmeticBindings();
   TestVelocityBinding();
+  TestDrawThroughRenderer();
+  TestDrawRemoteGated();
   if (g_fail == 0) printf("test_cosmetic: ALL OK\n");
   return g_fail;
 }

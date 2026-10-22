@@ -225,6 +225,43 @@ static void TestHudLifecycleAcrossThreads() {
   CHECK(sawHidden);
 }
 
+static void TestFrameHookDrawsCosmetics() {
+  CosmeticRegistry::Instance().Clear();
+  CosmeticRegistry::Instance().RegisterBuiltins();
+
+  Renderer renderer;
+  Berry::Test::CaptureRenderSeam seam;
+  renderer.BindSeam(&seam);
+  CameraState cam;
+  cam.width = 1280;
+  cam.height = 720;
+  cam.view = Mat4::LookAt(Vec3(10.0f, 64.0f, 15.0f), Vec3(10.0f, 64.0f, 5.0f),
+                          Vec3(0, 1, 0));
+  cam.projection = Mat4::Perspective(70, 1280.0f / 720.0f, 0.1f, 200.0f);
+  cam.valid = true;
+  renderer.SetCamera(cam);
+
+  Berry::Test::ShimSkeleton skel;
+  CosmeticService cosmetics;
+  cosmetics.SetSkeletonSource(&skel);
+  cosmetics.Equip("builtin.cape.red");
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.cosmetics = &cosmetics;
+  services.localPlayer = EntityId{1, 1};
+  ScriptApi api(services);
+
+  renderer.BeginFrame(Vec2(1280, 720));
+  Engine& eng = Engine::Instance();
+  eng.Bootstrap();
+  CHECK(eng.Attach());
+  eng.OnFrame();          // emits berry:frame; the hook draws the cape
+  renderer.EndFrame();
+  CHECK(seam.rects == 1);
+  eng.Detach();
+}
+
 static void TestQueueIsBoundedAndFailsClosed() {
   RenderCommandQueue q(2);
   int ran = 0;
@@ -648,6 +685,7 @@ int main() {
   TestHudLifecycleAcrossThreads();
   TestQueueIsBoundedAndFailsClosed();
   TestFrameHookDrainsQueue();
+  TestFrameHookDrawsCosmetics();
   TestPublishedReads();
   TestGovernorAndZoomWrites();
   TestCombatAndInputReads();

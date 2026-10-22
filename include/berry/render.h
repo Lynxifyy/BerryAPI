@@ -70,6 +70,24 @@ struct BERRY_API EspBox {
   std::string label;
 };
 
+/// A world-space quad the renderer projects with the current camera. This is
+/// how world geometry (a cosmetic asset on a bone, a nameplate, a marker)
+/// enters the overlay: the caller supplies a world centre and a world size, and
+/// the renderer turns it into the same 2D batch every other draw uses, so it
+/// presents through the one RenderSeam. Nothing here is 3D state the device
+/// backend must learn: a billboard is a quad facing the camera.
+struct BERRY_API Billboard3D {
+  Vec3 position;             // world centre
+  Vec2 size;                 // world width/height, in blocks
+  /// Screen-space roll, in degrees, about the quad's centre. 0 leaves the quad
+  /// upright. A caller approximating a world orientation maps it here.
+  f32 rollDeg = 0.0f;
+  Rgba tint;                 // fill and outline colour
+  u64 geometry = 0;          // opaque asset handle, for the device backend
+  u64 texture = 0;           // opaque asset handle, for the device backend
+  EntityId entity;           // whose billboard this is
+};
+
 class BERRY_API RenderSeam {
  public:
   virtual ~RenderSeam() = default;
@@ -137,6 +155,12 @@ class BERRY_API Renderer {
   void DrawText(const Vec2& pos, const char* text, const Rgba& color, f32 scale = 1);
   void DrawRect(const Rect2D& rect);
   void DrawCircle(const Vec2& c, f32 radius, const Rgba& color, i32 segments = 32);
+
+  /// Projects a world-space billboard with the current camera and queues it for
+  /// this frame. Returns false (and draws nothing) when the camera is invalid
+  /// or the billboard is off-screen or behind the camera, so a caller can skip
+  /// the work. Must be called between BeginFrame and EndFrame.
+  bool DrawBillboard(const Billboard3D& bb);
   void DrawTextCentered(const Vec2& center, const char* text, const Rgba& color, f32 scale);
 
   // ESP helpers (need camera)
