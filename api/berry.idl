@@ -54,13 +54,30 @@ module Render {
 
 module World {
   capability world
-  doc "Read-only world queries. The core never hands out raw pointers."
+  doc "Read-only world queries. The core never hands out raw pointers. `entities_within` returns a table keyed \"0\",\"1\",… each an entity table (id, type, x, y, z, health, alive, distance), sorted by id so the order is stable across ticks; a `type` of \"\" or \"any\" matches every type, and an unknown type name is refused rather than matching everything. The raycast helpers cast from the local player's eye along its look direction and return {hit, x, y, z, block, id, distance}."
   fn query(within: number) -> number
   fn entity_count() -> number
   fn block_at(x: number, y: number, z: number) -> string
   fn time() -> Table
   fn is_day() -> bool
   fn is_raining() -> bool
+  fn entities_within(within: number, type: string) -> Table
+  fn raycast_block(max_dist: number) -> Table
+  fn raycast_entity(max_dist: number) -> Table
+}
+
+module Entity {
+  capability world
+  doc "Read-only access to one entity by its raw id, plus neighbourhood lookups. Nothing here mutates an entity; the id is the raw engine id an entity table or an event carries. Reads fail closed (a zero id, an unknown id, or an unbound seam) rather than fabricating state."
+  fn get(id: number) -> Table
+  fn type_name(id: number) -> string
+  fn position(id: number) -> Vec3
+  fn velocity(id: number) -> Vec3
+  fn health(id: number) -> number
+  fn alive(id: number) -> bool
+  fn distance_to(id: number) -> number
+  doc "The raw id of the nearest alive entity of `type` to the local player, or 0 when none is in range. An unknown type name is refused (fails closed) rather than returning an arbitrary entity."
+  fn nearest(type: string) -> number
 }
 
 module Network {

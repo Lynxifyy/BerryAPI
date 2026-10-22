@@ -159,6 +159,53 @@ const char* KeyField(const std::string& key, bool* out) {
   return nullptr;
 }
 
+/// One entity as a script table. `from`, when non-zero, adds a `distance`
+/// field measured from that point, so a caller that already knows the origin
+/// (the local player) does not recompute it per entity.
+ScriptValue EntityTableValue(const EntitySnapshot& s, const Vec3* from = nullptr) {
+  ScriptTable t;
+  t["id"] = ScriptValue::Num((f64)s.id.raw);
+  t["runtime"] = ScriptValue::Num((f64)s.id.runtime);
+  t["type"] = ScriptValue::Str(EntityTypeName(s.type));
+  t["x"] = ScriptValue::Num((f64)s.position.x);
+  t["y"] = ScriptValue::Num((f64)s.position.y);
+  t["z"] = ScriptValue::Num((f64)s.position.z);
+  t["vx"] = ScriptValue::Num((f64)s.velocity.x);
+  t["vy"] = ScriptValue::Num((f64)s.velocity.y);
+  t["vz"] = ScriptValue::Num((f64)s.velocity.z);
+  t["yaw"] = ScriptValue::Num((f64)s.rotation.y);
+  t["pitch"] = ScriptValue::Num((f64)s.rotation.x);
+  t["health"] = ScriptValue::Num((f64)s.health);
+  t["max_health"] = ScriptValue::Num((f64)s.maxHealth);
+  t["alive"] = ScriptValue::Bool(s.alive);
+  t["on_ground"] = ScriptValue::Bool(s.onGround);
+  t["name"] = ScriptValue::Str(s.name);
+  if (from) t["distance"] = ScriptValue::Num((f64)s.position.Distance(*from));
+  return ScriptValue::Tbl(std::move(t));
+}
+
+/// Parses the type filter an `entities_within` / `nearest` call carries. An
+/// empty string or "any" means "no filter" (Unknown). Returns false for an
+/// unknown name, so a typo is an error rather than a silent match-everything.
+bool ParseTypeFilter(const std::string& raw, EntityType* out) {
+  const std::string name = Lower(raw);
+  if (name.empty() || name == "any" || name == "*") {
+    *out = EntityType::Unknown;
+    return true;
+  }
+  return ParseEntityType(name, out);
+}
+
+/// The local player's look direction from its (pitch, yaw) rotation, matching
+/// the MCPE convention (yaw about +Y, pitch up positive): the direction a
+/// raycast from the eye would follow.
+Vec3 LookDirection(const Vec3& rotationDeg) {
+  const f32 pitch = rotationDeg.x * 3.14159265358979f / 180.0f;
+  const f32 yaw = rotationDeg.y * 3.14159265358979f / 180.0f;
+  const f32 cp = std::cos(pitch);
+  return Vec3(-std::sin(yaw) * cp, -std::sin(pitch), std::cos(yaw) * cp).Normalized();
+}
+
 }  // namespace
 
 //----------------------------------------------------------------------------
@@ -514,6 +561,220 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     auto seam = services_.world->Seam();
     if (!seam) { ctx.RaiseError("world.is_raining: no level seam bound"); return ScriptValue::Bool(false); }
     return ScriptValue::Bool(seam->GetTime().rainLevel > 0.0f);
+  });
+
+  //--- World: richer read-only queries --------------------------------------
+  //
+  // These return tables rather than counts so a script can build a HUD from
+  // them without a second call per entity. Every one of them resolves through
+  // the seam and fails closed when it is unbound, exactly like the scalar
+  // reads above: no raw pointer ever leaves the core.
+  install("world.entities_within", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("world.entities_within: world unavailable"); return ScriptValue::Nil(); }
+    const f32 within = (f32)args[0].AsNumber();
+    if (!std::isfinite(within) || within < 0) {
+      ctx.RaiseError("world.entities_within: radius must be a non-negative number");
+      return ScriptValue::Nil();
+    }
+    EntityType filter = EntityType::Unknown;
+    if (!ParseTypeFilter(args[1].ToDisplay(), &filter)) {
+      ctx.RaiseError("world.entities_within: unknown entity type '" + args[1].ToDisplay() + "'");
+      return ScriptValue::Nil();
+    }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("world.entities_within: no level seam bound"); return ScriptValue::Nil(); }
+    const EntitySnapshot self = services_.world->GetEntity(services_.localPlayer);
+    if (!self.id.raw && !self.id.runtime) {
+      ctx.RaiseError("world.entities_within: no local player bound");
+      return ScriptValue::Nil();
+    }
+    // The seam returns ids; snapshot each and filter by type here so the shim
+    // and the device adapter share one definition of "within and matching".
+    std::vector<EntitySnapshot> found;
+    for (const EntityId& id : seam->EntitiesInRadius(self.position, within)) {
+      EntitySnapshot s;
+      if (!seam->GetEntity(id, &s)) continue;
+      if (filter != EntityType::Unknown && s.type != filter) continue;
+      found.push_back(s);
+    }
+    std::sort(found.begin(), found.end(), [](const EntitySnapshot& a, const EntitySnapshot& b) {
+      if (a.id.raw != b.id.raw) return a.id.raw < b.id.raw;
+      return a.id.runtime < b.id.runtime;
+    });
+    ScriptTable out;
+    int n = 0;
+    for (const EntitySnapshot& s : found) {
+      out[std::to_string(n++)] = EntityTableValue(s, &self.position);
+    }
+    out["count"] = ScriptValue::Num((f64)found.size());
+    return ScriptValue::Tbl(std::move(out));
+  });
+
+  // A raycast needs an origin and a direction. Both casts use the local
+  // player's eye (position + ~1.6 blocks) and look vector, so a script asks
+  // "what am I looking at" without ever naming a direction the client could not
+  // already see.
+  auto localEye = [this](ScriptContext& ctx, const char* who, Vec3* eye,
+                         Vec3* dir) -> bool {
+    if (!services_.world) { ctx.RaiseError(std::string(who) + ": world unavailable"); return false; }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError(std::string(who) + ": no level seam bound"); return false; }
+    const EntitySnapshot self = services_.world->GetEntity(services_.localPlayer);
+    if (!self.id.raw && !self.id.runtime) {
+      ctx.RaiseError(std::string(who) + ": no local player bound");
+      return false;
+    }
+    *eye = self.position + Vec3(0.0f, 1.62f, 0.0f);
+    *dir = LookDirection(self.rotation);
+    return true;
+  };
+
+  install("world.raycast_block", [this, localEye](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    const f32 maxDist = (f32)args[0].AsNumber();
+    if (!std::isfinite(maxDist) || maxDist <= 0) {
+      ctx.RaiseError("world.raycast_block: distance must be positive");
+      return ScriptValue::Nil();
+    }
+    Vec3 eye, dir;
+    if (!localEye(ctx, "world.raycast_block", &eye, &dir)) return ScriptValue::Nil();
+    auto seam = services_.world->Seam();
+    Vec3 pos;
+    u32 block = 0;
+    const bool hit = seam->RaycastBlock(eye, dir, maxDist, &pos, &block);
+    ScriptTable t;
+    t["hit"] = ScriptValue::Bool(hit);
+    t["x"] = ScriptValue::Num((f64)pos.x);
+    t["y"] = ScriptValue::Num((f64)pos.y);
+    t["z"] = ScriptValue::Num((f64)pos.z);
+    t["block"] = ScriptValue::Num((f64)block);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("world.raycast_entity", [this, localEye](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    const f32 maxDist = (f32)args[0].AsNumber();
+    if (!std::isfinite(maxDist) || maxDist <= 0) {
+      ctx.RaiseError("world.raycast_entity: distance must be positive");
+      return ScriptValue::Nil();
+    }
+    Vec3 eye, dir;
+    if (!localEye(ctx, "world.raycast_entity", &eye, &dir)) return ScriptValue::Nil();
+    auto seam = services_.world->Seam();
+    EntityId id;
+    f32 dist = 0;
+    const bool hit = seam->RaycastEntity(eye, dir, maxDist, &id, &dist);
+    ScriptTable t;
+    t["hit"] = ScriptValue::Bool(hit);
+    t["id"] = ScriptValue::Num((f64)id.raw);
+    t["runtime"] = ScriptValue::Num((f64)id.runtime);
+    t["distance"] = ScriptValue::Num((f64)dist);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  //--- Entity (read-only, by raw id) ---------------------------------------
+  //
+  // The id a script carries is the raw engine id: the one an entity table or an
+  // event payload holds. Reads fail closed on a zero/unknown id or an unbound
+  // seam, so a stale id yields "absent", never another entity's state.
+  auto entitySnapshot = [this](ScriptContext& ctx, const char* who,
+                               const std::vector<ScriptValue>& args,
+                               EntitySnapshot* out) -> bool {
+    if (!services_.world) { ctx.RaiseError(std::string(who) + ": world unavailable"); return false; }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError(std::string(who) + ": no level seam bound"); return false; }
+    const f64 raw = args[0].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0) {
+      ctx.RaiseError(std::string(who) + ": entity id must be a positive number");
+      return false;
+    }
+    EntityId id;
+    id.raw = (u64)raw;
+    // Resolve the runtime id through the seam when the caller only has the raw
+    // id: AllEntities gives the (raw, runtime) pairing the engine knows.
+    for (const EntityId& cand : seam->AllEntities()) {
+      if (cand.raw == id.raw) { id = cand; break; }
+    }
+    if (!seam->GetEntity(id, out)) {
+      ctx.RaiseError(std::string(who) + ": entity not present");
+      return false;
+    }
+    return true;
+  };
+
+  install("entity.get", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.get", args, &s)) return ScriptValue::Nil();
+    return EntityTableValue(s);
+  });
+
+  install("entity.type_name", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.type_name", args, &s)) return ScriptValue::Str("");
+    return ScriptValue::Str(EntityTypeName(s.type));
+  });
+
+  install("entity.position", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.position", args, &s)) return Vec3Value(Vec3());
+    return Vec3Value(s.position);
+  });
+
+  install("entity.velocity", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.velocity", args, &s)) return Vec3Value(Vec3());
+    return Vec3Value(s.velocity);
+  });
+
+  install("entity.health", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.health", args, &s)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)s.health);
+  });
+
+  install("entity.alive", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.alive", args, &s)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(s.alive);
+  });
+
+  install("entity.distance_to", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.distance_to", args, &s)) return ScriptValue::Num(-1);
+    if (!services_.world) return ScriptValue::Num(-1);
+    const EntitySnapshot self = services_.world->GetEntity(services_.localPlayer);
+    if (!self.id.raw && !self.id.runtime) {
+      ctx.RaiseError("entity.distance_to: no local player bound");
+      return ScriptValue::Num(-1);
+    }
+    return ScriptValue::Num((f64)s.position.Distance(self.position));
+  });
+
+  install("entity.nearest", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("entity.nearest: world unavailable"); return ScriptValue::Num(0); }
+    EntityType filter = EntityType::Unknown;
+    if (!ParseTypeFilter(args[0].ToDisplay(), &filter)) {
+      ctx.RaiseError("entity.nearest: unknown entity type '" + args[0].ToDisplay() + "'");
+      return ScriptValue::Num(0);
+    }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("entity.nearest: no level seam bound"); return ScriptValue::Num(0); }
+    const EntitySnapshot self = services_.world->GetEntity(services_.localPlayer);
+    if (!self.id.raw && !self.id.runtime) {
+      ctx.RaiseError("entity.nearest: no local player bound");
+      return ScriptValue::Num(0);
+    }
+    EntityId best;
+    f32 bestDist = 0;
+    bool found = false;
+    for (const EntityId& id : seam->AllEntities()) {
+      if (id.raw == self.id.raw) continue;   // never "the nearest entity is me"
+      EntitySnapshot s;
+      if (!seam->GetEntity(id, &s)) continue;
+      if (!s.alive) continue;
+      if (filter != EntityType::Unknown && s.type != filter) continue;
+      const f32 d = s.position.Distance(self.position);
+      if (!found || d < bestDist) { best = s.id; bestDist = d; found = true; }
+    }
+    return ScriptValue::Num(found ? (f64)best.raw : 0.0);
   });
 
   //--- Network (granted, host-scoped) --------------------------------------

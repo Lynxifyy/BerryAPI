@@ -42,13 +42,30 @@ export type Render = {
 
 -- Capability required: world.
 export type World = {
-  -- Read-only world queries. The core never hands out raw pointers.
+  -- Read-only world queries. The core never hands out raw pointers. `entities_within` returns a table keyed \"0\",\"1\",… each an entity table (id, type, x, y, z, health, alive, distance), sorted by id so the order is stable across ticks; a `type` of \"\" or \"any\" matches every type, and an unknown type name is refused rather than matching everything. The raycast helpers cast from the local player's eye along its look direction and return {hit, x, y, z, block, id, distance}.
   query: (within: number) -> number,
   entity_count: () -> number,
   block_at: (x: number, y: number, z: number) -> string,
   time: () -> {[string]: any},
   is_day: () -> boolean,
   is_raining: () -> boolean,
+  entities_within: (within: number, type: string) -> {[string]: any},
+  raycast_block: (max_dist: number) -> {[string]: any},
+  raycast_entity: (max_dist: number) -> {[string]: any},
+}
+
+-- Capability required: world.
+export type Entity = {
+  -- Read-only access to one entity by its raw id, plus neighbourhood lookups. Nothing here mutates an entity; the id is the raw engine id an entity table or an event carries. Reads fail closed (a zero id, an unknown id, or an unbound seam) rather than fabricating state.
+  get: (id: number) -> {[string]: any},
+  type_name: (id: number) -> string,
+  position: (id: number) -> Vec3,
+  velocity: (id: number) -> Vec3,
+  health: (id: number) -> number,
+  alive: (id: number) -> boolean,
+  distance_to: (id: number) -> number,
+  -- The raw id of the nearest alive entity of `type` to the local player, or 0 when none is in range. An unknown type name is refused (fails closed) rather than returning an arbitrary entity.
+  nearest: (type: string) -> number,
 }
 
 -- Capability required: network.

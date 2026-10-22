@@ -655,6 +655,150 @@ static void TestPerfStatsAndPlatform() {
   CHECK(governor.platform() == PlatformClass::Desktop);
 }
 
+//----------------------------------------------------------------------------
+// Read-only world / entity surface
+//----------------------------------------------------------------------------
+
+static void TestWorldAndEntityReads() {
+  Renderer renderer;
+  std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
+  WorldHandle* world = worldMod->Service<WorldHandle>();
+  CHECK(world != nullptr);
+
+  Berry::Test::ShimLevel level;
+  const EntityId self{1, 1};
+  EntitySnapshot me;
+  me.id = self;
+  me.type = EntityType::Player;
+  me.position = Vec3(0, 64, 0);
+  me.rotation = Vec3(0, 0, 0);   // looking along +Z
+  me.alive = true;
+  me.health = 20;
+  me.maxHealth = 20;
+  level.AddEntity(self, me);
+
+  const EntityId near{2, 2};
+  EntitySnapshot mob;
+  mob.id = near;
+  mob.type = EntityType::Mob;
+  mob.position = Vec3(0, 64, 5);   // 5 blocks along the look direction
+  mob.alive = true;
+  mob.health = 10;
+  mob.maxHealth = 20;
+  mob.name = "zombie";
+  level.AddEntity(near, mob);
+
+  const EntityId far{3, 3};
+  EntitySnapshot item;
+  item.id = far;
+  item.type = EntityType::Item;
+  item.position = Vec3(0, 64, 200);
+  item.alive = true;
+  level.AddEntity(far, item);
+
+  // The shim's entity raycast treats a hit as "within 1 block of the entity's
+  // origin". The local eye sits 1.62 above the player's feet, so a target at
+  // exactly eye height is what a straight-ahead cast actually strikes.
+  const EntityId ahead{4, 4};
+  EntitySnapshot proj;
+  proj.id = ahead;
+  proj.type = EntityType::Projectile;
+  proj.position = Vec3(0, 64.0f + 1.62f, 5);
+  proj.alive = true;
+  level.AddEntity(ahead, proj);
+
+  world->SetSeam(std::shared_ptr<LevelSeam>(&level, [](LevelSeam*) {}));
+
+  ScriptApi::Services services;
+  services.world = world;
+  services.renderer = &renderer;
+  services.localPlayer = self;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+
+  // entities_within: the local player, the mob and the projectile are all
+  // within 50 blocks; the far item is not. Sorted by id, each an entity table.
+  CHECK(Call(bindings, "world.entities_within",
+             {ScriptValue::Num(50), ScriptValue::Str("")}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(out.AsTable()->at("count").AsNumber() == 3);   // the far item is excluded
+  const ScriptTable* t0 = out.AsTable()->at("0").AsTable();
+  CHECK(t0 != nullptr);
+  CHECK(t0->at("id").AsNumber() == 1);
+  CHECK(t0->at("type").AsString() == "player");
+  CHECK(t0->at("distance").AsNumber() == 0);
+
+  // A type filter narrows to mobs only.
+  CHECK(Call(bindings, "world.entities_within",
+             {ScriptValue::Num(50), ScriptValue::Str("mob")}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("count").AsNumber() == 1);
+  CHECK(out.AsTable()->at("0").AsTable()->at("name").AsString() == "zombie");
+
+  // An unknown type name is refused, not treated as "any".
+  ScriptStatus st = Call(bindings, "world.entities_within",
+                         {ScriptValue::Num(50), ScriptValue::Str("dragon")},
+                         {"world"}, &out);
+  CHECK(st == ScriptStatus::Error);
+
+  // entity.get resolves by raw id and carries the runtime id too.
+  CHECK(Call(bindings, "entity.get", {ScriptValue::Num(2)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("runtime").AsNumber() == 2);
+  CHECK(out.AsTable()->at("health").AsNumber() == 10);
+  CHECK(Call(bindings, "entity.type_name", {ScriptValue::Num(2)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsString() == "mob");
+  CHECK(Call(bindings, "entity.alive", {ScriptValue::Num(2)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  // entity.distance_to measures from the local player.
+  CHECK(Call(bindings, "entity.distance_to", {ScriptValue::Num(2)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 5);
+
+  // A zero or unknown id fails closed rather than reading entity 0.
+  CHECK(Call(bindings, "entity.get", {ScriptValue::Num(0)}, {"world"}, &out) ==
+        ScriptStatus::Error);
+  CHECK(Call(bindings, "entity.get", {ScriptValue::Num(999)}, {"world"}, &out) ==
+        ScriptStatus::Error);
+
+  // entity.nearest skips the local player and respects the filter.
+  CHECK(Call(bindings, "entity.nearest", {ScriptValue::Str("")}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 2);   // the mob at 5 blocks, not me, not the far item
+  CHECK(Call(bindings, "entity.nearest", {ScriptValue::Str("item")}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 3);
+  CHECK(Call(bindings, "entity.nearest", {ScriptValue::Str("vehicle")}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);   // none of that type
+
+  // raycast_entity casts along the look direction (+Z) and finds the entity
+  // sitting at eye height; the ground-level mob is out of the cast's reach.
+  CHECK(Call(bindings, "world.raycast_entity", {ScriptValue::Num(10)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("hit").Truthy());
+  CHECK(out.AsTable()->at("id").AsNumber() == 4);
+  // raycast_block finds nothing in the shim, but the shape is still a table.
+  CHECK(Call(bindings, "world.raycast_block", {ScriptValue::Num(10)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(!out.AsTable()->at("hit").Truthy());
+
+  // Without a seam the reads fail closed with an error rather than crashing.
+  world->SetSeam(nullptr);
+  CHECK(Call(bindings, "world.entities_within",
+             {ScriptValue::Num(50), ScriptValue::Str("")}, {"world"}, &out) ==
+        ScriptStatus::Error);
+  CHECK(Call(bindings, "entity.get", {ScriptValue::Num(2)}, {"world"}, &out) ==
+        ScriptStatus::Error);
+}
+
 static void TestNetworkGetFailsClosed() {
   ScriptApi::Services services;
   ScriptApi api(services);
@@ -697,6 +841,7 @@ int main() {
   TestEveryIdlBindingIsInstalled();
   TestCapabilityGateOnDeclaredBindings();
   TestArityFailsClosed();
+  TestWorldAndEntityReads();
   TestNetworkGetFailsClosed();
   TestDrawCommandsAreQueuedThenApplied();
   TestHudLifecycleAcrossThreads();

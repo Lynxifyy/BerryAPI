@@ -49,12 +49,30 @@ Capability: `world`.
 
 | Function | Capability | Description |
 | --- | --- | --- |
-| `world.query(within: number) -> number` | `world` | Read-only world queries. The core never hands out raw pointers. |
+| `world.query(within: number) -> number` | `world` | Read-only world queries. The core never hands out raw pointers. `entities_within` returns a table keyed \"0\",\"1\",… each an entity table (id, type, x, y, z, health, alive, distance), sorted by id so the order is stable across ticks; a `type` of \"\" or \"any\" matches every type, and an unknown type name is refused rather than matching everything. The raycast helpers cast from the local player's eye along its look direction and return {hit, x, y, z, block, id, distance}. |
 | `world.entity_count() -> number` | `world` | - |
 | `world.block_at(x: number, y: number, z: number) -> string` | `world` | - |
 | `world.time() -> Table` | `world` | - |
 | `world.is_day() -> bool` | `world` | - |
 | `world.is_raining() -> bool` | `world` | - |
+| `world.entities_within(within: number, type: string) -> Table` | `world` | - |
+| `world.raycast_block(max_dist: number) -> Table` | `world` | - |
+| `world.raycast_entity(max_dist: number) -> Table` | `world` | - |
+
+## Entity
+
+Capability: `world`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `entity.get(id: number) -> Table` | `world` | Read-only access to one entity by its raw id, plus neighbourhood lookups. Nothing here mutates an entity; the id is the raw engine id an entity table or an event carries. Reads fail closed (a zero id, an unknown id, or an unbound seam) rather than fabricating state. |
+| `entity.type_name(id: number) -> string` | `world` | - |
+| `entity.position(id: number) -> Vec3` | `world` | - |
+| `entity.velocity(id: number) -> Vec3` | `world` | - |
+| `entity.health(id: number) -> number` | `world` | - |
+| `entity.alive(id: number) -> bool` | `world` | - |
+| `entity.distance_to(id: number) -> number` | `world` | - |
+| `entity.nearest(type: string) -> number` | `world` | The raw id of the nearest alive entity of `type` to the local player, or 0 when none is in range. An unknown type name is refused (fails closed) rather than returning an arbitrary entity. |
 
 ## Network
 

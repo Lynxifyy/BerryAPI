@@ -237,14 +237,30 @@ order they execute. Invalid arguments (a non-positive zoom, an out-of-range
 target FPS, an unknown tween property) fail the call instead of silently
 clamping.
 
-#### Read-only local reads (`Player`, `World`, `Perf`)
+#### Read-only local reads (`Player`, `World`, `Entity`, `Perf`)
 
 The read-only surface exposes state the local client already holds, and nothing
 else. `Player.*` resolves the *local* player through the World seam; every read
 fails closed (raises an error) when no local player is bound, so a script sees
 "no player" rather than another entity's state or a fabricated vector. `World.*`
 adds `entity_count`, `time`, `is_day` and `is_raining`, all through the same
-seam. `Perf.*` adds `stats` (avg/p95/p99/min/max/FPS), `quality` and
+seam, plus three richer reads:
+
+- `world.entities_within(within, type)` returns a table keyed `"0"`, `"1"`, … of
+  entity tables (`id`, `runtime`, `type`, `x/y/z`, `vx/vy/vz`, `yaw/pitch`,
+  `health`, `max_health`, `alive`, `on_ground`, `name`, `distance`), sorted by id
+  so the order is stable across ticks, with a `count` field. `type` is `""`,
+  `"any"` or a name; an unknown name is refused rather than matching everything.
+- `world.raycast_block(max_dist)` / `world.raycast_entity(max_dist)` cast from
+  the local player's eye (feet + 1.62) along its look direction and return
+  `{hit, …}`.
+- `Entity.*` reads one entity by its **raw** id: `get`, `type_name`, `position`,
+  `velocity`, `health`, `alive`, `distance_to`, and `nearest(type)` (the closest
+  alive entity of a type, never the local player). A zero or unknown id, or an
+  unbound seam, fails closed — a stale id yields "absent", never another
+  entity's state.
+
+`Perf.*` adds `stats` (avg/p95/p99/min/max/FPS), `quality` and
 `set_platform`. Coordinates a script hands to the renderer are sanitised: a NaN
 or infinity becomes 0 before it can reach the draw list.
 

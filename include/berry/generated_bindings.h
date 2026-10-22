@@ -44,6 +44,17 @@ inline const BindingSpec* BindingSpecs() {
       {"world.time", CapKind::World, 0, "World"},
       {"world.is_day", CapKind::World, 0, "World"},
       {"world.is_raining", CapKind::World, 0, "World"},
+      {"world.entities_within", CapKind::World, 2, "World"},
+      {"world.raycast_block", CapKind::World, 1, "World"},
+      {"world.raycast_entity", CapKind::World, 1, "World"},
+      {"entity.get", CapKind::World, 1, "Entity"},
+      {"entity.type_name", CapKind::World, 1, "Entity"},
+      {"entity.position", CapKind::World, 1, "Entity"},
+      {"entity.velocity", CapKind::World, 1, "Entity"},
+      {"entity.health", CapKind::World, 1, "Entity"},
+      {"entity.alive", CapKind::World, 1, "Entity"},
+      {"entity.distance_to", CapKind::World, 1, "Entity"},
+      {"entity.nearest", CapKind::World, 1, "Entity"},
       {"network.get", CapKind::Network, 2, "Network"},
       {"network.post", CapKind::Network, 3, "Network"},
       {"hud.create_label", CapKind::Hud, 1, "Hud"},
@@ -95,7 +106,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 70; }
+inline size_t BindingSpecCount() { return 81; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -144,6 +155,19 @@ inline const char* const kWorldNames[] = {
     "world.time",
     "world.is_day",
     "world.is_raining",
+    "world.entities_within",
+    "world.raycast_block",
+    "world.raycast_entity",
+};
+inline const char* const kEntityNames[] = {
+    "entity.get",
+    "entity.type_name",
+    "entity.position",
+    "entity.velocity",
+    "entity.health",
+    "entity.alive",
+    "entity.distance_to",
+    "entity.nearest",
 };
 inline const char* const kNetworkNames[] = {
     "network.get",
@@ -214,7 +238,8 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Combat", kCombatNames, 3},
       {"Player", kPlayerNames, 7},
       {"Render", kRenderNames, 7},
-      {"World", kWorldNames, 6},
+      {"World", kWorldNames, 9},
+      {"Entity", kEntityNames, 8},
       {"Network", kNetworkNames, 2},
       {"Hud", kHudNames, 5},
       {"Perf", kPerfNames, 6},
@@ -227,7 +252,7 @@ inline const ModuleBindings* ModuleBindingTable() {
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 12; }
+inline size_t ModuleBindingCount() { return 13; }
 
 }  // namespace api
 }  // namespace Berry
