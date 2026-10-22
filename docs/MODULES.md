@@ -49,6 +49,17 @@ Typed service: `Renderer`.
   batch, so world geometry presents through the one `RenderSeam`. This is the
   bridge a cosmetic uses to draw on screen.
 - Stats: `frameCount`, `frameMs`, `primitives`.
+- Frame pipeline (`pipeline.h`): the frame path that decides what is worth
+  drawing. `BeginFrame` rebuilds a Gribb-Hartmann frustum from the camera,
+  adopts the governor's `RenderSettings`, and derives the LOD tiers; `EndFrame`
+  counts the frame. `SubmitEntity`/`Visible` cull a world AABB against the
+  frustum (a missing camera culls nothing, never everything), `LodFor` answers
+  the per-entity tier (`full`/`reduced`/`static`/`culled`), and a
+  `DynamicResolution` controller scales the render target from a sustained
+  streak of slow frames. `BatchBuilder` coalesces the frame's lines, rects and
+  circles into one `DrawBatch`, which `CreateBackendSeam` hands to the backend
+  as two draw calls (triangles, then lines) whatever the primitive count. The
+  counters are read back through `perf.pipeline` / `perf.lod_tier`.
 - Platform backend: `IRenderBackend` (see `render_backend.h`). On Android the
   GLES overlay is compiled in when `BERRY_PLATFORM_ANDROID` is defined and the
   host harness uses the null stub.

@@ -380,6 +380,42 @@ animate/don't and spawn/don't decisions, including per-category particle caps
 and a screen-size cull for ambient particles. `FrameStats` reports p99 and
 `FrameHistogram` shows the shape of the tail.
 
+The governor is also what drives the render pipeline. `ScriptApi::PublishFrame`
+(the frame hook the engine raises once per frame) calls `governor->OnFrame`,
+adopts the settled `RenderSettings` into the `Renderer`, and feeds the frame
+time to the pipeline's `DynamicResolution` controller — so culling, LOD and
+resolution scale all follow the quality level the governor chose rather than
+running wide open. A script reads the result back through `perf.pipeline`
+(the pipeline's counters) and `perf.lod_tier` (the tier an entity at a given
+distance would be drawn at).
+
+### Render pipeline (`pipeline.h`)
+
+The frame path that decides what is worth drawing, so the overlay cost tracks
+what the camera can actually see. `RenderPipeline::BeginFrame` rebuilds a
+six-plane frustum from the camera's view-projection (Gribb-Hartmann), adopts
+the governor's `RenderSettings`, and derives the LOD tiers from them;
+`EndFrame` closes the frame. `SubmitEntity`/`Visible` cull a world `Aabb`
+against the frustum and update the submitted/drawn/culled counters; a camera
+that is not set leaves the frustum invalid, which culls nothing rather than
+everything — a debug overlay that cannot see the camera draws everything.
+`LodFor(distance)` answers the tier (`full`, `reduced`, `static`, `culled`),
+so a caller can stop animating or ticking physics for a distant entity before
+dropping it. `DynamicResolution` scales the render target from a sustained
+streak of slow (or fast) frames, stepping down faster than it restores, with a
+dead band so it cannot oscillate; it owns no clock — `OnFrame(frameMs)` is the
+whole input.
+
+`BatchBuilder` coalesces a frame's lines, rects and circles into one
+`DrawBatch` (interleaved position + colour vertices), and `CreateBackendSeam`
+wraps a backend so it uploads that batch in two `glDrawArrays` calls —
+triangles, then lines — no matter how many primitives a script queued. The
+batch path is the same code on the host and the device, so the host tests
+exercise the real conversion. `PipelineStats` reports the frame counters and
+the settled resolution scale; `Renderer::pipelineStats`, `Renderer::LodFor`
+and `Renderer::lastBatchCounts` read them under the renderer's lock, and the
+`perf.pipeline` / `perf.lod_tier` bindings expose them to scripts.
+
 ### Profiler flame graph (`event.h`)
 
 `Profiler` aggregates named spans into a call tree. `ProfilerScope` opens a span

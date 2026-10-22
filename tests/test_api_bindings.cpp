@@ -708,6 +708,125 @@ static void TestPerfFlameBindings() {
         ScriptStatus::Error);
 }
 
+static void TestPerfPipelineBindings() {
+  Renderer renderer;
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  CameraState cam;
+  cam.width = 800;
+  cam.height = 600;
+  cam.view = Mat4::LookAt(Vec3(0, 0, -10), Vec3(0, 0, 0), Vec3(0, 1, 0));
+  cam.projection = Mat4::Perspective(70, 800.0f / 600.0f, 0.1f, 200.0f);
+  cam.valid = true;
+  renderer.SetCamera(cam);
+
+  // Drive a real frame so the pipeline records a batch. A fill-only rect is
+  // two triangles: one draw call, six vertices.
+  RenderSettings settings;
+  settings.cullFarEntities = true;
+  renderer.SetRenderSettings(settings);
+  renderer.BeginFrame(Vec2(800, 600));
+  Rect2D fill;
+  fill.min = Vec2(0, 0);
+  fill.max = Vec2(10, 10);
+  fill.fill = Rgba::White();
+  fill.filled = true;
+  fill.thickness = 0.0f;   // no outline: just the two triangles
+  renderer.DrawRect(fill);
+  renderer.EndFrame();
+
+  ScriptValue out;
+  CHECK(Call(bindings, "perf.pipeline", {}, {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(out.Field("frames")->AsNumber() == 1);
+  CHECK(out.Field("draw_calls")->AsNumber() == 1);
+  CHECK(out.Field("vertices")->AsNumber() == 6);
+  CHECK(out.Field("batches")->AsNumber() == 1);
+  // Dynamic resolution starts at native scale.
+  CHECK(out.Field("resolution_scale")->AsNumber() == 1.0);
+
+  // A rect with the default outline adds a line draw call and four line
+  // segments, so the frame costs two calls and fourteen vertices.
+  renderer.BeginFrame(Vec2(800, 600));
+  Rect2D outlined = fill;
+  outlined.thickness = 1.0f;
+  renderer.DrawRect(outlined);
+  renderer.EndFrame();
+  CHECK(Call(bindings, "perf.pipeline", {}, {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Field("frames")->AsNumber() == 2);
+  CHECK(out.Field("draw_calls")->AsNumber() == 1 + 2);   // fill + outline
+  CHECK(out.Field("vertices")->AsNumber() == 6 + 14);
+
+  // The LOD tier follows the policy the renderer culls with. With culling on,
+  // full detail sits inside 16 blocks and past 64 the entity is culled.
+  CHECK(Call(bindings, "perf.lod_tier", {ScriptValue::Num(1)},
+             {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "full");
+  CHECK(Call(bindings, "perf.lod_tier", {ScriptValue::Num(1000)},
+             {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "culled");
+
+  // With culling off, the far tier degrades to static instead of vanishing.
+  // The policy is adopted at BeginFrame, so drive one.
+  settings.cullFarEntities = false;
+  renderer.SetRenderSettings(settings);
+  renderer.BeginFrame(Vec2(800, 600));
+  renderer.EndFrame();
+  CHECK(Call(bindings, "perf.lod_tier", {ScriptValue::Num(1000)},
+             {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "static");
+
+  // A negative distance is refused rather than mapped to a tier.
+  CHECK(Call(bindings, "perf.lod_tier", {ScriptValue::Num(-1)},
+             {"perf"}, &out) == ScriptStatus::Error);
+
+  // The perf grant gates the surface.
+  CHECK(Call(bindings, "perf.pipeline", {}, {"hud"}, &out) ==
+        ScriptStatus::CapabilityDenied);
+
+  // With no renderer bound, the surface fails closed rather than crashing.
+  ScriptApi bare(ScriptApi::Services{});
+  ScriptBindings bareBindings;
+  bare.InstallBindings(&bareBindings);
+  CHECK(Call(bareBindings, "perf.pipeline", {}, {"perf"}, &out) ==
+        ScriptStatus::Error);
+  CHECK(Call(bareBindings, "perf.lod_tier", {ScriptValue::Num(1)},
+             {"perf"}, &out) == ScriptStatus::Error);
+}
+
+/// The frame publisher is what keeps the pipeline following the governor: each
+/// published frame adopts the governor's settings and feeds it the frame time.
+static void TestPublishFrameDrivesThePipeline() {
+  Renderer renderer;
+  PerformanceGovernor governor;
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.governor = &governor;
+  ScriptApi api(services);
+
+  // Pin the governor to a known platform so the assertion does not depend on
+  // its default ramp.
+  governor.SetPlatform(PlatformClass::MobileLow);
+  const RenderSettings expected = governor.settings();
+
+  api.PublishFrame(16.0f, Vec2(800, 600));
+  CHECK(renderer.renderSettings() == expected);
+
+  // The frame time reaches the resolution controller, which stays at native
+  // scale while every frame meets the target.
+  for (int i = 0; i < 20; ++i) api.PublishFrame(16.0f, Vec2(800, 600));
+  CHECK(renderer.pipelineStats().resolutionScale == 1.0f);
+
+  // A sustained slow streak makes it step down, so the controller is really
+  // being fed rather than just holding its default.
+  for (int i = 0; i < 40; ++i) api.PublishFrame(40.0f, Vec2(800, 600));
+  CHECK(renderer.pipelineStats().resolutionScale < 1.0f);
+}
+
 //----------------------------------------------------------------------------
 // Read-only world / entity surface
 //----------------------------------------------------------------------------
@@ -1642,6 +1761,8 @@ int main() {
   TestWorldReads();
   TestPerfStatsAndPlatform();
   TestPerfFlameBindings();
+  TestPerfPipelineBindings();
+  TestPublishFrameDrivesThePipeline();
   if (g_fail == 0) printf("test_api_bindings: ALL OK\n");
   return g_fail;
 }

@@ -202,6 +202,8 @@ inline const BindingSpec* BindingSpecs() {
       {"perf.flame", CapKind::Perf, 0, "Perf"},
       {"perf.spans", CapKind::Perf, 0, "Perf"},
       {"perf.flame_reset", CapKind::Perf, 0, "Perf"},
+      {"perf.pipeline", CapKind::Perf, 0, "Perf"},
+      {"perf.lod_tier", CapKind::Perf, 1, "Perf"},
       {"input.is_key_down", CapKind::Input, 1, "Input"},
       {"input.clicks_per_second", CapKind::Input, 0, "Input"},
       {"input.velocity", CapKind::Input, 0, "Input"},
@@ -254,7 +256,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 229; }
+inline size_t BindingSpecCount() { return 231; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -485,6 +487,8 @@ inline const char* const kPerfNames[] = {
     "perf.flame",
     "perf.spans",
     "perf.flame_reset",
+    "perf.pipeline",
+    "perf.lod_tier",
 };
 inline const char* const kInputNames[] = {
     "input.is_key_down",
@@ -564,7 +568,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Ws", kWsNames, 10},
       {"JsonRpc", kJsonRpcNames, 1},
       {"Hud", kHudNames, 5},
-      {"Perf", kPerfNames, 9},
+      {"Perf", kPerfNames, 11},
       {"Input", kInputNames, 3},
       {"Cosmetic", kCosmeticNames, 9},
       {"Intent", kIntentNames, 6},

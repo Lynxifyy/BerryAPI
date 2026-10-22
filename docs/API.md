@@ -297,6 +297,8 @@ Capability: `perf`.
 | `perf.flame() -> Table` | `perf` | The aggregated span call tree since the last `perf.flame_reset`, as a nested table: each node is {name, self_ms, total_ms, count, children}, and `children` is ordered by total time descending so the expensive branch reads first. `self_ms` excludes child spans, so a parent's `total_ms` is the time actually spent inside it. Populated by the profiler spans the modules and hooks raise. |
 | `perf.spans() -> Table` | `perf` | The flat span list, highest total time first: a table keyed \"0\",\"1\",… each {name, total_ms, count, max_ms}. The list view of the same data `flame` nests. |
 | `perf.flame_reset() -> nil` | `perf` | Drops the flame tree, the span stats and the per-frame ring, starting the profiler over. |
+| `perf.pipeline() -> Table` | `perf` | The render pipeline's frame counters as {frames, entities_submitted, entities_drawn, entities_culled, entities_lod_reduced, batches, draw_calls, vertices, resolution_scale}. `draw_calls` counts the two coalesced calls (triangles + lines) a frame issues, so it stays flat however many primitives a script queued; `resolution_scale` is the factor the dynamic-resolution controller settled on (1.0 is native). |
+| `perf.lod_tier(distance: number) -> string` | `perf` | The level-of-detail tier an entity `distance` blocks from the camera would be drawn at: \"full\", \"reduced\", \"static\" or \"culled\". Follows the same policy the renderer culls with, so a script can predict whether its overlay will be given geometry. |
 
 ## Input
 

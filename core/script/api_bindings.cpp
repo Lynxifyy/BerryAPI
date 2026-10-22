@@ -1934,6 +1934,37 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Nil();
   });
 
+  //--- Render pipeline (cull/LOD/resolution accounting) --------------------
+  //
+  // Read-only: the pipeline is driven by the governor and the frame hook, not
+  // by a script. A script reads the counters to see what the frame cost and how
+  // much the culler dropped.
+  install("perf.pipeline", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.renderer) { ctx.RaiseError("perf.pipeline: renderer unavailable"); return ScriptValue::Nil(); }
+    const PipelineStats st = services_.renderer->pipelineStats();
+    ScriptTable out;
+    out["frames"] = ScriptValue::Num((f64)st.frames);
+    out["entities_submitted"] = ScriptValue::Num((f64)st.entitiesSubmitted);
+    out["entities_drawn"] = ScriptValue::Num((f64)st.entitiesDrawn);
+    out["entities_culled"] = ScriptValue::Num((f64)st.entitiesCulled);
+    out["entities_lod_reduced"] = ScriptValue::Num((f64)st.entitiesLodReduced);
+    out["batches"] = ScriptValue::Num((f64)st.batches);
+    out["draw_calls"] = ScriptValue::Num((f64)st.drawCalls);
+    out["vertices"] = ScriptValue::Num((f64)st.vertices);
+    out["resolution_scale"] = ScriptValue::Num((f64)st.resolutionScale);
+    return ScriptValue::Tbl(std::move(out));
+  });
+
+  install("perf.lod_tier", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("perf.lod_tier: renderer unavailable"); return ScriptValue::Str(""); }
+    const f64 distance = args[0].AsNumber();
+    if (!std::isfinite(distance) || distance < 0) {
+      ctx.RaiseError("perf.lod_tier: distance must be a non-negative number");
+      return ScriptValue::Str("");
+    }
+    return ScriptValue::Str(LodTierName(services_.renderer->LodFor((f32)distance)));
+  });
+
   //--- Input (local, already-visible state) --------------------------------
   install("input.is_key_down", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
     if (!services_.input) return ScriptValue::Bool(false);
@@ -3002,6 +3033,15 @@ void ScriptApi::PublishFrame(f32 frameMs, const Vec2& screen) {
   screenW_.store(screen.x);
   screenH_.store(screen.y);
   if (services_.governor) services_.governor->OnFrame(frameMs);
+  // The render pipeline follows the governor: adopt the settings the governor
+  // just settled on and feed it the frame time, so culling, LOD and dynamic
+  // resolution all track the quality level rather than running wide open.
+  if (services_.renderer) {
+    if (services_.governor) {
+      services_.renderer->SetRenderSettings(services_.governor->settings());
+    }
+    services_.renderer->OnFrameTime(frameMs);
+  }
   if (services_.hud) services_.hud->Update(frameMs);
 }
 

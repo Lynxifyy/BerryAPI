@@ -336,6 +336,10 @@ export interface Perf {
   spans(): Record<string, unknown>;
   /** Drops the flame tree, the span stats and the per-frame ring, starting the profiler over. */
   flame_reset(): void;
+  /** The render pipeline's frame counters as {frames, entities_submitted, entities_drawn, entities_culled, entities_lod_reduced, batches, draw_calls, vertices, resolution_scale}. `draw_calls` counts the two coalesced calls (triangles + lines) a frame issues, so it stays flat however many primitives a script queued; `resolution_scale` is the factor the dynamic-resolution controller settled on (1.0 is native). */
+  pipeline(): Record<string, unknown>;
+  /** The level-of-detail tier an entity `distance` blocks from the camera would be drawn at: \"full\", \"reduced\", \"static\" or \"culled\". Follows the same policy the renderer culls with, so a script can predict whether its overlay will be given geometry. */
+  lod_tier(distance: number): string;
 }
 
 /** Capability required: input. */
