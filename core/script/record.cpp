@@ -2,6 +2,7 @@
 #include "berry/record.h"
 
 #include "json_min.h"
+#include "json_write.h"
 
 #include <algorithm>
 #include <cmath>
@@ -10,83 +11,9 @@
 
 namespace Berry {
 
+namespace jsonw = detail::jsonw;   // internal writer, see json_write.h
+
 namespace {
-
-// A tiny JSON writer. The project has a JSON parser (json_min.h) but no writer,
-// and a tape is the first thing that needs to serialise structured data. Output
-// is deterministic: members are written in a fixed order and floats are written
-// with a fixed precision, so the same tape always produces the same bytes.
-void WriteEscaped(std::string* out, const std::string& s) {
-  out->push_back('"');
-  for (char c : s) {
-    switch (c) {
-      case '"': *out += "\\\""; break;
-      case '\\': *out += "\\\\"; break;
-      case '\n': *out += "\\n"; break;
-      case '\r': *out += "\\r"; break;
-      case '\t': *out += "\\t"; break;
-      case '\b': *out += "\\b"; break;
-      case '\f': *out += "\\f"; break;
-      default:
-        if ((unsigned char)c < 0x20) {
-          char buf[8];
-          std::snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
-          *out += buf;
-        } else {
-          out->push_back(c);
-        }
-    }
-  }
-  out->push_back('"');
-}
-
-void WriteNumber(std::string* out, f64 v) {
-  if (!std::isfinite(v)) { *out += "0"; return; }
-  char buf[64];
-  // %.9g keeps a float round-trippable and drops trailing zeros, so a whole
-  // number prints as "1" and not "1.000000000".
-  std::snprintf(buf, sizeof(buf), "%.9g", v);
-  *out += buf;
-}
-
-void WriteU64(std::string* out, u64 v) { *out += std::to_string(v); }
-void WriteI64(std::string* out, i64 v) { *out += std::to_string(v); }
-
-void WriteVec3(std::string* out, const Vec3& v) {
-  out->push_back('[');
-  WriteNumber(out, v.x); out->push_back(',');
-  WriteNumber(out, v.y); out->push_back(',');
-  WriteNumber(out, v.z);
-  out->push_back(']');
-}
-
-void WriteEntity(std::string* out, const EntitySnapshot& e) {
-  *out += "{\"id\":";
-  WriteU64(out, e.id.raw);
-  *out += ",\"runtime\":";
-  WriteU64(out, e.id.runtime);
-  *out += ",\"type\":\"";
-  *out += EntityTypeName(e.type);
-  *out += "\",\"pos\":";
-  WriteVec3(out, e.position);
-  *out += ",\"vel\":";
-  WriteVec3(out, e.velocity);
-  *out += ",\"rot\":";
-  WriteVec3(out, e.rotation);
-  *out += ",\"health\":";
-  WriteNumber(out, e.health);
-  *out += ",\"max_health\":";
-  WriteNumber(out, e.maxHealth);
-  *out += ",\"alive\":";
-  *out += e.alive ? "true" : "false";
-  *out += ",\"on_ground\":";
-  *out += e.onGround ? "true" : "false";
-  *out += ",\"name\":";
-  WriteEscaped(out, e.name);
-  *out += ",\"last_seen\":";
-  WriteU64(out, e.lastSeenTick);
-  out->push_back('}');
-}
 
 bool ReadInt(const detail::json::Value* v, i64* out) {
   if (!v || !v->IsNumber()) return false;
@@ -149,58 +76,79 @@ bool Recording::Push(const RecordedFrame& frame) {
   return true;
 }
 
+void WriteEntity(jsonw::Writer& w, const EntitySnapshot& e) {
+  w.BeginObject();
+  w.Member("id", e.id.raw);
+  w.Member("runtime", (u64)e.id.runtime);
+  w.Member("type", std::string(EntityTypeName(e.type)));
+  w.Key("pos");
+  w.BeginArray();
+  w.Number(e.position.x); w.Number(e.position.y); w.Number(e.position.z);
+  w.EndArray();
+  w.Key("vel");
+  w.BeginArray();
+  w.Number(e.velocity.x); w.Number(e.velocity.y); w.Number(e.velocity.z);
+  w.EndArray();
+  w.Key("rot");
+  w.BeginArray();
+  w.Number(e.rotation.x); w.Number(e.rotation.y); w.Number(e.rotation.z);
+  w.EndArray();
+  w.Member("health", (f64)e.health);
+  w.Member("max_health", (f64)e.maxHealth);
+  w.Member("alive", e.alive);
+  w.Member("on_ground", e.onGround);
+  w.Member("name", e.name);
+  w.Member("last_seen", e.lastSeenTick);
+  w.EndObject();
+}
+
 std::string Recording::ToJson() const {
   std::string out;
   out.reserve(frames_.size() * 256 + 64);
-  out += "{\"format\":";
-  WriteU64(&out, kFormatVersion);
-  out += ",\"frames\":[";
-  for (size_t i = 0; i < frames_.size(); ++i) {
-    const RecordedFrame& f = frames_[i];
-    if (i) out.push_back(',');
-    out += "{\"tick\":";
-    WriteU64(&out, f.tick);
-    out += ",\"time\":{\"absolute\":";
-    WriteI64(&out, f.time.absolute);
-    out += ",\"daylight\":";
-    WriteNumber(&out, f.time.daylight);
-    out += ",\"day\":";
-    out += f.time.day ? "true" : "false";
-    out += ",\"rain\":";
-    WriteNumber(&out, f.time.rainLevel);
-    out += ",\"thunder\":";
-    WriteNumber(&out, f.time.thunderLevel);
-    out += "},\"entities\":[";
-    for (size_t j = 0; j < f.entities.size(); ++j) {
-      if (j) out.push_back(',');
-      WriteEntity(&out, f.entities[j]);
+  jsonw::Writer w(&out);
+  w.BeginObject();
+  w.Member("format", (u64)kFormatVersion);
+  w.Key("frames");
+  w.BeginArray();
+  for (const RecordedFrame& f : frames_) {
+    w.BeginObject();
+    w.Member("tick", f.tick);
+    w.Key("time");
+    w.BeginObject();
+    w.Member("absolute", f.time.absolute);
+    w.Member("daylight", (f64)f.time.daylight);
+    w.Member("day", f.time.day);
+    w.Member("rain", (f64)f.time.rainLevel);
+    w.Member("thunder", (f64)f.time.thunderLevel);
+    w.EndObject();
+    w.Key("entities");
+    w.BeginArray();
+    for (const EntitySnapshot& e : f.entities) WriteEntity(w, e);
+    w.EndArray();
+    w.Key("events");
+    w.BeginArray();
+    for (const RecordedEvent& e : f.events) {
+      w.BeginObject();
+      w.Member("channel", e.channel);
+      w.Member("payload", e.payload);
+      w.EndObject();
     }
-    out += "],\"events\":[";
-    for (size_t j = 0; j < f.events.size(); ++j) {
-      if (j) out.push_back(',');
-      out += "{\"channel\":";
-      WriteEscaped(&out, f.events[j].channel);
-      out += ",\"payload\":";
-      WriteEscaped(&out, f.events[j].payload);
-      out.push_back('}');
+    w.EndArray();
+    w.Key("blocks");
+    w.BeginArray();
+    for (const RecordedBlock& b : f.blocks) {
+      w.BeginObject();
+      w.Member("x", (i64)b.x);
+      w.Member("y", (i64)b.y);
+      w.Member("z", (i64)b.z);
+      w.Member("block", (u64)b.block);
+      w.EndObject();
     }
-    out += "],\"blocks\":[";
-    for (size_t j = 0; j < f.blocks.size(); ++j) {
-      if (j) out.push_back(',');
-      const RecordedBlock& b = f.blocks[j];
-      out += "{\"x\":";
-      WriteI64(&out, b.x);
-      out += ",\"y\":";
-      WriteI64(&out, b.y);
-      out += ",\"z\":";
-      WriteI64(&out, b.z);
-      out += ",\"block\":";
-      WriteU64(&out, b.block);
-      out.push_back('}');
-    }
-    out += "]}";
+    w.EndArray();
+    w.EndObject();
   }
-  out += "]}";
+  w.EndArray();
+  w.EndObject();
   return out;
 }
 

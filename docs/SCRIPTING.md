@@ -612,3 +612,49 @@ replay raycasts only what was recorded and can never invent a block.
 
 A tape records what this client saw. It is a debugging aid and a test fixture,
 not a network protocol.
+
+## Local RPC & REPL (`rpc.h`)
+
+Tooling needs a way to talk to a running client: a VS Code extension, a
+dashboard, an OBS overlay. `RpcServer` is a loopback JSON-RPC 2.0 endpoint for
+exactly that.
+
+The design splits cleanly in two, and the split is the point:
+
+* `RpcServer` is the dispatcher. It maps a method name to a handler and turns a
+  request frame into a response frame, with no sockets in it, so the whole
+  protocol is testable by calling `HandleFrame` directly.
+* `RpcServer::Start` wraps that dispatcher in a loopback TCP listener. The
+  listener is the only part that touches the network.
+
+The transport is a newline-delimited JSON-RPC stream over TCP. A WebSocket
+server can wrap the same `HandleFrame`, so the protocol logic stays in one
+place; the dispatcher does not know or care which transport carries it.
+
+This is a local debugging surface, so the posture is deliberately narrow:
+
+* it binds loopback only; a request to bind any other address is refused
+* it is opt-in: nothing listens until `Start` is called
+* frames are length-capped, methods are count-capped, and a per-connection rate
+  limit answers a flood with a clear error instead of serving it silently
+* a malformed frame is answered with a JSON-RPC parse error, never treated as a
+  partial request
+* an unknown method is a method-not-found error, never a silent success
+* a notification (a request with no `id`) gets no reply, per the spec
+* an `id` is echoed verbatim, so a number stays a number and a string stays a
+  string
+* a handler that throws becomes an internal error, never a crash
+
+`RpcRepl` is a one-line front end over the same dispatcher:
+
+```
+add 1 2          ->  {"jsonrpc":"2.0","id":"repl","result":[1,2]}
+world.query 20
+methods
+help
+```
+
+A bare number or a JSON literal is passed through as-is, so a handler can
+receive a number; anything else becomes a quoted string. Every call goes through
+`HandleFrame`, so the REPL cannot reach anything the RPC surface does not
+already expose.
