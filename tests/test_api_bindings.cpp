@@ -668,12 +668,29 @@ static void TestNetworkGetFailsClosed() {
              {}, &out) == ScriptStatus::CapabilityDenied);
 
   // Granted a network host, but a URL the egress policy refuses (an IP literal)
-  // must still fail the call rather than reach a socket.
+  // must not reach a socket. The refusal is reported in the result table
+  // (status 0, non-empty error), not by unwinding, so a script can branch on it.
   ScriptStatus st = Call(bindings, "network.get",
                          {ScriptValue::Str("https://127.0.0.1/x"),
                           ScriptValue::Num(2000)},
                          {"network:*"}, &out);
-  CHECK(st == ScriptStatus::Error);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  const ScriptTable* t = out.AsTable();
+  CHECK(t && t->at("status").AsNumber() == 0);
+  CHECK(t && !t->at("ok").Truthy());
+  CHECK(t && !t->at("error").AsString().empty());
+  CHECK(t && t->at("body").AsString().empty());
+
+  // An https destination is refused rather than silently downgraded to
+  // plaintext (TLS is not implemented). The result carries the reason.
+  out = ScriptValue();
+  st = Call(bindings, "network.post",
+            {ScriptValue::Str("http://127.0.0.1/x"), ScriptValue::Str("{}"),
+             ScriptValue::Num(2000)},
+            {"network:*"}, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.IsTable());
 }
 
 int main() {

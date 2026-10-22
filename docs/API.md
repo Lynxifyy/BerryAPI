@@ -62,7 +62,8 @@ Capability: `network`.
 
 | Function | Capability | Description |
 | --- | --- | --- |
-| `network.get(url: string, timeout_ms: number) -> HttpResult` | `network` | Outbound requests. Requires a network grant scoped to the host. |
+| `network.get(url: string, timeout_ms: number) -> HttpResult` | `network` | Outbound requests. Requires a network grant scoped to the host. Both calls return an HttpResult table (status, ok, headers, body, error, truncated) rather than raising, so a script can branch on the outcome; headers is a newline-separated \"Name: value\" list. A refused destination (bad URL, egress policy, or a host outside the grant) comes back with status 0 and a non-empty error. TLS is not implemented, so an https destination is refused rather than downgraded to plaintext. |
+| `network.post(url: string, body: string, timeout_ms: number) -> HttpResult` | `network` | - |
 
 ## Hud
 

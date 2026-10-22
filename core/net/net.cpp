@@ -130,9 +130,15 @@ HttpRequest::HttpRequest(const char* url) : url_(url) {
   if (rest.rfind("http://", 0) == 0) {
     rest = rest.substr(7);
   } else if (rest.rfind("https://", 0) == 0) {
-    tls_ = true;
-    port_ = 443;
+    // TLS is not implemented. An https request must FAIL CLOSED rather than
+    // open a plaintext socket to port 443: silently downgrading would send the
+    // caller's traffic unencrypted while they asked for TLS. `badScheme_`
+    // makes Do() refuse without touching the network.
+    badScheme_ = true;
     rest = rest.substr(8);
+  } else {
+    badScheme_ = true;
+    rest = u;
   }
   size_t slash = rest.find('/');
   std::string authority = slash == std::string::npos ? rest : rest.substr(0, slash);
@@ -153,6 +159,13 @@ HttpRequest& HttpRequest::Header(const char* name, const char* value) {
 
 HttpResponse HttpRequest::Do() {
   HttpResponse resp;
+  if (badScheme_) {
+    // https/wss (or a malformed scheme): refuse without opening a socket. A
+    // silent downgrade would send plaintext where TLS was requested.
+    resp.status = 0;
+    resp.reason = "unsupported scheme (TLS not implemented)";
+    return resp;
+  }
   TcpSocket sock;
   if (!sock.Connect(host_.c_str(), port_, timeoutMs_)) {
     resp.status = 0;
@@ -181,11 +194,20 @@ HttpResponse HttpRequest::Do() {
 
   char buf[8192];
   std::string raw;
+  // Cap the total buffered bytes (headers + body). A server that streams
+  // forever must not be able to make the worker allocate without bound; the
+  // read stops at the cap and the response is flagged truncated.
+  const size_t cap = maxBodyBytes_ + 64 * 1024;   // headroom for the headers
   for (;;) {
     ssize_t n = sock.Recv(buf, sizeof buf, timeoutMs_);
     if (n < 0) break;
-    raw.append(buf, (size_t)n);
     if (n == 0) break;
+    if (raw.size() + (size_t)n > cap) {
+      raw.append(buf, cap - raw.size());
+      resp.truncated = true;
+      break;
+    }
+    raw.append(buf, (size_t)n);
   }
 
   size_t hEnd = raw.find("\r\n\r\n");
@@ -216,6 +238,12 @@ HttpResponse HttpRequest::Do() {
     }
   }
   resp.body = raw.substr(hEnd + 4);
+  // Trim the body to the caller's cap even when the raw buffer was within the
+  // headroom above, so maxBodyBytes is a hard bound on what a caller receives.
+  if (resp.body.size() > maxBodyBytes_) {
+    resp.body.resize(maxBodyBytes_);
+    resp.truncated = true;
+  }
   return resp;
 }
 
@@ -230,12 +258,14 @@ static std::string WsBase64(const unsigned char* data, size_t len);
 bool WebSocket::Connect(const char* url, int timeoutMs) {
   std::string u = url;
   std::string rest = u;
-  bool tls = false;
   if (rest.rfind("ws://", 0) == 0) {
     rest = rest.substr(5);
   } else if (rest.rfind("wss://", 0) == 0) {
-    tls = true;   // NOTE: TLS not implemented; plaintext only for now
-    rest = rest.substr(6);
+    // TLS is not implemented, so `wss://` must FAIL CLOSED. Downgrading to a
+    // plaintext socket on port 443 would silently send the caller's traffic
+    // unencrypted while they asked for TLS — the worst possible failure mode.
+    err_ = "wss not supported (TLS not implemented)";
+    return false;
   } else {
     err_ = "bad ws url";
     return false;
@@ -245,7 +275,7 @@ bool WebSocket::Connect(const char* url, int timeoutMs) {
   std::string path = slash == std::string::npos ? "/" : rest.substr(slash);
 
   std::string host = authority;
-  u16 port = tls ? 443 : 80;
+  u16 port = 80;
   size_t colon = authority.rfind(':');
   if (colon != std::string::npos) {
     host = authority.substr(0, colon);

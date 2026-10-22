@@ -45,6 +45,7 @@ inline const BindingSpec* BindingSpecs() {
       {"world.is_day", CapKind::World, 0, "World"},
       {"world.is_raining", CapKind::World, 0, "World"},
       {"network.get", CapKind::Network, 2, "Network"},
+      {"network.post", CapKind::Network, 3, "Network"},
       {"hud.create_label", CapKind::Hud, 1, "Hud"},
       {"hud.create_panel", CapKind::Hud, 2, "Hud"},
       {"hud.attach", CapKind::Hud, 1, "Hud"},
@@ -94,7 +95,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 69; }
+inline size_t BindingSpecCount() { return 70; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -146,6 +147,7 @@ inline const char* const kWorldNames[] = {
 };
 inline const char* const kNetworkNames[] = {
     "network.get",
+    "network.post",
 };
 inline const char* const kHudNames[] = {
     "hud.create_label",
@@ -213,7 +215,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Player", kPlayerNames, 7},
       {"Render", kRenderNames, 7},
       {"World", kWorldNames, 6},
-      {"Network", kNetworkNames, 1},
+      {"Network", kNetworkNames, 2},
       {"Hud", kHudNames, 5},
       {"Perf", kPerfNames, 6},
       {"Input", kInputNames, 3},

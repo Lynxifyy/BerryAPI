@@ -146,6 +146,13 @@ class TinyHttpServer final : public TinyTcpAcceptor {
       body = req;   // echo request
       ct = "application/json";
     }
+    // "/big" answers with a body far larger than any sane client cap, so the
+    // response-body cap can be exercised: a client that does not clip would
+    // buffer the whole thing.
+    if (req.rfind("GET /big", 0) == 0) {
+      body.assign(256u * 1024, 'x');
+      ct = "application/octet-stream";
+    }
     std::string resp = "HTTP/1.1 200 OK\r\n"
         "Content-Type: " + ct + "\r\n"
         "Content-Length: " + std::to_string(body.size()) + "\r\n"

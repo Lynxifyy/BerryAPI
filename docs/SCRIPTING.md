@@ -133,6 +133,16 @@ A network grant names a host, and the host is enforced on every request:
 - Redirects are followed by the caller, not the client, and every hop is
   re-checked against both the policy and the grant. A granted host cannot
   bounce a request to a host the script was never granted.
+- **TLS is not implemented yet.** Because the egress policy requires `https`
+  for public hosts, a real public request currently fails closed: the client
+  refuses `https://` rather than opening a plaintext socket to port 443. Only
+  the harness path (loopback, where the policy is relaxed to permit `http`)
+  completes end to end. This is deliberate — a silent downgrade would send the
+  grant's traffic in the clear — and it is the reason `network.get` and
+  `network.post` report a `status` of 0 with an `error` rather than raising.
+- The response body is capped (4 MiB by default); a larger body is clipped and
+  the `truncated` field is set, so a streaming server cannot exhaust the
+  script worker's memory.
 
 The policy is a pure function (`UrlPolicy::Check`), so it is unit-testable and
 reproducible; the harness relaxes it for loopback only.

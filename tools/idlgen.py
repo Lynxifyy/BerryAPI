@@ -36,7 +36,8 @@ TYPE_MAP = {
     "Rgba": ("Rgba", "Rgba", "Rgba", "RGBA colour"),
     "Widget": ("WidgetId", "WidgetId", "WidgetId", "HUD widget handle"),
     "Task": ("u64", "TaskId", "TaskId", "async task id"),
-    "HttpResult": ("HttpResult", "HttpResult", "HttpResult", "HTTP response"),
+    "HttpResult": ("ScriptValue", "HttpResult", "HttpResult",
+                   "HTTP response table (status, ok, headers, body, error, truncated)"),
     "Table": ("ScriptTable", "Record<string, unknown>", "{[string]: any}",
               "structured value (named fields)"),
 }
@@ -339,7 +340,7 @@ def emit_ts(modules):
            "export interface ActorHandle { id: number; }",
            "export interface Vec3 { x: number; y: number; z: number; }",
            "export interface Rgba { r: number; g: number; b: number; a: number; }",
-           "export interface HttpResult { status: number; body: string; ok: boolean; }",
+           "export interface HttpResult { status: number; ok: boolean; headers: string; body: string; error: string; truncated: boolean; }",
            ""]
     for mod in modules:
         if not mod.functions:
@@ -391,7 +392,7 @@ def emit_luau(modules):
            "export type ActorHandle = { id: number }",
            "export type Vec3 = { x: number, y: number, z: number }",
            "export type Rgba = { r: number, g: number, b: number, a: number }",
-           "export type HttpResult = { status: number, body: string, ok: boolean }",
+           "export type HttpResult = { status: number, ok: boolean, headers: string, body: string, error: string, truncated: boolean }",
            ""]
     for mod in modules:
         if not mod.functions:

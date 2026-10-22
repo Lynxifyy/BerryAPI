@@ -202,4 +202,21 @@ BERRY_API ScriptValue HttpGetBlocking(ScriptContext& ctx, const std::string& url
                                       long timeoutMs = 8000,
                                       const UrlPolicy& policy = UrlPolicy());
 
+/// Issues a request and returns a structured `HttpResult` table
+/// (`status`, `ok`, `headers`, `body`, `error`, `truncated`) instead of raising.
+/// The egress policy and grant checks are identical to `HttpGetBlocking`, and
+/// are re-run on every redirect hop. A refusal (bad URL, policy, scope) comes
+/// back as a table with `status = 0` and a non-empty `error`, so a script can
+/// branch on the outcome rather than unwinding — the tuple-style result the
+/// `network.*` surface documents.
+///
+/// `maxBodyBytes` caps how much of the response is buffered; a larger body is
+/// truncated and flagged.
+BERRY_API ScriptValue HttpRequestBlocking(ScriptContext& ctx,
+                                          const std::string& method,
+                                          const std::string& url,
+                                          const std::string& body,
+                                          long timeoutMs, const UrlPolicy& policy,
+                                          size_t maxBodyBytes = 4u * 1024 * 1024);
+
 }  // namespace Berry

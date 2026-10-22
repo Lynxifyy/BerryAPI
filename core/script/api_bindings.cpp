@@ -517,12 +517,22 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
   });
 
   //--- Network (granted, host-scoped) --------------------------------------
-  // Shares the async layer's egress path, so the grant is checked here and on
-  // every redirect hop. Returns the body, exactly as `await Http.get` does.
+  // Both calls go through the async layer's egress path, so the grant is
+  // checked here and on every redirect hop. They return an HttpResult table
+  // rather than raising, so a script can branch on the outcome.
   install("network.get", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
     const std::string url = args[0].ToDisplay();
     const f64 timeout = args[1].AsNumber();
-    return HttpGetBlocking(ctx, url, (long)timeout, services_.networkPolicy);
+    return HttpRequestBlocking(ctx, "GET", url, "", (long)timeout,
+                               services_.networkPolicy);
+  });
+
+  install("network.post", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    const std::string url = args[0].ToDisplay();
+    const std::string body = args[1].ToDisplay();
+    const f64 timeout = args[2].AsNumber();
+    return HttpRequestBlocking(ctx, "POST", url, body, (long)timeout,
+                               services_.networkPolicy);
   });
 
   //--- HUD (retained-mode widgets) -----------------------------------------

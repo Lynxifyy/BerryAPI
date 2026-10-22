@@ -6,7 +6,7 @@ export type WidgetId = number;
 export interface ActorHandle { id: number; }
 export interface Vec3 { x: number; y: number; z: number; }
 export interface Rgba { r: number; g: number; b: number; a: number; }
-export interface HttpResult { status: number; body: string; ok: boolean; }
+export interface HttpResult { status: number; ok: boolean; headers: string; body: string; error: string; truncated: boolean; }
 
 /** Capability required: combat. */
 export interface Combat {
@@ -53,8 +53,9 @@ export interface World {
 
 /** Capability required: network. */
 export interface Network {
-  /** Outbound requests. Requires a network grant scoped to the host. */
+  /** Outbound requests. Requires a network grant scoped to the host. Both calls return an HttpResult table (status, ok, headers, body, error, truncated) rather than raising, so a script can branch on the outcome; headers is a newline-separated \"Name: value\" list. A refused destination (bad URL, egress policy, or a host outside the grant) comes back with status 0 and a non-empty error. TLS is not implemented, so an https destination is refused rather than downgraded to plaintext. */
   get(url: string, timeout_ms: number): HttpResult;
+  post(url: string, body: string, timeout_ms: number): HttpResult;
 }
 
 /** Capability required: hud. */

@@ -596,16 +596,18 @@ std::vector<CosmeticDrawItem> CosmeticService::Resolve(
 }
 
 void CosmeticService::EvictLruLocked() const {
-  auto victim = resolveCache_.begin();
-  for (auto it = resolveCache_.begin(); it != resolveCache_.end(); ++it) {
-    if (it->second.lastUse < victim->second.lastUse) victim = it;
-  }
-  if (victim != resolveCache_.end()) resolveCache_.erase(victim);
+  // The LRU list is ordered most-recent-first, so the victim is the tail. Both
+  // the list node and the map entry are removed in O(1); no scan is needed.
+  if (lru_.empty()) return;
+  const ResolveCacheKey victim = lru_.back();
+  lru_.pop_back();
+  resolveCache_.erase(victim);
 }
 
 void CosmeticService::ClearResolveCache() {
   std::lock_guard<std::mutex> lk(cacheMutex_);
   resolveCache_.clear();
+  lru_.clear();
 }
 
 size_t CosmeticService::resolveCacheSize() const {
@@ -642,7 +644,9 @@ std::vector<CosmeticDrawItem> CosmeticService::ResolveWithCache(
     if (it != resolveCache_.end() && it->second.poseRevision == revision &&
         it->second.loadoutKey == loadoutKey &&
         it->second.localVelocity == velocity) {
-      it->second.lastUse = ++cacheClock_;
+      // Promote to most-recently-used. Splice the existing node to the front:
+      // O(1), no allocation, and the iterator stored in the entry stays valid.
+      lru_.splice(lru_.begin(), lru_, it->second.lruIt);
       if (hit) *hit = true;
       return it->second.items;
     }
@@ -653,13 +657,23 @@ std::vector<CosmeticDrawItem> CosmeticService::ResolveWithCache(
   items = ResolveLocked(entity, loadout, skel, skippedNoBone);
   if (haveRevision) {
     std::lock_guard<std::mutex> lk(cacheMutex_);
-    if (resolveCache_.size() >= kMaxResolveCacheEntries) EvictLruLocked();
+    // Replacing a stale entry (same key, changed revision/loadout/velocity) must
+    // drop its old LRU node first, or the list would accumulate a duplicate key
+    // and evict a key that is still live in the map.
+    auto existing = resolveCache_.find(key);
+    if (existing != resolveCache_.end()) {
+      lru_.erase(existing->second.lruIt);
+      resolveCache_.erase(existing);
+    } else if (resolveCache_.size() >= kMaxResolveCacheEntries) {
+      EvictLruLocked();
+    }
     ResolveCacheEntry entry;
     entry.poseRevision = revision;
     entry.localVelocity = velocity;
     entry.loadoutKey = loadoutKey;
     entry.items = items;
-    entry.lastUse = ++cacheClock_;
+    lru_.push_front(key);
+    entry.lruIt = lru_.begin();
     resolveCache_[key] = std::move(entry);
   }
   return items;
