@@ -5,6 +5,15 @@ CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -O2 -g -Iinclude -Ithird_party/ed25519 $(LUAU_INCLUDES) -DBERRY_THREAD_ASSERT
 LDFLAGS  ?= -pthread
 
+# Header dependency tracking. Without it, editing a header leaves every object
+# that included it stale, and the link then mixes two incompatible layouts of
+# the same class — a crash that looks like a logic bug. Every compile rule
+# below emits a .d file next to its object; the `-include` of those files lives
+# after `tools/sources.mk` (which defines CORE_SRC/TEST_SRC), because a
+# `-include` before the variable is set expands to nothing and silently does
+# no tracking at all.
+DEPFLAGS := -MMD -MP
+
 # The injectable shared library (android/linux target build).
 # Compile with -fPIC and -fvisibility=hidden; only BERRY_API symbols escape.
 SHARED_CXXFLAGS ?= -std=c++17 -O2 -fPIC -fvisibility=hidden -DBERRY_BUILD_SHARED -Iinclude -Ithird_party/ed25519 $(LUAU_INCLUDES)
@@ -12,6 +21,14 @@ SHARED_LDFLAGS  ?= -shared -pthread -ldl
 SHARED_NAME     ?= libBerryAPI.so
 
 include tools/sources.mk
+
+# Pulled in after sources.mk so CORE_SRC/TEST_SRC are populated. Each is
+# optional: on a fresh checkout the .d files do not exist yet.
+-include $(CORE_SRC:.cpp=.d)
+-include $(TEST_SRC:.cpp=.d)
+-include $(patsubst %.cpp,build/san/%.d,$(CORE_SRC))
+-include $(patsubst %.cpp,build/san/tests/%.d,$(TEST_SRC))
+-include $(patsubst %.cpp,build/shared/%.d,$(CORE_SRC))
 
 # Vendored C (Ed25519) is compiled as C99 into the same object set as the C++
 # core, so both the host tests and the injectable .so carry it.
@@ -34,10 +51,10 @@ build/test_%: tests/%.o $(CORE_OBJ) | build
 # Compile rules
 core/%.o: core/%.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 util/%.o: util/%.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Vendored Luau: upstream is warning-clean only under its own flag set, so it
 # is compiled with -w. Our own units keep -Wall -Wextra.
@@ -51,10 +68,10 @@ third_party/ed25519/%.o: third_party/ed25519/%.c
 	$(CC) -std=c99 -O2 -Wall -Wextra -DED25519_NO_SEED -c $< -o $@
 
 tests/%.o: tests/%.cpp
-	$(CXX) $(CXXFLAGS) -Itests -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Itests -c $< -o $@
 
 samples/%.o: samples/%.cpp
-	$(CXX) $(CXXFLAGS) -Iinclude -Isamples -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Iinclude -Isamples -c $< -o $@
 
 # Compilability check for the sample module (host headers, no game needed).
 check-samples: samples/sample_hitmarker.o
@@ -87,15 +104,15 @@ SAN_CORE_OBJ := $(patsubst core/%.cpp,build/san/core/%.o,$(filter core/%.cpp,$(C
                 $(patsubst %.cpp,build/san/%.o,$(LUAU_SRC))
 
 build/san/tests/%.o: tests/%.cpp | build/san/tests
-	$(CXX) $(SAN_CXXFLAGS) -Itests -c $< -o $@
+	$(CXX) $(SAN_CXXFLAGS) $(DEPFLAGS) -Itests -c $< -o $@
 
 build/san/core/%.o: core/%.cpp | build/san/core
 	@mkdir -p $(dir $@)
-	$(CXX) $(SAN_CXXFLAGS) -c $< -o $@
+	$(CXX) $(SAN_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 build/san/util/%.o: util/%.cpp | build/san/util
 	@mkdir -p $(dir $@)
-	$(CXX) $(SAN_CXXFLAGS) -c $< -o $@
+	$(CXX) $(SAN_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 build/san/third_party/luau/%.o: third_party/luau/%.cpp
 	@mkdir -p $(dir $@)
@@ -130,7 +147,7 @@ SHARED_OBJ := $(patsubst %.cpp,build/shared/%.o,$(CORE_SRC)) \
 
 build/shared/%.o: %.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(SHARED_CXXFLAGS) -c $< -o $@
+	$(CXX) $(SHARED_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 build/shared/third_party/luau/%.o: third_party/luau/%.cpp
 	@mkdir -p $(dir $@)
@@ -180,5 +197,8 @@ clean:
 	rm -rf build core/events/*.o core/hooks/*.o core/modules/*.o core/lifecycle/*.o \
 	       core/net/*.o core/script/*.o util/*.o tests/*.o samples/*.o \
 	       third_party/ed25519/*.o third_party/luau/*.o
+	rm -f core/events/*.d core/hooks/*.d core/modules/*.d core/lifecycle/*.d \
+	      core/net/*.d core/script/*.d util/*.d tests/*.d samples/*.d \
+	      third_party/ed25519/*.d third_party/luau/*.d
 
 .PHONY: all test lib clean
