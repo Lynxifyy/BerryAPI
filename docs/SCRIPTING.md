@@ -665,7 +665,9 @@ cell is not reported every tick.
 
 `UpdateWorldGrid(grid, seam, tick, bus)` is the one call a module makes each
 tick: it snapshots every entity the seam reports, ends the tick, and publishes
-the diff. From a script, the diff arrives as events, no polling:
+the diff. `Berry::World`'s tick handler drives it against the same seam the
+read-only queries use, so the grid is fed every tick the engine runs. From a
+script, the diff arrives as events, no polling:
 
 ```
 await Events.once("entityEntered")   -- "<id>:<type>"

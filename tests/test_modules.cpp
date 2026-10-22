@@ -4,6 +4,7 @@
 #include "berry/game.h"
 #include "berry/combat.h"
 #include "berry/render.h"
+#include "berry/event.h"
 #include "shim_level.h"
 
 #include <cstdio>
@@ -171,6 +172,55 @@ int main() {
   bool projected = r->EspBoxForEntity(snap, cam, &box);
   CHECK(projected);
   CHECK(box.label == "zombie");
+
+  // --- Reactive world grid is driven from the engine tick ---
+  // The World module diffs each tick against the previous one and publishes
+  // the transitions, so a script's `Events.once("entityEntered")` fires
+  // without polling. Assert the whole chain: engine tick -> World::OnTick ->
+  // grid diff -> EventBus.
+  {
+    std::string entered, left;
+    EventBus::ListenerId entId = EventBus::Instance().On(
+        "entityEntered", [&](const EventContext& e) {
+          if (e.data) entered = *(const char**)e.data;
+          return EventResult::Continue;
+        });
+    EventBus::ListenerId leftId = EventBus::Instance().On(
+        "entityLeft", [&](const EventContext& e) {
+          if (e.data) left = *(const char**)e.data;
+          return EventResult::Continue;
+        });
+
+    // First tick establishes the baseline: e1 is Entered.
+    eng.OnGameTick(100);
+    CHECK(entered == "1:mob");
+    entered.clear();
+
+    // A new entity appears; the next tick reports it Entered.
+    EntityId e2{2, 200};
+    EntitySnapshot s2;
+    s2.id = e2;
+    s2.type = EntityType::Player;
+    s2.position = Vec3(0, 0, 0);
+    s2.health = 20;
+    s2.maxHealth = 20;
+    s2.alive = true;
+    s2.name = "steve";
+    shim->AddEntity(e2, s2);
+    eng.OnGameTick(101);
+    CHECK(entered == "2:player");
+    entered.clear();
+
+    // Removing e1 makes the next tick report it Left.
+    shim->RemoveEntity(e1);
+    eng.OnGameTick(102);
+    CHECK(left == "1:mob");
+
+    EventBus::Instance().Off("entityEntered", entId);
+    EventBus::Instance().Off("entityLeft", leftId);
+    // Restore e1 so the later frame/tick section sees the original world.
+    shim->AddEntity(e1, snap);
+  }
 
   // --- Engine frame + tick ---
   eng.OnGameTick(21);

@@ -2,6 +2,7 @@
 #include "berry/module.h"
 #include "berry/engine.h"
 #include "berry/logger.h"
+#include "berry/world_query.h"
 
 #include <memory>
 #include <unordered_map>
@@ -131,12 +132,23 @@ class WorldModule : public BerryModule, public WorldHandle {
   }
   void OnTick(GameTick tick) override {
     if (seam_ && (tick % 20) == 0) RefreshCache();
+    // Drive the reactive grid from the same seam the read-only queries use.
+    // The grid diffs each tick against the previous one and publishes
+    // entityEntered / entityLeft / entityUpdated onto the EventBus, so a
+    // script's `Events.once` sees a transition without polling. It reads the
+    // seam only; it never writes to game state.
+    if (seam_) {
+      const std::vector<WorldDiffEvent> diff =
+          UpdateWorldGrid(grid_, *seam_, (u64)tick);
+      if (!diff.empty()) PublishWorldDiffToEvents(diff);
+    }
   }
 
  private:
   std::shared_ptr<LevelSeam> seam_;
   std::vector<EntityId> cache_;
   std::unordered_map<std::string, std::string> kv_;
+  SpatialGrid grid_;
 };
 
 //----------------------------------------------------------------------------
