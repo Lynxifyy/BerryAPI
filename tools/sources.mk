@@ -30,6 +30,7 @@ CORE_SRC := \
   core/lifecycle/engine.cpp \
   core/lifecycle/thread.cpp \
   core/net/net.cpp \
+  core/net/ws_client.cpp \
   core/net/cosmetic_sync.cpp \
   core/script/crypto.cpp \
   core/script/ed25519.cpp \
@@ -52,6 +53,7 @@ CORE_SRC := \
   core/script/audio.cpp \
   core/script/packet.cpp \
   core/script/record.cpp \
+  core/script/jsonrpc_client.cpp \
   core/net/rpc.cpp \
   core/script/layout.cpp \
   core/script/sigpack.cpp \
@@ -77,6 +79,7 @@ TEST_SRC := \
   tests/test_math.cpp \
   tests/test_modules.cpp \
   tests/test_net.cpp \
+  tests/test_jsonrpc.cpp \
   tests/test_render.cpp \
   tests/test_sample.cpp \
   tests/test_sigscan.cpp \

@@ -50,6 +50,7 @@
 #include "berry/shader.h"
 #include "berry/services.h"
 #include "berry/url.h"
+#include "berry/ws_client.h"
 
 #include <atomic>
 #include <deque>
@@ -163,6 +164,9 @@ class BERRY_API ScriptApi {
     SessionRecorder* recorder = nullptr;
     /// Egress policy for `network.get`. The harness relaxes it for loopback.
     UrlPolicy networkPolicy;
+    /// Script-facing WebSocket pool. Null makes the `ws.*` bindings fail closed
+    /// ("websocket pool unavailable").
+    WsClientPool* wsPool = nullptr;
   };
 
   ScriptApi();

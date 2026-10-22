@@ -38,6 +38,14 @@ inline const BindingSpec* BindingSpecs() {
       {"render.draw_circle", CapKind::Render, 4, "Render"},
       {"render.screen_size", CapKind::Render, 0, "Render"},
       {"render.set_zoom", CapKind::Render, 1, "Render"},
+      {"render.world_to_screen", CapKind::Render, 3, "Render"},
+      {"render.draw_3d_line", CapKind::Render, 7, "Render"},
+      {"render.draw_3d_box", CapKind::Render, 7, "Render"},
+      {"render.draw_3d_text", CapKind::Render, 5, "Render"},
+      {"render.push_clip_rect", CapKind::Render, 4, "Render"},
+      {"render.pop_clip_rect", CapKind::Render, 0, "Render"},
+      {"render.clip_rect", CapKind::Render, 0, "Render"},
+      {"render.camera", CapKind::Render, 0, "Render"},
       {"world.query", CapKind::World, 1, "World"},
       {"world.entity_count", CapKind::World, 0, "World"},
       {"world.block_at", CapKind::World, 3, "World"},
@@ -121,6 +129,17 @@ inline const BindingSpec* BindingSpecs() {
       {"mod.overlay", CapKind::Hud, 0, "Mod"},
       {"network.get", CapKind::Network, 2, "Network"},
       {"network.post", CapKind::Network, 3, "Network"},
+      {"ws.connect", CapKind::Network, 2, "Ws"},
+      {"ws.send_text", CapKind::Network, 2, "Ws"},
+      {"ws.send_binary", CapKind::Network, 2, "Ws"},
+      {"ws.pump", CapKind::Network, 0, "Ws"},
+      {"ws.poll", CapKind::Network, 1, "Ws"},
+      {"ws.pending", CapKind::Network, 1, "Ws"},
+      {"ws.is_open", CapKind::Network, 1, "Ws"},
+      {"ws.close", CapKind::Network, 1, "Ws"},
+      {"ws.count", CapKind::Network, 0, "Ws"},
+      {"ws.url", CapKind::Network, 1, "Ws"},
+      {"json_rpc.call", CapKind::Network, 4, "JsonRpc"},
       {"hud.create_label", CapKind::Hud, 1, "Hud"},
       {"hud.create_panel", CapKind::Hud, 2, "Hud"},
       {"hud.attach", CapKind::Hud, 1, "Hud"},
@@ -187,7 +206,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 162; }
+inline size_t BindingSpecCount() { return 181; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -228,6 +247,14 @@ inline const char* const kRenderNames[] = {
     "render.draw_circle",
     "render.screen_size",
     "render.set_zoom",
+    "render.world_to_screen",
+    "render.draw_3d_line",
+    "render.draw_3d_box",
+    "render.draw_3d_text",
+    "render.push_clip_rect",
+    "render.pop_clip_rect",
+    "render.clip_rect",
+    "render.camera",
 };
 inline const char* const kWorldNames[] = {
     "world.query",
@@ -328,6 +355,21 @@ inline const char* const kNetworkNames[] = {
     "network.get",
     "network.post",
 };
+inline const char* const kWsNames[] = {
+    "ws.connect",
+    "ws.send_text",
+    "ws.send_binary",
+    "ws.pump",
+    "ws.poll",
+    "ws.pending",
+    "ws.is_open",
+    "ws.close",
+    "ws.count",
+    "ws.url",
+};
+inline const char* const kJsonRpcNames[] = {
+    "json_rpc.call",
+};
 inline const char* const kHudNames[] = {
     "hud.create_label",
     "hud.create_panel",
@@ -411,7 +453,7 @@ inline const ModuleBindings* ModuleBindingTable() {
   static const ModuleBindings kModules[] = {
       {"Combat", kCombatNames, 3},
       {"Player", kPlayerNames, 7},
-      {"Render", kRenderNames, 7},
+      {"Render", kRenderNames, 15},
       {"World", kWorldNames, 9},
       {"Entity", kEntityNames, 8},
       {"Fs", kFsNames, 10},
@@ -420,6 +462,8 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Packets", kPacketsNames, 7},
       {"Mod", kModNames, 23},
       {"Network", kNetworkNames, 2},
+      {"Ws", kWsNames, 10},
+      {"JsonRpc", kJsonRpcNames, 1},
       {"Hud", kHudNames, 5},
       {"Perf", kPerfNames, 9},
       {"Input", kInputNames, 3},
@@ -432,7 +476,7 @@ inline const ModuleBindings* ModuleBindingTable() {
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 19; }
+inline size_t ModuleBindingCount() { return 21; }
 
 }  // namespace api
 }  // namespace Berry

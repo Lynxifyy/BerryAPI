@@ -6,7 +6,9 @@
 #include "berry/engine.h"
 #include "berry/event.h"
 #include "berry/generated_bindings.h"
+#include "berry/jsonrpc_client.h"
 #include "berry/logger.h"
+#include "berry/ws_client.h"
 
 #include <algorithm>
 #include <cmath>
@@ -547,6 +549,130 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Nil();
   });
 
+  //--- Render: world-space projection, 3D geometry and clipping ------------
+  //
+  // The 3D helpers project through the camera the render thread published and
+  // queue the same 2D primitives, so they go through the one RenderSeam. The
+  // camera is read from the Renderer (not the script thread's own copy), so a
+  // script projects against exactly the view the frame is drawn with.
+  install("render.world_to_screen", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.world_to_screen: renderer unavailable"); return ScriptValue::Nil(); }
+    const Vec3 world(SafeCoord(args[0]), SafeCoord(args[1]), SafeCoord(args[2]));
+    const CameraState cam = services_.renderer->camera();
+    ScriptTable t;
+    Vec2 p;
+    const bool visible = cam.valid && cam.WorldToScreen(world, &p);
+    t["visible"] = ScriptValue::Bool(visible);
+    t["x"] = ScriptValue::Num(visible ? (f64)p.x : 0.0);
+    t["y"] = ScriptValue::Num(visible ? (f64)p.y : 0.0);
+    // The eye is the inverse of the view matrix's translation column; distance
+    // is measured from there so a caller can sort overlays by depth.
+    const Vec3 eye(-(cam.view.m[0] * cam.view.m[12] + cam.view.m[1] * cam.view.m[13] +
+                     cam.view.m[2] * cam.view.m[14]),
+                   -(cam.view.m[4] * cam.view.m[12] + cam.view.m[5] * cam.view.m[13] +
+                     cam.view.m[6] * cam.view.m[14]),
+                   -(cam.view.m[8] * cam.view.m[12] + cam.view.m[9] * cam.view.m[13] +
+                     cam.view.m[10] * cam.view.m[14]));
+    t["distance"] = ScriptValue::Num((f64)(cam.valid ? world.Distance(eye) : 0.0f));
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("render.draw_3d_line", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.draw_3d_line: renderer unavailable"); return ScriptValue::Nil(); }
+    const Vec3 a(SafeCoord(args[0]), SafeCoord(args[1]), SafeCoord(args[2]));
+    const Vec3 b(SafeCoord(args[3]), SafeCoord(args[4]), SafeCoord(args[5]));
+    const Rgba color = ParseRgba(args[6]);
+    PostRender([this, a, b, color] {
+      if (services_.renderer) services_.renderer->Draw3DLine(a, b, color);
+    });
+    return ScriptValue::Nil();
+  });
+
+  install("render.draw_3d_box", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.draw_3d_box: renderer unavailable"); return ScriptValue::Nil(); }
+    const Vec3 mn(SafeCoord(args[0]), SafeCoord(args[1]), SafeCoord(args[2]));
+    const Vec3 mx(SafeCoord(args[3]), SafeCoord(args[4]), SafeCoord(args[5]));
+    const Rgba color = ParseRgba(args[6]);
+    PostRender([this, mn, mx, color] {
+      if (services_.renderer) services_.renderer->Draw3DBox(mn, mx, color);
+    });
+    return ScriptValue::Nil();
+  });
+
+  install("render.draw_3d_text", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.draw_3d_text: renderer unavailable"); return ScriptValue::Nil(); }
+    const Vec3 world(SafeCoord(args[0]), SafeCoord(args[1]), SafeCoord(args[2]));
+    const std::string text = args[3].ToDisplay();
+    const Rgba color = ParseRgba(args[4]);
+    PostRender([this, world, text, color] {
+      if (services_.renderer) services_.renderer->Draw3DText(world, text.c_str(), color);
+    });
+    return ScriptValue::Nil();
+  });
+
+  install("render.push_clip_rect", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.push_clip_rect: renderer unavailable"); return ScriptValue::Nil(); }
+    const f32 x = SafeCoord(args[0]);
+    const f32 y = SafeCoord(args[1]);
+    const f32 w = SafeCoord(args[2]);
+    const f32 h = SafeCoord(args[3]);
+    PostRender([this, x, y, w, h] {
+      if (!services_.renderer) return;
+      Rect2D r;
+      r.min = Vec2(x, y);
+      r.max = Vec2(x + w, y + h);
+      services_.renderer->PushClipRect(r);
+    });
+    return ScriptValue::Nil();
+  });
+
+  install("render.pop_clip_rect", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.renderer) { ctx.RaiseError("render.pop_clip_rect: renderer unavailable"); return ScriptValue::Nil(); }
+    PostRender([this] {
+      if (services_.renderer) services_.renderer->PopClipRect();
+    });
+    return ScriptValue::Nil();
+  });
+
+  install("render.clip_rect", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.renderer) { ctx.RaiseError("render.clip_rect: renderer unavailable"); return ScriptValue::Nil(); }
+    // The clip stack lives on the render thread, but a script's pushes are
+    // queued. Reporting the last-known clip from the render thread keeps the
+    // read honest (it never fabricates a value the renderer has not applied).
+    Rect2D r;
+    const bool active = services_.renderer->clipRect(&r);
+    ScriptTable t;
+    t["active"] = ScriptValue::Bool(active);
+    t["x"] = ScriptValue::Num(active ? (f64)r.min.x : 0.0);
+    t["y"] = ScriptValue::Num(active ? (f64)r.min.y : 0.0);
+    t["w"] = ScriptValue::Num(active ? (f64)(r.max.x - r.min.x) : 0.0);
+    t["h"] = ScriptValue::Num(active ? (f64)(r.max.y - r.min.y) : 0.0);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("render.camera", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    const CameraState cam = services_.renderer ? services_.renderer->camera() : CameraState();
+    // The camera's world position is the inverse of the view matrix's
+    // translation; yaw/pitch come from the view's forward axis so a script can
+    // reason about the view direction without the matrix.
+    const Vec3 eye(-(cam.view.m[0] * cam.view.m[12] + cam.view.m[1] * cam.view.m[13] +
+                     cam.view.m[2] * cam.view.m[14]),
+                   -(cam.view.m[4] * cam.view.m[12] + cam.view.m[5] * cam.view.m[13] +
+                     cam.view.m[6] * cam.view.m[14]),
+                   -(cam.view.m[8] * cam.view.m[12] + cam.view.m[9] * cam.view.m[13] +
+                     cam.view.m[10] * cam.view.m[14]));
+    const Vec3 fwd(-cam.view.m[2], -cam.view.m[6], -cam.view.m[10]);
+    const Vec3 angles = fwd.LengthSq() > 0.0f ? fwd.Angle() : Vec3();
+    ScriptTable t;
+    t["valid"] = ScriptValue::Bool(cam.valid);
+    t["x"] = ScriptValue::Num((f64)eye.x);
+    t["y"] = ScriptValue::Num((f64)eye.y);
+    t["z"] = ScriptValue::Num((f64)eye.z);
+    t["pitch"] = ScriptValue::Num((f64)angles.x);
+    t["yaw"] = ScriptValue::Num((f64)angles.y);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
   //--- World (read-only queries) -------------------------------------------
   install("world.query", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
     if (!services_.world) { ctx.RaiseError("world.query: world unavailable"); return ScriptValue::Num(0); }
@@ -840,6 +966,128 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     const f64 timeout = args[2].AsNumber();
     return HttpRequestBlocking(ctx, "POST", url, body, (long)timeout,
                                services_.networkPolicy);
+  });
+
+  //--- Ws (script-facing WebSocket client) ---------------------------------
+  //
+  // The pool owns the sockets and applies the same egress gate the HTTP path
+  // uses, so a WebSocket cannot become a way around the SSRF rules. The
+  // connect/send/pump calls run on the script worker, where blocking IO is
+  // expected.
+  install("ws.connect", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.connect: websocket pool unavailable"); return ScriptValue::Num(0); }
+    const std::string url = args[0].ToDisplay();
+    const f64 timeout = args[1].AsNumber();
+    int t = 8000;
+    if (std::isfinite(timeout)) t = (int)timeout;
+    if (t < 1000) t = 1000;
+    if (t > 60000) t = 60000;
+    WsClientError err = WsClientError::Ok;
+    const u64 h = services_.wsPool->Connect(url, ctx.granted(), services_.networkPolicy,
+                                            t, &err);
+    if (h == 0) {
+      ctx.RaiseError(std::string("ws.connect: ") + WsClientErrorName(err) +
+                     " (" + url + ")");
+      return ScriptValue::Num(0);
+    }
+    return ScriptValue::Num((f64)h);
+  });
+
+  install("ws.send_text", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.send_text: websocket pool unavailable"); return ScriptValue::Bool(false); }
+    const u64 handle = (u64)args[0].AsNumber();
+    WsClientError err = WsClientError::Ok;
+    const bool ok = services_.wsPool->SendText(handle, args[1].ToDisplay(), &err);
+    if (!ok) ctx.RaiseError(std::string("ws.send_text: ") + WsClientErrorName(err));
+    return ScriptValue::Bool(ok);
+  });
+
+  install("ws.send_binary", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.send_binary: websocket pool unavailable"); return ScriptValue::Bool(false); }
+    const u64 handle = (u64)args[0].AsNumber();
+    const std::string data = args[1].ToDisplay();
+    WsClientError err = WsClientError::Ok;
+    const bool ok = services_.wsPool->SendBinary(handle, data.data(), data.size(), &err);
+    if (!ok) ctx.RaiseError(std::string("ws.send_binary: ") + WsClientErrorName(err));
+    return ScriptValue::Bool(ok);
+  });
+
+  install("ws.pump", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.pump: websocket pool unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.wsPool->Pump());
+  });
+
+  install("ws.poll", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.poll: websocket pool unavailable"); return ScriptValue::Nil(); }
+    const u64 handle = (u64)args[0].AsNumber();
+    WsClientMessage m;
+    const bool got = services_.wsPool->Poll(handle, &m);
+    ScriptTable t;
+    t["ok"] = ScriptValue::Bool(got);
+    t["opcode"] = ScriptValue::Str(got ? m.opcode : std::string());
+    t["data"] = ScriptValue::Str(got ? m.data : std::string());
+    t["binary"] = ScriptValue::Bool(got && m.binary);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("ws.pending", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.pending: websocket pool unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.wsPool->Pending((u64)args[0].AsNumber()));
+  });
+
+  install("ws.is_open", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.is_open: websocket pool unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.wsPool->IsOpen((u64)args[0].AsNumber()));
+  });
+
+  install("ws.close", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.close: websocket pool unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.wsPool->Close((u64)args[0].AsNumber()));
+  });
+
+  install("ws.count", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.count: websocket pool unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.wsPool->Count());
+  });
+
+  install("ws.url", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.url: websocket pool unavailable"); return ScriptValue::Str(""); }
+    return ScriptValue::Str(services_.wsPool->Url((u64)args[0].AsNumber()));
+  });
+
+  //--- JsonRpc (JSON-RPC 2.0 client) ---------------------------------------
+  install("json_rpc.call", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    const std::string url = args[0].ToDisplay();
+    const std::string method = args[1].ToDisplay();
+    const std::string params = args[2].ToDisplay();
+    const f64 timeout = args[3].AsNumber();
+    const JsonRpcOutcome out =
+        JsonRpcCallBlocking(ctx, url, method, params, (long)timeout,
+                            services_.networkPolicy);
+    ScriptTable t;
+    t["ok"] = ScriptValue::Bool(out.ok);
+    t["status"] = ScriptValue::Num((f64)out.http_status);
+    t["error_code"] = ScriptValue::Num((f64)out.error_code);
+    t["error_message"] = ScriptValue::Str(
+        out.ok ? std::string()
+               : (out.error_message.empty() ? out.transport_error : out.error_message));
+    if (out.ok) {
+      // Decode the result JSON into a table so a script reads fields directly.
+      std::string derr;
+      ScriptValue result = JsonTextToScriptValue(out.result_json, &derr);
+      if (!derr.empty()) {
+        // The envelope validated, so this should not happen; fail closed rather
+        // than hand back a value the script would trust.
+        t["ok"] = ScriptValue::Bool(false);
+        t["error_message"] = ScriptValue::Str("json_rpc.call: result decode failed");
+        t["result"] = ScriptValue::Nil();
+      } else {
+        t["result"] = std::move(result);
+      }
+    } else {
+      t["result"] = ScriptValue::Nil();
+    }
+    return ScriptValue::Tbl(std::move(t));
   });
 
   //--- HUD (retained-mode widgets) -----------------------------------------

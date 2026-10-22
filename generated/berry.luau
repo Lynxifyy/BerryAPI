@@ -30,7 +30,7 @@ export type Player = {
 
 -- Capability required: render.
 export type Render = {
-  -- Client-side drawing. Everything here is local to this screen.
+  -- Client-side drawing. Everything here is local to this screen. The 2D helpers take pixels; the 3D helpers take world coordinates and project through the current camera, so a script can draw an ESP-style overlay without knowing the projection matrix. Clipping is a nested scissor stack: `push_clip_rect` narrows the active clip (a child can only shrink its parent) and `pop_clip_rect` restores it. Rectangles and lines are clipped exactly; text and circles are kept while any part of them intersects the clip and dropped only when they fall entirely outside.
   draw_text: (x: number, y: number, text: string, color: Rgba) -> (),
   draw_text_centered: (x: number, y: number, text: string, color: Rgba) -> (),
   draw_rect: (x: number, y: number, w: number, h: number, color: Rgba) -> (),
@@ -38,6 +38,22 @@ export type Render = {
   draw_circle: (x: number, y: number, radius: number, color: Rgba) -> (),
   screen_size: () -> Vec3,
   set_zoom: (factor: number) -> (),
+  -- Projects a world point to pixels through the current camera. Returns {visible, x, y, distance}: `visible` is false when the point is behind the camera or no camera is set, so a caller checks it before drawing. `distance` is the world distance from the camera eye.
+  world_to_screen: (x: number, y: number, z: number) -> {[string]: any},
+  -- Draws a world-space line. Clipped against the active clip rectangle; dropped when an endpoint is behind the camera.
+  draw_3d_line: (x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, color: Rgba) -> (),
+  -- Draws the 12 edges of an axis-aligned world box from (min) to (max).
+  draw_3d_box: (min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number, color: Rgba) -> (),
+  -- Draws text anchored at a world position. Nothing is drawn when the point is behind the camera or outside the active clip.
+  draw_3d_text: (x: number, y: number, z: number, text: string, color: Rgba) -> (),
+  -- Pushes a clip rectangle, intersected with the current top so a child clip can only narrow its parent. Bounded to 32 levels; a push past the cap is ignored rather than growing the stack.
+  push_clip_rect: (x: number, y: number, w: number, h: number) -> (),
+  -- Pops the innermost clip rectangle. An unmatched pop is a no-op.
+  pop_clip_rect: () -> (),
+  -- The active clip rectangle as {active, x, y, w, h}; `active` is false when no clip is pushed.
+  clip_rect: () -> {[string]: any},
+  -- The camera the renderer last drew with, as {valid, x, y, z, yaw, pitch}. `valid` is false until a camera is bound.
+  camera: () -> {[string]: any},
 }
 
 -- Capability required: world.
@@ -171,6 +187,30 @@ export type Network = {
   -- Outbound requests. Requires a network grant scoped to the host. Both calls return an HttpResult table (status, ok, headers, body, error, truncated) rather than raising, so a script can branch on the outcome; headers is a newline-separated \"Name: value\" list. A refused destination (bad URL, egress policy, or a host outside the grant) comes back with status 0 and a non-empty error. TLS is not implemented, so an https destination is refused rather than downgraded to plaintext.
   get: (url: string, timeout_ms: number) -> HttpResult,
   post: (url: string, body: string, timeout_ms: number) -> HttpResult,
+}
+
+-- Capability required: network.
+export type Ws = {
+  -- WebSocket client. Requires a network grant scoped to the host, and the same egress policy `network.get` uses: a ws:// URL to a private or reserved host is refused, and wss:// fails closed because TLS is not implemented. A connection is addressed by an integer handle; the frames a peer sends are buffered in order and read with `ws.poll` after `ws.pump`. Every call runs on the script worker (blocking reads are expected there). `ws.connect` returns 0 and raises on a refused destination or a failed handshake. `ws.poll` returns {ok, opcode, data, binary}; `ok` is false when the inbox is empty.
+  connect: (url: string, timeout_ms: number) -> number,
+  send_text: (handle: number, text: string) -> boolean,
+  send_binary: (handle: number, data: string) -> boolean,
+  -- Reads any pending frames for every open handle into their inboxes. Returns how many frames were read.
+  pump: () -> number,
+  -- Pops the oldest buffered frame for `handle`. `ok` is false when the inbox is empty or the handle is unknown.
+  poll: (handle: number) -> {[string]: any},
+  pending: (handle: number) -> number,
+  is_open: (handle: number) -> boolean,
+  close: (handle: number) -> boolean,
+  count: () -> number,
+  -- The URL a handle was opened with, or \"\" when the handle is unknown.
+  url: (handle: number) -> string,
+}
+
+-- Capability required: network.
+export type JsonRpc = {
+  -- JSON-RPC 2.0 client. Issues one call over the same egress-checked HTTP path as `network.post`, so the destination rules are identical. The response is validated as JSON-RPC 2.0 and its id must match before the result is trusted. `call` returns {ok, result, error_code, error_message, status}: `result` is a structured table decoded from the reply's `result` member, and a transport failure (bad URL, refused destination, HTTP status, malformed envelope) comes back with `ok` false and `error_message` set, so a script branches on the outcome rather than unwinding. `params_json` is raw JSON (an object or array); an empty string omits `params`.
+  call: (url: string, method: string, params_json: string, timeout_ms: number) -> {[string]: any},
 }
 
 -- Capability required: hud.
