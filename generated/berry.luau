@@ -16,11 +16,26 @@ export type Combat = {
   observe: (ticks: number) -> number,
 }
 
+-- Capability required: world.
+export type Player = {
+  -- Read-only view of the LOCAL player. This is the client's own state, which it already holds; nothing here reveals another player. Reads fail closed when the local player is not bound.
+  position: () -> Vec3,
+  rotation: () -> Vec3,
+  velocity: () -> Vec3,
+  health: () -> number,
+  max_health: () -> number,
+  alive: () -> boolean,
+  name: () -> string,
+}
+
 -- Capability required: render.
 export type Render = {
   -- Client-side drawing. Everything here is local to this screen.
   draw_text: (x: number, y: number, text: string, color: Rgba) -> (),
+  draw_text_centered: (x: number, y: number, text: string, color: Rgba) -> (),
   draw_rect: (x: number, y: number, w: number, h: number, color: Rgba) -> (),
+  draw_line: (x1: number, y1: number, x2: number, y2: number, color: Rgba) -> (),
+  draw_circle: (x: number, y: number, radius: number, color: Rgba) -> (),
   screen_size: () -> Vec3,
   set_zoom: (factor: number) -> (),
 }
@@ -29,7 +44,11 @@ export type Render = {
 export type World = {
   -- Read-only world queries. The core never hands out raw pointers.
   query: (within: number) -> number,
+  entity_count: () -> number,
   block_at: (x: number, y: number, z: number) -> string,
+  time: () -> {[string]: any},
+  is_day: () -> boolean,
+  is_raining: () -> boolean,
 }
 
 -- Capability required: network.
@@ -52,8 +71,12 @@ export type Hud = {
 export type Perf = {
   -- Frame timing and quality controls.
   frame_time_ms: () -> number,
+  stats: () -> {[string]: any},
+  quality: () -> number,
   set_target_fps: (fps: number) -> (),
   set_thermal_mode: (enabled: boolean) -> (),
+  -- Select the device profile the governor tunes itself for: generic, mobile-low, mobile-high or desktop. Unknown names are refused (fail closed).
+  set_platform: (name: string) -> (),
 }
 
 -- Capability required: input.

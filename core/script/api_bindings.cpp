@@ -126,6 +126,25 @@ std::string Lower(const std::string& s) {
   return out;
 }
 
+/// A Vec3 as a script table {x,y,z}. The IDL's Vec3 maps to this shape.
+ScriptValue Vec3Value(const Vec3& v) {
+  ScriptTable t;
+  t["x"] = ScriptValue::Num((f64)v.x);
+  t["y"] = ScriptValue::Num((f64)v.y);
+  t["z"] = ScriptValue::Num((f64)v.z);
+  return ScriptValue::Tbl(std::move(t));
+}
+
+/// A finite number clamped into [lo, hi]; non-finite input yields `fallback`.
+/// Used for coordinates a script feeds to the renderer, so a NaN cannot reach
+/// the draw list.
+f32 SafeCoord(const ScriptValue& v, f32 fallback = 0.0f) {
+  if (!v.IsNumber()) return fallback;
+  const f64 n = v.AsNumber();
+  if (!std::isfinite(n)) return fallback;
+  return (f32)n;
+}
+
 /// Named input keys the observer tracks. Returns null for anything else so the
 /// caller fails closed rather than guessing a mapping.
 const char* KeyField(const std::string& key, bool* out) {
@@ -257,11 +276,81 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Num((f64)n);
   });
 
+  //--- Player (read-only view of the LOCAL player) -------------------------
+  //
+  // Every read resolves the local player through the World seam and fails
+  // closed when it is not bound: a script sees "no player" rather than a
+  // fabricated or another entity's state. This is the client's own state.
+  auto localSnapshot = [this](ScriptContext& ctx, const char* who,
+                              EntitySnapshot* out) -> bool {
+    if (!services_.world) {
+      ctx.RaiseError(std::string(who) + ": world unavailable");
+      return false;
+    }
+    auto seam = services_.world->Seam();
+    if (!seam) {
+      ctx.RaiseError(std::string(who) + ": no level seam bound");
+      return false;
+    }
+    const EntityId id = services_.localPlayer;
+    if (!id.raw && !id.runtime) {
+      ctx.RaiseError(std::string(who) + ": no local player bound");
+      return false;
+    }
+    if (!seam->GetEntity(id, out)) {
+      ctx.RaiseError(std::string(who) + ": local player not present");
+      return false;
+    }
+    return true;
+  };
+
+  install("player.position", [this, localSnapshot](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    EntitySnapshot s;
+    if (!localSnapshot(ctx, "player.position", &s)) return Vec3Value(Vec3());
+    return Vec3Value(s.position);
+  });
+
+  install("player.rotation", [this, localSnapshot](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    EntitySnapshot s;
+    if (!localSnapshot(ctx, "player.rotation", &s)) return Vec3Value(Vec3());
+    return Vec3Value(s.rotation);
+  });
+
+  install("player.velocity", [this, localSnapshot](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    EntitySnapshot s;
+    if (!localSnapshot(ctx, "player.velocity", &s)) return Vec3Value(Vec3());
+    return Vec3Value(s.velocity);
+  });
+
+  install("player.health", [this, localSnapshot](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    EntitySnapshot s;
+    if (!localSnapshot(ctx, "player.health", &s)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)s.health);
+  });
+
+  install("player.max_health", [this, localSnapshot](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    EntitySnapshot s;
+    if (!localSnapshot(ctx, "player.max_health", &s)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)s.maxHealth);
+  });
+
+  install("player.alive", [this, localSnapshot](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    EntitySnapshot s;
+    if (!localSnapshot(ctx, "player.alive", &s)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(s.alive);
+  });
+
+  install("player.name", [this, localSnapshot](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    EntitySnapshot s;
+    if (!localSnapshot(ctx, "player.name", &s)) return ScriptValue::Str("");
+    return ScriptValue::Str(s.name);
+  });
+
   //--- Render (client-side draw) -------------------------------------------
   install("render.draw_text", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
     if (!services_.renderer) { ctx.RaiseError("render.draw_text: renderer unavailable"); return ScriptValue::Nil(); }
-    const f32 x = (f32)args[0].AsNumber();
-    const f32 y = (f32)args[1].AsNumber();
+    const f32 x = SafeCoord(args[0]);
+    const f32 y = SafeCoord(args[1]);
     const std::string text = args[2].ToDisplay();
     const Rgba color = ParseRgba(args[3]);
     PostRender([this, x, y, text, color] {
@@ -270,12 +359,26 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Nil();
   });
 
+  install("render.draw_text_centered", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.draw_text_centered: renderer unavailable"); return ScriptValue::Nil(); }
+    const f32 x = SafeCoord(args[0]);
+    const f32 y = SafeCoord(args[1]);
+    const std::string text = args[2].ToDisplay();
+    const Rgba color = ParseRgba(args[3]);
+    PostRender([this, x, y, text, color] {
+      if (services_.renderer) {
+        services_.renderer->DrawTextCentered(Vec2(x, y), text.c_str(), color, 1.0f);
+      }
+    });
+    return ScriptValue::Nil();
+  });
+
   install("render.draw_rect", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
     if (!services_.renderer) { ctx.RaiseError("render.draw_rect: renderer unavailable"); return ScriptValue::Nil(); }
-    const f32 x = (f32)args[0].AsNumber();
-    const f32 y = (f32)args[1].AsNumber();
-    const f32 w = (f32)args[2].AsNumber();
-    const f32 h = (f32)args[3].AsNumber();
+    const f32 x = SafeCoord(args[0]);
+    const f32 y = SafeCoord(args[1]);
+    const f32 w = SafeCoord(args[2]);
+    const f32 h = SafeCoord(args[3]);
     const Rgba color = ParseRgba(args[4]);
     PostRender([this, x, y, w, h, color] {
       if (!services_.renderer) return;
@@ -289,13 +392,38 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Nil();
   });
 
+  install("render.draw_line", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.draw_line: renderer unavailable"); return ScriptValue::Nil(); }
+    const f32 x1 = SafeCoord(args[0]);
+    const f32 y1 = SafeCoord(args[1]);
+    const f32 x2 = SafeCoord(args[2]);
+    const f32 y2 = SafeCoord(args[3]);
+    const Rgba color = ParseRgba(args[4]);
+    PostRender([this, x1, y1, x2, y2, color] {
+      if (services_.renderer) {
+        services_.renderer->DrawLine(Vec2(x1, y1), Vec2(x2, y2), color);
+      }
+    });
+    return ScriptValue::Nil();
+  });
+
+  install("render.draw_circle", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.draw_circle: renderer unavailable"); return ScriptValue::Nil(); }
+    const f32 x = SafeCoord(args[0]);
+    const f32 y = SafeCoord(args[1]);
+    // A negative radius would draw nothing meaningful and can confuse the
+    // seam's segment math, so clamp it up to zero.
+    const f32 radius = std::max(0.0f, SafeCoord(args[2]));
+    const Rgba color = ParseRgba(args[3]);
+    PostRender([this, x, y, radius, color] {
+      if (services_.renderer) services_.renderer->DrawCircle(Vec2(x, y), radius, color);
+    });
+    return ScriptValue::Nil();
+  });
+
   install("render.screen_size", [this](ScriptContext&, const std::vector<ScriptValue>&) {
     const Vec2 s = screenSize();
-    ScriptTable t;
-    t["x"] = ScriptValue::Num((f64)s.x);
-    t["y"] = ScriptValue::Num((f64)s.y);
-    t["z"] = ScriptValue::Num(0);
-    return ScriptValue::Tbl(std::move(t));
+    return Vec3Value(Vec3(s.x, s.y, 0.0f));
   });
 
   install("render.set_zoom", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
@@ -336,6 +464,41 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     const Vec3 p((f32)args[0].AsNumber(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber());
     const u32 block = services_.world->GetBlock(p);
     return ScriptValue::Str(std::to_string(block));
+  });
+
+  install("world.entity_count", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.world) { ctx.RaiseError("world.entity_count: world unavailable"); return ScriptValue::Num(0); }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("world.entity_count: no level seam bound"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)seam->AllEntities().size());
+  });
+
+  install("world.time", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.world) { ctx.RaiseError("world.time: world unavailable"); return ScriptValue::Nil(); }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("world.time: no level seam bound"); return ScriptValue::Nil(); }
+    const LevelTime t = seam->GetTime();
+    ScriptTable out;
+    out["absolute"] = ScriptValue::Num((f64)t.absolute);
+    out["daylight"] = ScriptValue::Num((f64)t.daylight);
+    out["day"] = ScriptValue::Bool(t.day);
+    out["rain"] = ScriptValue::Num((f64)t.rainLevel);
+    out["thunder"] = ScriptValue::Num((f64)t.thunderLevel);
+    return ScriptValue::Tbl(std::move(out));
+  });
+
+  install("world.is_day", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.world) { ctx.RaiseError("world.is_day: world unavailable"); return ScriptValue::Bool(false); }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("world.is_day: no level seam bound"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(seam->GetTime().day);
+  });
+
+  install("world.is_raining", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.world) { ctx.RaiseError("world.is_raining: world unavailable"); return ScriptValue::Bool(false); }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("world.is_raining: no level seam bound"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(seam->GetTime().rainLevel > 0.0f);
   });
 
   //--- Network (granted, host-scoped) --------------------------------------
@@ -425,6 +588,45 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Num(0);
   });
 
+  install("perf.stats", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.governor) { ctx.RaiseError("perf.stats: governor unavailable"); return ScriptValue::Nil(); }
+    const FrameStats st = services_.governor->stats();
+    ScriptTable out;
+    out["avg_ms"] = ScriptValue::Num(st.avgMs);
+    out["p95_ms"] = ScriptValue::Num(st.p95Ms);
+    out["p99_ms"] = ScriptValue::Num(st.p99Ms);
+    out["min_ms"] = ScriptValue::Num(st.minMs);
+    out["max_ms"] = ScriptValue::Num(st.maxMs);
+    out["fps"] = ScriptValue::Num(st.Fps());
+    out["samples"] = ScriptValue::Num((f64)st.samples);
+    return ScriptValue::Tbl(std::move(out));
+  });
+
+  install("perf.quality", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.governor) { ctx.RaiseError("perf.quality: governor unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.governor->quality().Mean());
+  });
+
+  install("perf.set_platform", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.governor) { ctx.RaiseError("perf.set_platform: governor unavailable"); return ScriptValue::Nil(); }
+    const std::string name = Lower(args[0].ToDisplay());
+    PlatformClass cls;
+    if (name == "generic") cls = PlatformClass::Generic;
+    else if (name == "mobile-low") cls = PlatformClass::MobileLow;
+    else if (name == "mobile-high") cls = PlatformClass::MobileHigh;
+    else if (name == "desktop") cls = PlatformClass::Desktop;
+    else {
+      // An unknown profile name is refused rather than silently mapped to a
+      // default: the script asked for something that does not exist.
+      ctx.RaiseError("perf.set_platform: unknown profile '" + args[0].ToDisplay() + "'");
+      return ScriptValue::Nil();
+    }
+    PostRender([this, cls] {
+      if (services_.governor) services_.governor->SetPlatform(cls);
+    });
+    return ScriptValue::Nil();
+  });
+
   install("perf.set_target_fps", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
     if (!services_.governor) { ctx.RaiseError("perf.set_target_fps: governor unavailable"); return ScriptValue::Nil(); }
     const f64 fps = args[0].AsNumber();
@@ -483,11 +685,7 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     if (!services_.velocity || !services_.velocity->LocalVelocity(&v)) {
       v = Vec3(0, 0, 0);
     }
-    ScriptTable t;
-    t["x"] = ScriptValue::Num((f64)v.x);
-    t["y"] = ScriptValue::Num((f64)v.y);
-    t["z"] = ScriptValue::Num((f64)v.z);
-    return ScriptValue::Tbl(std::move(t));
+    return Vec3Value(v);
   });
 
   //--- Cosmetic (local loadout; renders on this screen only) ---------------

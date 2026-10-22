@@ -15,6 +15,20 @@ Capability: `combat`.
 | `combat.last_hit_damage() -> number` | `combat` | - |
 | `combat.observe(ticks: number) -> number` | `combat` | - |
 
+## Player
+
+Capability: `world`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `player.position() -> Vec3` | `world` | Read-only view of the LOCAL player. This is the client's own state, which it already holds; nothing here reveals another player. Reads fail closed when the local player is not bound. |
+| `player.rotation() -> Vec3` | `world` | - |
+| `player.velocity() -> Vec3` | `world` | - |
+| `player.health() -> number` | `world` | - |
+| `player.max_health() -> number` | `world` | - |
+| `player.alive() -> bool` | `world` | - |
+| `player.name() -> string` | `world` | - |
+
 ## Render
 
 Capability: `render`.
@@ -22,7 +36,10 @@ Capability: `render`.
 | Function | Capability | Description |
 | --- | --- | --- |
 | `render.draw_text(x: number, y: number, text: string, color: Rgba) -> nil` | `render` | Client-side drawing. Everything here is local to this screen. |
+| `render.draw_text_centered(x: number, y: number, text: string, color: Rgba) -> nil` | `render` | - |
 | `render.draw_rect(x: number, y: number, w: number, h: number, color: Rgba) -> nil` | `render` | - |
+| `render.draw_line(x1: number, y1: number, x2: number, y2: number, color: Rgba) -> nil` | `render` | - |
+| `render.draw_circle(x: number, y: number, radius: number, color: Rgba) -> nil` | `render` | - |
 | `render.screen_size() -> Vec3` | `render` | - |
 | `render.set_zoom(factor: number) -> nil` | `render` | - |
 
@@ -33,7 +50,11 @@ Capability: `world`.
 | Function | Capability | Description |
 | --- | --- | --- |
 | `world.query(within: number) -> number` | `world` | Read-only world queries. The core never hands out raw pointers. |
+| `world.entity_count() -> number` | `world` | - |
 | `world.block_at(x: number, y: number, z: number) -> string` | `world` | - |
+| `world.time() -> Table` | `world` | - |
+| `world.is_day() -> bool` | `world` | - |
+| `world.is_raining() -> bool` | `world` | - |
 
 ## Network
 
@@ -62,8 +83,11 @@ Capability: `perf`.
 | Function | Capability | Description |
 | --- | --- | --- |
 | `perf.frame_time_ms() -> number` | `perf` | Frame timing and quality controls. |
+| `perf.stats() -> Table` | `perf` | - |
+| `perf.quality() -> number` | `perf` | - |
 | `perf.set_target_fps(fps: number) -> nil` | `perf` | - |
 | `perf.set_thermal_mode(enabled: bool) -> nil` | `perf` | - |
+| `perf.set_platform(name: string) -> nil` | `perf` | Select the device profile the governor tunes itself for: generic, mobile-low, mobile-high or desktop. Unknown names are refused (fail closed). |
 
 ## Input
 

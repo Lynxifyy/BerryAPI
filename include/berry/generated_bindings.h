@@ -24,12 +24,26 @@ inline const BindingSpec* BindingSpecs() {
       {"combat.recent_kills", CapKind::Combat, 0, "Combat"},
       {"combat.last_hit_damage", CapKind::Combat, 0, "Combat"},
       {"combat.observe", CapKind::Combat, 1, "Combat"},
+      {"player.position", CapKind::World, 0, "Player"},
+      {"player.rotation", CapKind::World, 0, "Player"},
+      {"player.velocity", CapKind::World, 0, "Player"},
+      {"player.health", CapKind::World, 0, "Player"},
+      {"player.max_health", CapKind::World, 0, "Player"},
+      {"player.alive", CapKind::World, 0, "Player"},
+      {"player.name", CapKind::World, 0, "Player"},
       {"render.draw_text", CapKind::Render, 4, "Render"},
+      {"render.draw_text_centered", CapKind::Render, 4, "Render"},
       {"render.draw_rect", CapKind::Render, 5, "Render"},
+      {"render.draw_line", CapKind::Render, 5, "Render"},
+      {"render.draw_circle", CapKind::Render, 4, "Render"},
       {"render.screen_size", CapKind::Render, 0, "Render"},
       {"render.set_zoom", CapKind::Render, 1, "Render"},
       {"world.query", CapKind::World, 1, "World"},
+      {"world.entity_count", CapKind::World, 0, "World"},
       {"world.block_at", CapKind::World, 3, "World"},
+      {"world.time", CapKind::World, 0, "World"},
+      {"world.is_day", CapKind::World, 0, "World"},
+      {"world.is_raining", CapKind::World, 0, "World"},
       {"network.get", CapKind::Network, 2, "Network"},
       {"hud.create_label", CapKind::Hud, 1, "Hud"},
       {"hud.create_panel", CapKind::Hud, 2, "Hud"},
@@ -37,8 +51,11 @@ inline const BindingSpec* BindingSpecs() {
       {"hud.set_visible", CapKind::Hud, 2, "Hud"},
       {"hud.tween", CapKind::Hud, 4, "Hud"},
       {"perf.frame_time_ms", CapKind::Perf, 0, "Perf"},
+      {"perf.stats", CapKind::Perf, 0, "Perf"},
+      {"perf.quality", CapKind::Perf, 0, "Perf"},
       {"perf.set_target_fps", CapKind::Perf, 1, "Perf"},
       {"perf.set_thermal_mode", CapKind::Perf, 1, "Perf"},
+      {"perf.set_platform", CapKind::Perf, 1, "Perf"},
       {"input.is_key_down", CapKind::Input, 1, "Input"},
       {"input.clicks_per_second", CapKind::Input, 0, "Input"},
       {"input.velocity", CapKind::Input, 0, "Input"},
@@ -55,7 +72,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 30; }
+inline size_t BindingSpecCount() { return 47; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -79,15 +96,31 @@ inline const char* const kCombatNames[] = {
     "combat.last_hit_damage",
     "combat.observe",
 };
+inline const char* const kPlayerNames[] = {
+    "player.position",
+    "player.rotation",
+    "player.velocity",
+    "player.health",
+    "player.max_health",
+    "player.alive",
+    "player.name",
+};
 inline const char* const kRenderNames[] = {
     "render.draw_text",
+    "render.draw_text_centered",
     "render.draw_rect",
+    "render.draw_line",
+    "render.draw_circle",
     "render.screen_size",
     "render.set_zoom",
 };
 inline const char* const kWorldNames[] = {
     "world.query",
+    "world.entity_count",
     "world.block_at",
+    "world.time",
+    "world.is_day",
+    "world.is_raining",
 };
 inline const char* const kNetworkNames[] = {
     "network.get",
@@ -101,8 +134,11 @@ inline const char* const kHudNames[] = {
 };
 inline const char* const kPerfNames[] = {
     "perf.frame_time_ms",
+    "perf.stats",
+    "perf.quality",
     "perf.set_target_fps",
     "perf.set_thermal_mode",
+    "perf.set_platform",
 };
 inline const char* const kInputNames[] = {
     "input.is_key_down",
@@ -124,18 +160,19 @@ inline const char* const kCosmeticNames[] = {
 inline const ModuleBindings* ModuleBindingTable() {
   static const ModuleBindings kModules[] = {
       {"Combat", kCombatNames, 3},
-      {"Render", kRenderNames, 4},
-      {"World", kWorldNames, 2},
+      {"Player", kPlayerNames, 7},
+      {"Render", kRenderNames, 7},
+      {"World", kWorldNames, 6},
       {"Network", kNetworkNames, 1},
       {"Hud", kHudNames, 5},
-      {"Perf", kPerfNames, 3},
+      {"Perf", kPerfNames, 6},
       {"Input", kInputNames, 3},
       {"Cosmetic", kCosmeticNames, 9},
   };
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 8; }
+inline size_t ModuleBindingCount() { return 9; }
 
 }  // namespace api
 }  // namespace Berry

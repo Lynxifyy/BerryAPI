@@ -17,7 +17,8 @@
 #   event <name>(a: t, ...)    an event channel scripts may await
 #   struct <Name> { f: t ... } a value shape
 #
-# Types: nil, bool, number, string, Actor, Vec3, Rgba, Widget, Task, HttpResult
+# Types: nil, bool, number, string, Actor, Vec3, Rgba, Widget, Task, HttpResult,
+#        Table (a structured value: a table/object of named fields)
 
 module Combat {
   capability combat
@@ -27,11 +28,26 @@ module Combat {
   fn observe(ticks: number) -> number
 }
 
+module Player {
+  capability world
+  doc "Read-only view of the LOCAL player. This is the client's own state, which it already holds; nothing here reveals another player. Reads fail closed when the local player is not bound."
+  fn position() -> Vec3
+  fn rotation() -> Vec3
+  fn velocity() -> Vec3
+  fn health() -> number
+  fn max_health() -> number
+  fn alive() -> bool
+  fn name() -> string
+}
+
 module Render {
   capability render
   doc "Client-side drawing. Everything here is local to this screen."
   fn draw_text(x: number, y: number, text: string, color: Rgba) -> nil
+  fn draw_text_centered(x: number, y: number, text: string, color: Rgba) -> nil
   fn draw_rect(x: number, y: number, w: number, h: number, color: Rgba) -> nil
+  fn draw_line(x1: number, y1: number, x2: number, y2: number, color: Rgba) -> nil
+  fn draw_circle(x: number, y: number, radius: number, color: Rgba) -> nil
   fn screen_size() -> Vec3
   fn set_zoom(factor: number) -> nil
 }
@@ -40,7 +56,11 @@ module World {
   capability world
   doc "Read-only world queries. The core never hands out raw pointers."
   fn query(within: number) -> number
+  fn entity_count() -> number
   fn block_at(x: number, y: number, z: number) -> string
+  fn time() -> Table
+  fn is_day() -> bool
+  fn is_raining() -> bool
 }
 
 module Network {
@@ -63,8 +83,12 @@ module Perf {
   capability perf
   doc "Frame timing and quality controls."
   fn frame_time_ms() -> number
+  fn stats() -> Table
+  fn quality() -> number
   fn set_target_fps(fps: number) -> nil
   fn set_thermal_mode(enabled: bool) -> nil
+  doc "Select the device profile the governor tunes itself for: generic, mobile-low, mobile-high or desktop. Unknown names are refused (fail closed)."
+  fn set_platform(name: string) -> nil
 }
 
 module Input {

@@ -37,6 +37,8 @@ TYPE_MAP = {
     "Widget": ("WidgetId", "WidgetId", "WidgetId", "HUD widget handle"),
     "Task": ("u64", "TaskId", "TaskId", "async task id"),
     "HttpResult": ("HttpResult", "HttpResult", "HttpResult", "HTTP response"),
+    "Table": ("ScriptTable", "Record<string, unknown>", "{[string]: any}",
+              "structured value (named fields)"),
 }
 
 
@@ -365,13 +367,10 @@ def emit_ts(modules):
     out.append("  httpGet(url: string, timeoutMs?: number): Promise<string>;")
     out.append("}")
     out.append("")
-    out.append("declare const Combat: Combat;")
-    out.append("declare const Render: Render;")
-    out.append("declare const World: World;")
-    out.append("declare const Network: Network;")
-    out.append("declare const Hud: Hud;")
-    out.append("declare const Perf: Perf;")
-    out.append("declare const Input: Input;")
+    for mod in modules:
+        if not mod.functions:
+            continue
+        out.append("declare const %s: %s;" % (mod.name, mod.name))
     out.append("declare const async: AsyncFacade;")
     out.append("")
     return "\n".join(out)

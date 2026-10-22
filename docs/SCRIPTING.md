@@ -227,6 +227,17 @@ order they execute. Invalid arguments (a non-positive zoom, an out-of-range
 target FPS, an unknown tween property) fail the call instead of silently
 clamping.
 
+#### Read-only local reads (`Player`, `World`, `Perf`)
+
+The read-only surface exposes state the local client already holds, and nothing
+else. `Player.*` resolves the *local* player through the World seam; every read
+fails closed (raises an error) when no local player is bound, so a script sees
+"no player" rather than another entity's state or a fabricated vector. `World.*`
+adds `entity_count`, `time`, `is_day` and `is_raining`, all through the same
+seam. `Perf.*` adds `stats` (avg/p95/p99/min/max/FPS), `quality` and
+`set_platform`. Coordinates a script hands to the renderer are sanitised: a NaN
+or infinity becomes 0 before it can reach the draw list.
+
 ## Client modules
 
 The client-facing modules are services that draw through `Berry::Render`, not
@@ -239,7 +250,10 @@ A retained-mode widget tree: `Panel`, `Label`, `Bar`, `Graph`, `Row`, `Column`,
 with nine anchors, flex-style flow, a theme with semantic colour roles, and
 easing/tween support. Geometry is cached — only dirty subtrees are re-laid out
 each frame. Tweening retargets from the current animated value, so a
-fast-changing number (DPS, health) slides instead of jumping.
+fast-changing number (DPS, health) slides instead of jumping. Off-screen widgets
+are culled before draw, and since an off-screen parent implies off-screen
+children, a whole subtree is skipped in one step; `HudStats.widgetsCulled`
+counts what was skipped.
 
 ### Input (`input.h`)
 
@@ -258,14 +272,25 @@ client already owns, so the overlay cannot become an ESP.
 
 The adaptive FPS governor: it watches rolling frame time and trades quality for
 frames through `QualityLevel`, mapped onto concrete settings by a
-`QualityProfile`. It reduces one knob at a time (particles first, render
-distance last) and restores more slowly, with a dead band that absorbs jitter.
+`QualityProfile`. It spends quality in a fixed priority order (particles first,
+render distance last) and restores in reverse, so the cheap knobs are exhausted
+before an expensive one is touched and reduce/restore cannot ping-pong. Restore
+is slower than reduce, with a dead band that absorbs jitter, and the governor
+reacts to the p99 frame time (not just the average) so a smooth average cannot
+hide regular stutter.
 
-Thermal awareness is what keeps it stable: a device that is already hot is
+Thermal awareness is what keeps it stable. A device that is already hot is
 throttling itself, so the governor clamps to a low ceiling on
-`Serious`/`Critical` and refuses to restore until the device cools. `CullPolicy`
-turns the current settings into the render hooks' cull/keep, animate/don't and
-spawn/don't decisions.
+`Serious`/`Critical` and refuses to restore until the device cools; a `Fair`
+report (warm, not yet throttling) clamps early to a Fair ceiling. Every clamp
+arms a dwell window during which restoration is blocked, because a device that
+just throttled reports fast frames for a moment and restoring then would heat it
+straight back up. `SetPlatform` selects a `QualityProfile` and thermal ceiling
+for a device class (`MobileLow`/`MobileHigh`/`Desktop`/`Generic`), and
+`CullPolicy` turns the current settings into the render hooks' cull/keep,
+animate/don't and spawn/don't decisions, including per-category particle caps
+and a screen-size cull for ambient particles. `FrameStats` reports p99 and
+`FrameHistogram` shows the shape of the tail.
 
 ### Cosmetics (`cosmetic.h`, `cosmetic_sync.h`, `pack.h`)
 
