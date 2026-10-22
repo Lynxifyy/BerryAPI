@@ -46,6 +46,14 @@ class BERRY_API WorldHandle {
   virtual EntitySnapshot GetEntity(EntityId id) const = 0;
   virtual LevelTime GetTime() const = 0;
   virtual u32 GetBlock(const Vec3& p) const = 0;
+  /// Biome name at a block coordinate, or "" when the seam has no answer.
+  virtual std::string GetBiome(const BlockPos& p) const = 0;
+  /// Light level (0..15) at a block coordinate, or -1 when unknown.
+  virtual i32 GetLight(const BlockPos& p) const = 0;
+  /// Load state of the chunk containing a block coordinate.
+  virtual ChunkState GetChunkState(const BlockPos& p) const = 0;
+  /// The local player's own state (hunger, armour, gamemode, …).
+  virtual LocalPlayerState GetLocalPlayerState() const = 0;
   // Module-local KV store (not game state): read/write allowed.
   virtual void SetValue(const char* key, const char* value) = 0;
   virtual const char* GetValue(const char* key, const char* fallback) const = 0;

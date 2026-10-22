@@ -331,8 +331,37 @@ static void TestEventBridge() {
   ev.id = Id(42, 42);
   ev.after = Snap(42, Vec3(0, 0, 0), EntityType::Player);
   events.push_back(ev);
-  CHECK(PublishWorldDiffToEvents(events) == 1);
+  // An Entered publishes twice: the entityEntered channel and the derived
+  // entitySpawn lifecycle channel.
+  std::string spawnPayload;
+  auto spawnId = EventBus::Instance().On("entitySpawn", [&](const EventContext& e) {
+    if (e.data) spawnPayload = *(const char**)e.data;
+    return EventResult::Continue;
+  });
+  CHECK(PublishWorldDiffToEvents(events) == 2);
   CHECK(got == "42:player");
+  CHECK(spawnPayload == "42:player");
+  EventBus::Instance().Off("entitySpawn", spawnId);
+
+  // A death is an Updated transition from alive to not-alive; it publishes the
+  // entityUpdated channel and the derived entityDeath channel.
+  std::string deathPayload;
+  auto deathId = EventBus::Instance().On("entityDeath", [&](const EventContext& e) {
+    if (e.data) deathPayload = *(const char**)e.data;
+    return EventResult::Continue;
+  });
+  std::vector<WorldDiffEvent> deaths;
+  WorldDiffEvent de;
+  de.kind = WorldDiff::Updated;
+  de.id = Id(9, 9);
+  de.before = Snap(9, Vec3(0, 0, 0), EntityType::Mob);
+  de.before.alive = true;
+  de.after = Snap(9, Vec3(0, 0, 0), EntityType::Mob);
+  de.after.alive = false;
+  deaths.push_back(de);
+  CHECK(PublishWorldDiffToEvents(deaths) == 2);
+  CHECK(deathPayload == "9:mob");
+  EventBus::Instance().Off("entityDeath", deathId);
 
   // A Left event publishes the before-snapshot's payload.
   std::vector<WorldDiffEvent> lefts;
@@ -366,6 +395,38 @@ static void TestEventBridge() {
   CHECK(blockPayload == "3,64,-5,9");
   EventBus::Instance().Clear(BlockChangedChannel());
   EventBus::Instance().Clear("entityLeft");
+
+  // The combat bridge: a CombatEvent published by Berry::Combat reaches the
+  // script-visible entityHurt channel with a plain "<id>:<damage>" payload.
+  std::string hurtPayload;
+  EventBus::Instance().On(EntityHurtChannel(), [&](const EventContext& e) {
+    if (e.data) hurtPayload = *(const char**)e.data;
+    return EventResult::Continue;
+  });
+  CombatEvent ce;
+  ce.victim = Id(42, 42);
+  ce.attacker = Id(1, 1);
+  ce.finalDamage = 3.5f;
+  CHECK(PublishCombatToEvents(ce) == 1);
+  CHECK(hurtPayload == "42:3.500");
+  EventBus::Instance().Clear(EntityHurtChannel());
+
+  // A kill routed through Berry::Combat itself publishes both the internal
+  // "berry:combat" channel and the script-visible entityHurt channel.
+  Combat combat;
+  std::string liveHurt;
+  EventBus::Instance().On(EntityHurtChannel(), [&](const EventContext& e) {
+    if (e.data) liveHurt = *(const char**)e.data;
+    return EventResult::Continue;
+  });
+  CombatEvent hit;
+  hit.victim = Id(7, 7);
+  hit.attacker = Id(1, 1);
+  hit.baseDamage = 4.0f;
+  hit.finalDamage = 4.0f;
+  CHECK(combat.Observe(hit) == CombatOutcome::Observed);
+  CHECK(liveHurt == "7:4.000");
+  EventBus::Instance().Clear(EntityHurtChannel());
 }
 
 int main() {

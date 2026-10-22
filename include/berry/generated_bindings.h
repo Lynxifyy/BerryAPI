@@ -31,6 +31,19 @@ inline const BindingSpec* BindingSpecs() {
       {"player.max_health", CapKind::World, 0, "Player"},
       {"player.alive", CapKind::World, 0, "Player"},
       {"player.name", CapKind::World, 0, "Player"},
+      {"player.hunger", CapKind::World, 0, "Player"},
+      {"player.saturation", CapKind::World, 0, "Player"},
+      {"player.armor", CapKind::World, 0, "Player"},
+      {"player.gamemode", CapKind::World, 0, "Player"},
+      {"player.dimension", CapKind::World, 0, "Player"},
+      {"player.xp_level", CapKind::World, 0, "Player"},
+      {"player.xp_progress", CapKind::World, 0, "Player"},
+      {"player.air", CapKind::World, 0, "Player"},
+      {"player.on_fire", CapKind::World, 0, "Player"},
+      {"player.sneaking", CapKind::World, 0, "Player"},
+      {"player.sprinting", CapKind::World, 0, "Player"},
+      {"player.effects", CapKind::World, 0, "Player"},
+      {"player.state", CapKind::World, 0, "Player"},
       {"render.draw_text", CapKind::Render, 4, "Render"},
       {"render.draw_text_centered", CapKind::Render, 4, "Render"},
       {"render.draw_rect", CapKind::Render, 5, "Render"},
@@ -55,6 +68,13 @@ inline const BindingSpec* BindingSpecs() {
       {"world.entities_within", CapKind::World, 2, "World"},
       {"world.raycast_block", CapKind::World, 1, "World"},
       {"world.raycast_entity", CapKind::World, 1, "World"},
+      {"world.entities_in_aabb", CapKind::World, 7, "World"},
+      {"world.entities_in_radius", CapKind::World, 5, "World"},
+      {"world.raycast", CapKind::World, 8, "World"},
+      {"world.get_biome", CapKind::World, 3, "World"},
+      {"world.get_light", CapKind::World, 3, "World"},
+      {"world.get_chunk_state", CapKind::World, 3, "World"},
+      {"world.block_id_at", CapKind::World, 3, "World"},
       {"entity.get", CapKind::World, 1, "Entity"},
       {"entity.type_name", CapKind::World, 1, "Entity"},
       {"entity.position", CapKind::World, 1, "Entity"},
@@ -63,6 +83,8 @@ inline const BindingSpec* BindingSpecs() {
       {"entity.alive", CapKind::World, 1, "Entity"},
       {"entity.distance_to", CapKind::World, 1, "Entity"},
       {"entity.nearest", CapKind::World, 1, "Entity"},
+      {"entity.get_hitbox", CapKind::World, 1, "Entity"},
+      {"entity.trace_line", CapKind::World, 8, "Entity"},
       {"fs.write", CapKind::FileIO, 2, "Fs"},
       {"fs.read", CapKind::FileIO, 1, "Fs"},
       {"fs.append", CapKind::FileIO, 2, "Fs"},
@@ -206,7 +228,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 181; }
+inline size_t BindingSpecCount() { return 203; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -238,6 +260,19 @@ inline const char* const kPlayerNames[] = {
     "player.max_health",
     "player.alive",
     "player.name",
+    "player.hunger",
+    "player.saturation",
+    "player.armor",
+    "player.gamemode",
+    "player.dimension",
+    "player.xp_level",
+    "player.xp_progress",
+    "player.air",
+    "player.on_fire",
+    "player.sneaking",
+    "player.sprinting",
+    "player.effects",
+    "player.state",
 };
 inline const char* const kRenderNames[] = {
     "render.draw_text",
@@ -266,6 +301,13 @@ inline const char* const kWorldNames[] = {
     "world.entities_within",
     "world.raycast_block",
     "world.raycast_entity",
+    "world.entities_in_aabb",
+    "world.entities_in_radius",
+    "world.raycast",
+    "world.get_biome",
+    "world.get_light",
+    "world.get_chunk_state",
+    "world.block_id_at",
 };
 inline const char* const kEntityNames[] = {
     "entity.get",
@@ -276,6 +318,8 @@ inline const char* const kEntityNames[] = {
     "entity.alive",
     "entity.distance_to",
     "entity.nearest",
+    "entity.get_hitbox",
+    "entity.trace_line",
 };
 inline const char* const kFsNames[] = {
     "fs.write",
@@ -452,10 +496,10 @@ inline const char* const kRecordNames[] = {
 inline const ModuleBindings* ModuleBindingTable() {
   static const ModuleBindings kModules[] = {
       {"Combat", kCombatNames, 3},
-      {"Player", kPlayerNames, 7},
+      {"Player", kPlayerNames, 20},
       {"Render", kRenderNames, 15},
-      {"World", kWorldNames, 9},
-      {"Entity", kEntityNames, 8},
+      {"World", kWorldNames, 16},
+      {"Entity", kEntityNames, 10},
       {"Fs", kFsNames, 10},
       {"Audio", kAudioNames, 8},
       {"Pvp", kPvpNames, 16},

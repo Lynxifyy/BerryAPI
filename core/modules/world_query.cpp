@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace Berry {
 
@@ -339,8 +340,38 @@ size_t PublishWorldDiffToEvents(const std::vector<WorldDiffEvent>& events) {
     const char* p = payload.c_str();
     EventBus::Instance().Emit(channel, &p);
     ++published;
+
+    // Lifecycle channels, derived from the same diff so they cost nothing
+    // extra and cannot disagree with it. A spawn is an enter; a death is a
+    // transition from alive to not-alive (a Left carries no state, so only an
+    // Entered or Updated can announce a death).
+    if (e.kind == WorldDiff::Entered) {
+      const std::string spawnPayload = WorldDiffPayload(e.after);
+      const char* sp = spawnPayload.c_str();
+      EventBus::Instance().Emit(world_event::EntitySpawn(), &sp);
+      ++published;
+    } else if (e.kind == WorldDiff::Updated && e.before.alive && !e.after.alive) {
+      const std::string deathPayload = WorldDiffPayload(e.after);
+      const char* dp = deathPayload.c_str();
+      EventBus::Instance().Emit(world_event::EntityDeath(), &dp);
+      ++published;
+    }
   }
   return published;
+}
+
+size_t PublishCombatToEvents(const CombatEvent& evt) {
+  // entityHurt carries "<victim raw id>:<damage>", the same short-line shape
+  // the world-diff channels use, so a listener filters by id with a split and
+  // never receives a pointer into game memory.
+  const f32 dmg = evt.finalDamage > 0 ? evt.finalDamage : evt.baseDamage;
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "%llu:%.3f",
+                (unsigned long long)evt.victim.raw, (double)dmg);
+  std::string payload(buf);
+  const char* p = payload.c_str();
+  EventBus::Instance().Emit(EntityHurtChannel(), &p);
+  return 1;
 }
 
 }  // namespace Berry

@@ -22,6 +22,7 @@
 #include "berry/services.h"
 #include "shim_level.h"
 
+#include <cmath>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -851,6 +852,266 @@ static void TestWorldAndEntityReads() {
         ScriptStatus::Error);
 }
 
+static void TestPhase2PlayerAndWorldExtras() {
+  Renderer renderer;
+  std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
+  WorldHandle* world = worldMod->Service<WorldHandle>();
+  auto shim = std::make_shared<Berry::Test::ShimLevel>();
+
+  const EntityId self{1, 1};
+  EntitySnapshot me;
+  me.id = self;
+  me.type = EntityType::Player;
+  me.position = Vec3(0, 64, 0);
+  me.rotation = Vec3(0, 0, 0);
+  me.alive = true;
+  me.health = 20;
+  me.maxHealth = 20;
+  shim->AddEntity(self, me);
+
+  // A second player 10 blocks away, a mob 3 blocks away, an item far off.
+  const EntityId other{2, 2};
+  EntitySnapshot p2;
+  p2.id = other;
+  p2.type = EntityType::Player;
+  p2.position = Vec3(0, 64, 10);
+  p2.alive = true;
+  shim->AddEntity(other, p2);
+
+  const EntityId mob{3, 3};
+  EntitySnapshot m;
+  m.id = mob;
+  m.type = EntityType::Mob;
+  m.position = Vec3(0, 64, 3);
+  m.alive = true;
+  shim->AddEntity(mob, m);
+
+  const EntityId item{4, 4};
+  EntitySnapshot it;
+  it.id = item;
+  it.type = EntityType::Item;
+  it.position = Vec3(0, 64, 500);
+  it.alive = true;
+  shim->AddEntity(item, it);
+
+  shim->SetBlock(Vec3(1, 64, 1), 42);
+  shim->SetBiome(BlockPos(0, 64, 0), "plains");
+  shim->SetLight(BlockPos(0, 64, 0), 7);
+  shim->SetChunkState(BlockPos(0, 64, 0), ChunkState::Rendered);
+
+  LocalPlayerState st;
+  st.hunger = 17;
+  st.saturation = 2.5f;
+  st.armorPoints = 9;
+  st.gamemode = 1;
+  st.dimension = 2;
+  st.xpLevel = 30;
+  st.xpProgress = 0.25f;
+  st.air = 120;
+  st.onFire = true;
+  st.sneaking = true;
+  st.sprinting = false;
+  st.effects.push_back(PlayerEffect{"speed", 1, 12.5f, false});
+  shim->SetLocalPlayerState(st);
+
+  world->SetSeam(shim);
+
+  ScriptApi::Services services;
+  services.world = world;
+  services.renderer = &renderer;
+  services.localPlayer = self;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+
+  //--- Player extras ---
+  CHECK(Call(bindings, "player.hunger", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 17);
+  CHECK(Call(bindings, "player.saturation", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 2.5);
+  CHECK(Call(bindings, "player.armor", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 9);
+  CHECK(Call(bindings, "player.gamemode", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "creative");
+  CHECK(Call(bindings, "player.dimension", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "end");
+  CHECK(Call(bindings, "player.xp_level", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 30);
+  CHECK(Call(bindings, "player.xp_progress", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0.25);
+  CHECK(Call(bindings, "player.air", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 120);
+  CHECK(Call(bindings, "player.on_fire", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "player.sneaking", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "player.sprinting", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  CHECK(Call(bindings, "player.effects", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("count").AsNumber() == 1);
+  CHECK(out.AsTable()->at("0").AsTable()->at("name").AsString() == "speed");
+  CHECK(out.AsTable()->at("0").AsTable()->at("amplifier").AsNumber() == 1);
+
+  CHECK(Call(bindings, "player.state", {}, {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Field("hunger")->AsNumber() == 17);
+  CHECK(out.Field("gamemode")->AsString() == "creative");
+  CHECK(out.Field("dimension")->AsString() == "end");
+  CHECK(out.Field("effects")->AsTable()->at("count").AsNumber() == 1);
+
+  //--- World extras ---
+  CHECK(Call(bindings, "world.block_at", {ScriptValue::Num(1), ScriptValue::Num(64),
+                                          ScriptValue::Num(1)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.IsNumber());
+  CHECK(out.AsNumber() == 42);
+  CHECK(Call(bindings, "world.block_id_at", {ScriptValue::Num(1), ScriptValue::Num(64),
+                                             ScriptValue::Num(1)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 42);
+
+  CHECK(Call(bindings, "world.get_biome", {ScriptValue::Num(0), ScriptValue::Num(64),
+                                           ScriptValue::Num(0)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsString() == "plains");
+  // An unset coordinate fails closed to "" rather than inventing a biome.
+  CHECK(Call(bindings, "world.get_biome", {ScriptValue::Num(99), ScriptValue::Num(64),
+                                           ScriptValue::Num(99)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsString() == "");
+
+  CHECK(Call(bindings, "world.get_light", {ScriptValue::Num(0), ScriptValue::Num(64),
+                                           ScriptValue::Num(0)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 7);
+  CHECK(Call(bindings, "world.get_light", {ScriptValue::Num(99), ScriptValue::Num(64),
+                                           ScriptValue::Num(99)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsNumber() == -1);
+
+  CHECK(Call(bindings, "world.get_chunk_state", {ScriptValue::Num(0), ScriptValue::Num(64),
+                                                 ScriptValue::Num(0)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsString() == "rendered");
+  CHECK(Call(bindings, "world.get_chunk_state", {ScriptValue::Num(99), ScriptValue::Num(64),
+                                                 ScriptValue::Num(99)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsString() == "unloaded");
+
+  // entities_in_radius: only the mob is within 5 of the origin; the local
+  // player (0 blocks) and the other player (10) are excluded by distance? The
+  // local player IS within 5, so expect 2 (me + mob), sorted by id.
+  CHECK(Call(bindings, "world.entities_in_radius",
+             {ScriptValue::Num(0), ScriptValue::Num(64), ScriptValue::Num(0),
+              ScriptValue::Num(5), ScriptValue::Str("")}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("count").AsNumber() == 2);
+  CHECK(out.AsTable()->at("0").AsTable()->at("id").AsNumber() == 1);
+  CHECK(out.AsTable()->at("1").AsTable()->at("id").AsNumber() == 3);
+
+  // A type filter narrows it to mobs only.
+  CHECK(Call(bindings, "world.entities_in_radius",
+             {ScriptValue::Num(0), ScriptValue::Num(64), ScriptValue::Num(0),
+              ScriptValue::Num(5), ScriptValue::Str("mob")}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("count").AsNumber() == 1);
+  CHECK(out.AsTable()->at("0").AsTable()->at("type").AsString() == "mob");
+
+  // A negative radius is refused.
+  CHECK(Call(bindings, "world.entities_in_radius",
+             {ScriptValue::Num(0), ScriptValue::Num(64), ScriptValue::Num(0),
+              ScriptValue::Num(-1), ScriptValue::Str("")}, {"world"}, &out) ==
+        ScriptStatus::Error);
+
+  // entities_in_aabb over a box covering the mob but not the far item.
+  CHECK(Call(bindings, "world.entities_in_aabb",
+             {ScriptValue::Num(-1), ScriptValue::Num(60), ScriptValue::Num(-1),
+              ScriptValue::Num(1), ScriptValue::Num(70), ScriptValue::Num(5),
+              ScriptValue::Str("")}, {"world"}, &out) == ScriptStatus::Ok);
+  // me (0,64,0), mob (0,64,3) are inside; the other player at z=10 is not.
+  CHECK(out.AsTable()->at("count").AsNumber() == 2);
+
+  // An inverted box is refused.
+  CHECK(Call(bindings, "world.entities_in_aabb",
+             {ScriptValue::Num(1), ScriptValue::Num(0), ScriptValue::Num(1),
+              ScriptValue::Num(-1), ScriptValue::Num(0), ScriptValue::Num(-1),
+              ScriptValue::Str("")}, {"world"}, &out) == ScriptStatus::Error);
+
+  // world.raycast from the local eye along +Z should find the mob at 3 blocks
+  // through the hitbox test (the shim's own entity cast is coarse, but
+  // world.raycast uses the seam's RaycastEntity, so it finds the nearest
+  // alive entity along the ray). Use a plain origin at mob height.
+  CHECK(Call(bindings, "world.raycast",
+             {ScriptValue::Num(0), ScriptValue::Num(64), ScriptValue::Num(0),
+              ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(1),
+              ScriptValue::Num(20), ScriptValue::Str("any")}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("hit").Truthy());
+
+  // A zero direction is refused.
+  CHECK(Call(bindings, "world.raycast",
+             {ScriptValue::Num(0), ScriptValue::Num(64), ScriptValue::Num(0),
+              ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(20), ScriptValue::Str("any")}, {"world"}, &out) ==
+        ScriptStatus::Error);
+  // An unknown target is refused.
+  CHECK(Call(bindings, "world.raycast",
+             {ScriptValue::Num(0), ScriptValue::Num(64), ScriptValue::Num(0),
+              ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(1),
+              ScriptValue::Num(20), ScriptValue::Str("wall")}, {"world"}, &out) ==
+        ScriptStatus::Error);
+
+  //--- Entity extras ---
+  // The mob's hitbox is a 0.6x1.4x0.6 box sitting on its feet at (0,64,3).
+  CHECK(Call(bindings, "entity.get_hitbox", {ScriptValue::Num(3)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.Field("valid")->Truthy());
+  CHECK(std::fabs(out.Field("min_y")->AsNumber() - 64) < 1e-4);
+  CHECK(std::fabs(out.Field("max_y")->AsNumber() - 65.4) < 1e-4);
+  CHECK(std::fabs(out.Field("min_x")->AsNumber() - (-0.3)) < 1e-4);
+
+  // An unknown entity yields valid=false rather than a fabricated box.
+  CHECK(Call(bindings, "entity.get_hitbox", {ScriptValue::Num(999)}, {"world"}, &out) ==
+        ScriptStatus::Error);
+
+  // trace_line from 10 blocks in front of the mob, aiming at it, hits.
+  CHECK(Call(bindings, "entity.trace_line",
+             {ScriptValue::Num(3), ScriptValue::Num(0), ScriptValue::Num(64.7f),
+              ScriptValue::Num(13), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(-1), ScriptValue::Num(20)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("hit").Truthy());
+  CHECK(out.AsTable()->at("distance").AsNumber() > 0);
+  CHECK(out.AsTable()->at("distance").AsNumber() <= 20);
+
+  // Aiming away misses.
+  CHECK(Call(bindings, "entity.trace_line",
+             {ScriptValue::Num(3), ScriptValue::Num(0), ScriptValue::Num(64.7f),
+              ScriptValue::Num(13), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(1), ScriptValue::Num(20)}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(!out.AsTable()->at("hit").Truthy());
+
+  // A zero direction is refused.
+  CHECK(Call(bindings, "entity.trace_line",
+             {ScriptValue::Num(3), ScriptValue::Num(0), ScriptValue::Num(64.7f),
+              ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(20)}, {"world"}, &out) == ScriptStatus::Error);
+
+  //--- Fail-closed when the seam is unbound ---
+  world->SetSeam(nullptr);
+  CHECK(Call(bindings, "player.hunger", {}, {"world"}, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "world.get_biome", {ScriptValue::Num(0), ScriptValue::Num(0),
+                                           ScriptValue::Num(0)}, {"world"}, &out) ==
+        ScriptStatus::Error);
+  CHECK(Call(bindings, "world.entities_in_radius",
+             {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(5), ScriptValue::Str("")}, {"world"}, &out) ==
+        ScriptStatus::Error);
+}
+
 static void TestModBindings() {
   ScriptModuleRegistry modules;
   ScriptApi::Services services;
@@ -1159,6 +1420,7 @@ int main() {
   TestCapabilityGateOnDeclaredBindings();
   TestArityFailsClosed();
   TestWorldAndEntityReads();
+  TestPhase2PlayerAndWorldExtras();
   TestModBindings();
   TestFsAndAudioBindings();
   TestPvpBindings();

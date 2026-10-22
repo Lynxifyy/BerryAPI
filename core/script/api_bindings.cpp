@@ -447,6 +447,147 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Str(s.name);
   });
 
+  // The local player's own extended state (hunger, armour, gamemode, effects).
+  // Resolved through the same seam as the reads above and fail-closed: an
+  // unbound seam or a seam that does not report the state raises and returns a
+  // neutral value, so a script sees "no data", never a fabricated stat.
+  auto localState = [this](ScriptContext& ctx, const char* who,
+                           LocalPlayerState* out) -> bool {
+    if (!services_.world) {
+      ctx.RaiseError(std::string(who) + ": world unavailable");
+      return false;
+    }
+    auto seam = services_.world->Seam();
+    if (!seam) {
+      ctx.RaiseError(std::string(who) + ": no level seam bound");
+      return false;
+    }
+    const EntityId id = services_.localPlayer;
+    if (!id.raw && !id.runtime) {
+      ctx.RaiseError(std::string(who) + ": no local player bound");
+      return false;
+    }
+    *out = seam->GetLocalPlayerState();
+    if (!out->valid) {
+      ctx.RaiseError(std::string(who) + ": local player state unavailable");
+      return false;
+    }
+    return true;
+  };
+
+  install("player.hunger", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.hunger", &st)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)st.hunger);
+  });
+
+  install("player.saturation", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.saturation", &st)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)st.saturation);
+  });
+
+  install("player.armor", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.armor", &st)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)st.armorPoints);
+  });
+
+  install("player.gamemode", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.gamemode", &st)) return ScriptValue::Str("unknown");
+    return ScriptValue::Str(GameModeName(st.gamemode));
+  });
+
+  install("player.dimension", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.dimension", &st)) return ScriptValue::Str("unknown");
+    return ScriptValue::Str(DimensionName(st.dimension));
+  });
+
+  install("player.xp_level", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.xp_level", &st)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)st.xpLevel);
+  });
+
+  install("player.xp_progress", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.xp_progress", &st)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)st.xpProgress);
+  });
+
+  install("player.air", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.air", &st)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)st.air);
+  });
+
+  install("player.on_fire", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.on_fire", &st)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(st.onFire);
+  });
+
+  install("player.sneaking", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.sneaking", &st)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(st.sneaking);
+  });
+
+  install("player.sprinting", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.sprinting", &st)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(st.sprinting);
+  });
+
+  install("player.effects", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.effects", &st)) return ScriptValue::Nil();
+    ScriptTable out;
+    for (size_t i = 0; i < st.effects.size(); ++i) {
+      const PlayerEffect& e = st.effects[i];
+      ScriptTable fx;
+      fx["name"] = ScriptValue::Str(e.name);
+      fx["amplifier"] = ScriptValue::Num((f64)e.amplifier);
+      fx["seconds"] = ScriptValue::Num((f64)e.secondsLeft);
+      fx["ambient"] = ScriptValue::Bool(e.ambient);
+      out[std::to_string(i)] = ScriptValue::Tbl(std::move(fx));
+    }
+    out["count"] = ScriptValue::Num((f64)st.effects.size());
+    return ScriptValue::Tbl(std::move(out));
+  });
+
+  install("player.state", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.state", &st)) return ScriptValue::Nil();
+    ScriptTable t;
+    t["hunger"] = ScriptValue::Num((f64)st.hunger);
+    t["saturation"] = ScriptValue::Num((f64)st.saturation);
+    t["armor"] = ScriptValue::Num((f64)st.armorPoints);
+    t["gamemode"] = ScriptValue::Str(GameModeName(st.gamemode));
+    t["dimension"] = ScriptValue::Str(DimensionName(st.dimension));
+    t["xp_level"] = ScriptValue::Num((f64)st.xpLevel);
+    t["xp_progress"] = ScriptValue::Num((f64)st.xpProgress);
+    t["air"] = ScriptValue::Num((f64)st.air);
+    t["on_fire"] = ScriptValue::Bool(st.onFire);
+    t["sneaking"] = ScriptValue::Bool(st.sneaking);
+    t["sprinting"] = ScriptValue::Bool(st.sprinting);
+    ScriptTable fx;
+    for (size_t i = 0; i < st.effects.size(); ++i) {
+      const PlayerEffect& e = st.effects[i];
+      ScriptTable one;
+      one["name"] = ScriptValue::Str(e.name);
+      one["amplifier"] = ScriptValue::Num((f64)e.amplifier);
+      one["seconds"] = ScriptValue::Num((f64)e.secondsLeft);
+      one["ambient"] = ScriptValue::Bool(e.ambient);
+      fx[std::to_string(i)] = ScriptValue::Tbl(std::move(one));
+    }
+    fx["count"] = ScriptValue::Num((f64)st.effects.size());
+    t["effects"] = ScriptValue::Tbl(std::move(fx));
+    return ScriptValue::Tbl(std::move(t));
+  });
+
   //--- Render (client-side draw) -------------------------------------------
   install("render.draw_text", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
     if (!services_.renderer) { ctx.RaiseError("render.draw_text: renderer unavailable"); return ScriptValue::Nil(); }
@@ -694,10 +835,38 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
   });
 
   install("world.block_at", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
-    if (!services_.world) { ctx.RaiseError("world.block_at: world unavailable"); return ScriptValue::Str(""); }
+    if (!services_.world) { ctx.RaiseError("world.block_at: world unavailable"); return ScriptValue::Num(0); }
     const Vec3 p((f32)args[0].AsNumber(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber());
     const u32 block = services_.world->GetBlock(p);
-    return ScriptValue::Str(std::to_string(block));
+    return ScriptValue::Num((f64)block);
+  });
+
+  install("world.block_id_at", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("world.block_id_at: world unavailable"); return ScriptValue::Num(0); }
+    const Vec3 p((f32)args[0].AsNumber(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber());
+    const u32 block = services_.world->GetBlock(p);
+    return ScriptValue::Num((f64)block);
+  });
+
+  install("world.get_biome", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("world.get_biome: world unavailable"); return ScriptValue::Str(""); }
+    if (!services_.world->Seam()) { ctx.RaiseError("world.get_biome: no level seam bound"); return ScriptValue::Str(""); }
+    const BlockPos p((i32)args[0].AsNumber(), (i32)args[1].AsNumber(), (i32)args[2].AsNumber());
+    return ScriptValue::Str(services_.world->GetBiome(p));
+  });
+
+  install("world.get_light", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("world.get_light: world unavailable"); return ScriptValue::Num(-1); }
+    if (!services_.world->Seam()) { ctx.RaiseError("world.get_light: no level seam bound"); return ScriptValue::Num(-1); }
+    const BlockPos p((i32)args[0].AsNumber(), (i32)args[1].AsNumber(), (i32)args[2].AsNumber());
+    return ScriptValue::Num((f64)services_.world->GetLight(p));
+  });
+
+  install("world.get_chunk_state", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("world.get_chunk_state: world unavailable"); return ScriptValue::Str("unloaded"); }
+    if (!services_.world->Seam()) { ctx.RaiseError("world.get_chunk_state: no level seam bound"); return ScriptValue::Str("unloaded"); }
+    const BlockPos p((i32)args[0].AsNumber(), (i32)args[1].AsNumber(), (i32)args[2].AsNumber());
+    return ScriptValue::Str(ChunkStateName(services_.world->GetChunkState(p)));
   });
 
   install("world.entity_count", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
@@ -842,6 +1011,127 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Tbl(std::move(t));
   });
 
+  // A helper that snapshots a set of ids and renders them as one table keyed
+  // "0","1",…, sorted by id so the order is stable across ticks. The type
+  // filter is applied here so the shim and the device adapter share one
+  // definition of "matching".
+  auto entitiesToTable = [this](const std::vector<EntityId>& ids,
+                                const EntityType& filter,
+                                const Vec3& from) -> ScriptValue {
+    auto seam = services_.world->Seam();
+    std::vector<EntitySnapshot> found;
+    for (const EntityId& id : ids) {
+      EntitySnapshot s;
+      if (!seam->GetEntity(id, &s)) continue;
+      if (filter != EntityType::Unknown && s.type != filter) continue;
+      found.push_back(s);
+    }
+    std::sort(found.begin(), found.end(), [](const EntitySnapshot& a, const EntitySnapshot& b) {
+      if (a.id.raw != b.id.raw) return a.id.raw < b.id.raw;
+      return a.id.runtime < b.id.runtime;
+    });
+    ScriptTable out;
+    int n = 0;
+    for (const EntitySnapshot& s : found) {
+      out[std::to_string(n++)] = EntityTableValue(s, &from);
+    }
+    out["count"] = ScriptValue::Num((f64)found.size());
+    return ScriptValue::Tbl(std::move(out));
+  };
+
+  install("world.entities_in_aabb", [this, entitiesToTable](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("world.entities_in_aabb: world unavailable"); return ScriptValue::Nil(); }
+    const Vec3 mn((f32)args[0].AsNumber(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber());
+    const Vec3 mx((f32)args[3].AsNumber(), (f32)args[4].AsNumber(), (f32)args[5].AsNumber());
+    if (mn.x > mx.x || mn.y > mx.y || mn.z > mx.z) {
+      ctx.RaiseError("world.entities_in_aabb: min must not exceed max");
+      return ScriptValue::Nil();
+    }
+    EntityType filter = EntityType::Unknown;
+    if (!ParseTypeFilter(args[6].ToDisplay(), &filter)) {
+      ctx.RaiseError("world.entities_in_aabb: unknown entity type '" + args[6].ToDisplay() + "'");
+      return ScriptValue::Nil();
+    }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("world.entities_in_aabb: no level seam bound"); return ScriptValue::Nil(); }
+    const EntitySnapshot self = services_.world->GetEntity(services_.localPlayer);
+    return entitiesToTable(seam->EntitiesInAabb(Aabb(mn, mx), filter), filter, self.position);
+  });
+
+  install("world.entities_in_radius", [this, entitiesToTable](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("world.entities_in_radius: world unavailable"); return ScriptValue::Nil(); }
+    const Vec3 center((f32)args[0].AsNumber(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber());
+    const f32 radius = (f32)args[3].AsNumber();
+    if (!std::isfinite(radius) || radius < 0) {
+      ctx.RaiseError("world.entities_in_radius: radius must be a non-negative number");
+      return ScriptValue::Nil();
+    }
+    EntityType filter = EntityType::Unknown;
+    if (!ParseTypeFilter(args[4].ToDisplay(), &filter)) {
+      ctx.RaiseError("world.entities_in_radius: unknown entity type '" + args[4].ToDisplay() + "'");
+      return ScriptValue::Nil();
+    }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("world.entities_in_radius: no level seam bound"); return ScriptValue::Nil(); }
+    return entitiesToTable(seam->EntitiesInRadius(center, radius), filter, center);
+  });
+
+  install("world.raycast", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("world.raycast: world unavailable"); return ScriptValue::Nil(); }
+    const Vec3 origin((f32)args[0].AsNumber(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber());
+    Vec3 dir((f32)args[3].AsNumber(), (f32)args[4].AsNumber(), (f32)args[5].AsNumber());
+    const f32 maxDist = (f32)args[6].AsNumber();
+    if (!std::isfinite(maxDist) || maxDist <= 0) {
+      ctx.RaiseError("world.raycast: distance must be positive");
+      return ScriptValue::Nil();
+    }
+    if (dir.Length() < 1e-6f) {
+      ctx.RaiseError("world.raycast: direction must be non-zero");
+      return ScriptValue::Nil();
+    }
+    dir = dir.Normalized();
+    const std::string target = Lower(args[7].ToDisplay());
+    const bool wantBlock = target == "block" || target == "any";
+    const bool wantEntity = target == "entity" || target == "any";
+    if (!wantBlock && !wantEntity) {
+      ctx.RaiseError("world.raycast: target must be 'block', 'entity' or 'any'");
+      return ScriptValue::Nil();
+    }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("world.raycast: no level seam bound"); return ScriptValue::Nil(); }
+
+    ScriptTable t;
+    bool hit = false;
+    f32 bestDist = maxDist + 1.0f;
+    Vec3 blockPos;
+    u32 block = 0;
+    if (wantBlock && seam->RaycastBlock(origin, dir, maxDist, &blockPos, &block)) {
+      hit = true;
+      bestDist = (blockPos - origin).Length();
+    }
+    EntityId entId;
+    f32 entDist = 0;
+    if (wantEntity && seam->RaycastEntity(origin, dir, maxDist, &entId, &entDist)) {
+      // Prefer the nearer of the two hits, so a ray into a wall does not report
+      // an entity behind it.
+      if (!hit || entDist < bestDist) {
+        hit = true;
+        t["id"] = ScriptValue::Num((f64)entId.raw);
+        t["runtime"] = ScriptValue::Num((f64)entId.runtime);
+        t["distance"] = ScriptValue::Num((f64)entDist);
+      }
+    }
+    t["hit"] = ScriptValue::Bool(hit);
+    if (hit && !t.count("distance")) {
+      t["x"] = ScriptValue::Num((f64)blockPos.x);
+      t["y"] = ScriptValue::Num((f64)blockPos.y);
+      t["z"] = ScriptValue::Num((f64)blockPos.z);
+      t["block"] = ScriptValue::Num((f64)block);
+      t["distance"] = ScriptValue::Num((f64)bestDist);
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
   //--- Entity (read-only, by raw id) ---------------------------------------
   //
   // The id a script carries is the raw engine id: the one an entity table or an
@@ -947,6 +1237,59 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
       if (!found || d < bestDist) { best = s.id; bestDist = d; found = true; }
     }
     return ScriptValue::Num(found ? (f64)best.raw : 0.0);
+  });
+
+  install("entity.get_hitbox", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.get_hitbox", args, &s)) {
+      ScriptTable t;
+      t["valid"] = ScriptValue::Bool(false);
+      return ScriptValue::Tbl(std::move(t));
+    }
+    const Aabb box = EntityHitbox(s);
+    ScriptTable t;
+    t["valid"] = ScriptValue::Bool(true);
+    t["min_x"] = ScriptValue::Num((f64)box.min.x);
+    t["min_y"] = ScriptValue::Num((f64)box.min.y);
+    t["min_z"] = ScriptValue::Num((f64)box.min.z);
+    t["max_x"] = ScriptValue::Num((f64)box.max.x);
+    t["max_y"] = ScriptValue::Num((f64)box.max.y);
+    t["max_z"] = ScriptValue::Num((f64)box.max.z);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("entity.trace_line", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.trace_line", args, &s)) {
+      ScriptTable t;
+      t["hit"] = ScriptValue::Bool(false);
+      return ScriptValue::Tbl(std::move(t));
+    }
+    const Vec3 origin((f32)args[1].AsNumber(), (f32)args[2].AsNumber(), (f32)args[3].AsNumber());
+    Vec3 dir((f32)args[4].AsNumber(), (f32)args[5].AsNumber(), (f32)args[6].AsNumber());
+    const f32 maxDist = (f32)args[7].AsNumber();
+    if (!std::isfinite(maxDist) || maxDist <= 0) {
+      ctx.RaiseError("entity.trace_line: distance must be positive");
+      return ScriptValue::Nil();
+    }
+    if (dir.Length() < 1e-6f) {
+      ctx.RaiseError("entity.trace_line: direction must be non-zero");
+      return ScriptValue::Nil();
+    }
+    dir = dir.Normalized();
+    const Aabb box = EntityHitbox(s);
+    f32 dist = 0;
+    const bool hit = RayHitsAabb(origin, dir, box, maxDist, &dist);
+    ScriptTable t;
+    t["hit"] = ScriptValue::Bool(hit);
+    t["distance"] = ScriptValue::Num(hit ? (f64)dist : -1.0);
+    if (hit) {
+      const Vec3 p = origin + dir * dist;
+      t["x"] = ScriptValue::Num((f64)p.x);
+      t["y"] = ScriptValue::Num((f64)p.y);
+      t["z"] = ScriptValue::Num((f64)p.z);
+    }
+    return ScriptValue::Tbl(std::move(t));
   });
 
   //--- Network (granted, host-scoped) --------------------------------------

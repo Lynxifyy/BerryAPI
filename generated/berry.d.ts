@@ -26,6 +26,32 @@ export interface Player {
   max_health(): number;
   alive(): boolean;
   name(): string;
+  /** Food level, 0..20. -1 when the local player is not bound. */
+  hunger(): number;
+  /** The hidden saturation value. -1 when the local player is not bound. */
+  saturation(): number;
+  /** Total armour points, 0..20. */
+  armor(): number;
+  /** The gamemode as a name: \"survival\", \"creative\", \"adventure\", \"spectator\" or \"unknown\". */
+  gamemode(): string;
+  /** The dimension as a name: \"overworld\", \"nether\", \"end\" or \"unknown\". */
+  dimension(): string;
+  /** The experience level. */
+  xp_level(): number;
+  /** Progress toward the next level, 0..1. */
+  xp_progress(): number;
+  /** Remaining breath in ticks (300 = full). */
+  air(): number;
+  /** True while the local player is on fire. */
+  on_fire(): boolean;
+  /** True while the local player is sneaking. */
+  sneaking(): boolean;
+  /** True while the local player is sprinting. */
+  sprinting(): boolean;
+  /** Active status effects as a table keyed \"0\",\"1\",…, each {name, amplifier, seconds, ambient}. Empty when none or the local player is unbound. */
+  effects(): Record<string, unknown>;
+  /** The whole local-player state as one table: {hunger, saturation, armor, gamemode, dimension, xp_level, xp_progress, air, on_fire, sneaking, sprinting, effects}. Raises and returns nil when the local player is not bound. */
+  state(): Record<string, unknown>;
 }
 
 /** Capability required: render. */
@@ -58,16 +84,30 @@ export interface Render {
 
 /** Capability required: world. */
 export interface World {
-  /** Read-only world queries. The core never hands out raw pointers. `entities_within` returns a table keyed \"0\",\"1\",… each an entity table (id, type, x, y, z, health, alive, distance), sorted by id so the order is stable across ticks; a `type` of \"\" or \"any\" matches every type, and an unknown type name is refused rather than matching everything. The raycast helpers cast from the local player's eye along its look direction and return {hit, x, y, z, block, id, distance}. */
+  /** Read-only world queries. The core never hands out raw pointers. `entities_within` returns a table keyed \"0\",\"1\",… each an entity table (id, type, x, y, z, health, alive, distance), sorted by id so the order is stable across ticks; a `type` of \"\" or \"any\" matches every type, and an unknown type name is refused rather than matching everything. The raycast helpers cast from the local player's eye along its look direction and return {hit, x, y, z, block, id, distance}. The biome/light/chunk reads take a block coordinate and fail closed (\"\", -1, \"unloaded\") when the seam has no answer. */
   query(within: number): number;
   entity_count(): number;
-  block_at(x: number, y: number, z: number): string;
+  block_at(x: number, y: number, z: number): number;
   time(): Record<string, unknown>;
   is_day(): boolean;
   is_raining(): boolean;
   entities_within(within: number, type: string): Record<string, unknown>;
   raycast_block(max_dist: number): Record<string, unknown>;
   raycast_entity(max_dist: number): Record<string, unknown>;
+  /** Every entity whose AABB overlaps the axis-aligned box from (min_x,min_y,min_z) to (max_x,max_y,max_z), as a table keyed \"0\",\"1\",… each an entity table. `type` filters as in `entities_within`. A box whose min exceeds its max is refused. */
+  entities_in_aabb(min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number, type: string): Record<string, unknown>;
+  /** Every entity within `radius` of a point, as a table keyed \"0\",\"1\",… each an entity table. `type` filters as in `entities_within`. */
+  entities_in_radius(x: number, y: number, z: number, radius: number, type: string): Record<string, unknown>;
+  /** Casts a ray from an arbitrary origin along a direction (not the local player's look), returning {hit, x, y, z, block, id, distance}. `dir_x`/`dir_y`/`dir_z` need not be normalized; a zero-length direction is refused. `target` is \"block\", \"entity\" or \"any\". */
+  raycast(origin_x: number, origin_y: number, origin_z: number, dir_x: number, dir_y: number, dir_z: number, max_dist: number, target: string): Record<string, unknown>;
+  /** The biome name at a block coordinate, or \"\" when the seam has no answer. */
+  get_biome(x: number, y: number, z: number): string;
+  /** The light level (0..15) at a block coordinate, or -1 when the seam has no answer. */
+  get_light(x: number, y: number, z: number): number;
+  /** The load state of the chunk containing a block coordinate: \"unloaded\", \"loaded\" or \"rendered\". */
+  get_chunk_state(x: number, y: number, z: number): string;
+  /** The numeric block id at integer coordinates (0 = air). Alias of `block_at`, spelled to make the numeric return obvious. */
+  block_id_at(x: number, y: number, z: number): number;
 }
 
 /** Capability required: world. */
@@ -82,6 +122,10 @@ export interface Entity {
   distance_to(id: number): number;
   /** The raw id of the nearest alive entity of `type` to the local player, or 0 when none is in range. An unknown type name is refused (fails closed) rather than returning an arbitrary entity. */
   nearest(type: string): number;
+  /** The entity's axis-aligned bounding box as {valid, min_x, min_y, min_z, max_x, max_y, max_z}. `valid` is false when the entity is not present. The box is derived from the entity's position and type (a fixed per-type size), never from engine memory. */
+  get_hitbox(id: number): Record<string, unknown>;
+  /** Casts a ray from (origin_x,origin_y,origin_z) along a direction and reports whether it reaches this entity's hitbox: {hit, distance, x, y, z}. A zero-length direction or a non-positive max distance is refused. */
+  trace_line(id: number, origin_x: number, origin_y: number, origin_z: number, dir_x: number, dir_y: number, dir_z: number, max_dist: number): Record<string, unknown>;
 }
 
 /** Capability required: fileio. */

@@ -28,6 +28,19 @@ Capability: `world`.
 | `player.max_health() -> number` | `world` | - |
 | `player.alive() -> bool` | `world` | - |
 | `player.name() -> string` | `world` | - |
+| `player.hunger() -> number` | `world` | Food level, 0..20. -1 when the local player is not bound. |
+| `player.saturation() -> number` | `world` | The hidden saturation value. -1 when the local player is not bound. |
+| `player.armor() -> number` | `world` | Total armour points, 0..20. |
+| `player.gamemode() -> string` | `world` | The gamemode as a name: \"survival\", \"creative\", \"adventure\", \"spectator\" or \"unknown\". |
+| `player.dimension() -> string` | `world` | The dimension as a name: \"overworld\", \"nether\", \"end\" or \"unknown\". |
+| `player.xp_level() -> number` | `world` | The experience level. |
+| `player.xp_progress() -> number` | `world` | Progress toward the next level, 0..1. |
+| `player.air() -> number` | `world` | Remaining breath in ticks (300 = full). |
+| `player.on_fire() -> bool` | `world` | True while the local player is on fire. |
+| `player.sneaking() -> bool` | `world` | True while the local player is sneaking. |
+| `player.sprinting() -> bool` | `world` | True while the local player is sprinting. |
+| `player.effects() -> Table` | `world` | Active status effects as a table keyed \"0\",\"1\",…, each {name, amplifier, seconds, ambient}. Empty when none or the local player is unbound. |
+| `player.state() -> Table` | `world` | The whole local-player state as one table: {hunger, saturation, armor, gamemode, dimension, xp_level, xp_progress, air, on_fire, sneaking, sprinting, effects}. Raises and returns nil when the local player is not bound. |
 
 ## Render
 
@@ -57,15 +70,22 @@ Capability: `world`.
 
 | Function | Capability | Description |
 | --- | --- | --- |
-| `world.query(within: number) -> number` | `world` | Read-only world queries. The core never hands out raw pointers. `entities_within` returns a table keyed \"0\",\"1\",… each an entity table (id, type, x, y, z, health, alive, distance), sorted by id so the order is stable across ticks; a `type` of \"\" or \"any\" matches every type, and an unknown type name is refused rather than matching everything. The raycast helpers cast from the local player's eye along its look direction and return {hit, x, y, z, block, id, distance}. |
+| `world.query(within: number) -> number` | `world` | Read-only world queries. The core never hands out raw pointers. `entities_within` returns a table keyed \"0\",\"1\",… each an entity table (id, type, x, y, z, health, alive, distance), sorted by id so the order is stable across ticks; a `type` of \"\" or \"any\" matches every type, and an unknown type name is refused rather than matching everything. The raycast helpers cast from the local player's eye along its look direction and return {hit, x, y, z, block, id, distance}. The biome/light/chunk reads take a block coordinate and fail closed (\"\", -1, \"unloaded\") when the seam has no answer. |
 | `world.entity_count() -> number` | `world` | - |
-| `world.block_at(x: number, y: number, z: number) -> string` | `world` | - |
+| `world.block_at(x: number, y: number, z: number) -> number` | `world` | - |
 | `world.time() -> Table` | `world` | - |
 | `world.is_day() -> bool` | `world` | - |
 | `world.is_raining() -> bool` | `world` | - |
 | `world.entities_within(within: number, type: string) -> Table` | `world` | - |
 | `world.raycast_block(max_dist: number) -> Table` | `world` | - |
 | `world.raycast_entity(max_dist: number) -> Table` | `world` | - |
+| `world.entities_in_aabb(min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number, type: string) -> Table` | `world` | Every entity whose AABB overlaps the axis-aligned box from (min_x,min_y,min_z) to (max_x,max_y,max_z), as a table keyed \"0\",\"1\",… each an entity table. `type` filters as in `entities_within`. A box whose min exceeds its max is refused. |
+| `world.entities_in_radius(x: number, y: number, z: number, radius: number, type: string) -> Table` | `world` | Every entity within `radius` of a point, as a table keyed \"0\",\"1\",… each an entity table. `type` filters as in `entities_within`. |
+| `world.raycast(origin_x: number, origin_y: number, origin_z: number, dir_x: number, dir_y: number, dir_z: number, max_dist: number, target: string) -> Table` | `world` | Casts a ray from an arbitrary origin along a direction (not the local player's look), returning {hit, x, y, z, block, id, distance}. `dir_x`/`dir_y`/`dir_z` need not be normalized; a zero-length direction is refused. `target` is \"block\", \"entity\" or \"any\". |
+| `world.get_biome(x: number, y: number, z: number) -> string` | `world` | The biome name at a block coordinate, or \"\" when the seam has no answer. |
+| `world.get_light(x: number, y: number, z: number) -> number` | `world` | The light level (0..15) at a block coordinate, or -1 when the seam has no answer. |
+| `world.get_chunk_state(x: number, y: number, z: number) -> string` | `world` | The load state of the chunk containing a block coordinate: \"unloaded\", \"loaded\" or \"rendered\". |
+| `world.block_id_at(x: number, y: number, z: number) -> number` | `world` | The numeric block id at integer coordinates (0 = air). Alias of `block_at`, spelled to make the numeric return obvious. |
 
 ## Entity
 
@@ -81,6 +101,8 @@ Capability: `world`.
 | `entity.alive(id: number) -> bool` | `world` | - |
 | `entity.distance_to(id: number) -> number` | `world` | - |
 | `entity.nearest(type: string) -> number` | `world` | The raw id of the nearest alive entity of `type` to the local player, or 0 when none is in range. An unknown type name is refused (fails closed) rather than returning an arbitrary entity. |
+| `entity.get_hitbox(id: number) -> Table` | `world` | The entity's axis-aligned bounding box as {valid, min_x, min_y, min_z, max_x, max_y, max_z}. `valid` is false when the entity is not present. The box is derived from the entity's position and type (a fixed per-type size), never from engine memory. |
+| `entity.trace_line(id: number, origin_x: number, origin_y: number, origin_z: number, dir_x: number, dir_y: number, dir_z: number, max_dist: number) -> Table` | `world` | Casts a ray from (origin_x,origin_y,origin_z) along a direction and reports whether it reaches this entity's hitbox: {hit, distance, x, y, z}. A zero-length direction or a non-positive max distance is refused. |
 
 ## Fs
 
@@ -275,13 +297,16 @@ Capability: `events`.
 
 Events (await with `Events.once`):
 
-- `hit(damage: number)` — Event channels scripts may await with Events.once. The world-diff channels are driven by the reactive world grid: entityEntered and entityLeft carry \"<id>:<type>\", entityUpdated fires when an entity's position, health or state changed between ticks, and blockChanged carries \"x,y,z,block\". A script never polls for these.
+- `hit(damage: number)` — Event channels scripts may await with Events.once. The world-diff channels are driven by the reactive world grid: entityEntered and entityLeft carry \"<id>:<type>\", entityUpdated fires when an entity's position, health or state changed between ticks, and blockChanged carries \"x,y,z,block\". A script never polls for these. The lifecycle channels (entityHurt, entityDeath, entitySpawn) are driven by the combat bus and the world diff and carry \"<id>:<detail>\" (entityHurt's detail is the damage, entitySpawn's is the type), so a script can filter by id without a parser.
 - `kill(victim: string)` — -
 - `tick_count(count: number)` — -
 - `entityEntered(entity: string)` — -
 - `entityLeft(entity: string)` — -
 - `entityUpdated(entity: string)` — -
 - `blockChanged(change: string)` — -
+- `entityHurt(entity: string)` — -
+- `entityDeath(entity: string)` — -
+- `entitySpawn(entity: string)` — -
 
 ## Intent
 

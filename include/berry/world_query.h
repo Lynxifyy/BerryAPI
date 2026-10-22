@@ -18,6 +18,7 @@
 // The grid is client-side only: it caches what the seam already told us, it
 // never becomes a second source of truth about the world.
 
+#include "berry/combat.h"
 #include "berry/event.h"
 #include "berry/export.h"
 #include "berry/game.h"
@@ -197,6 +198,11 @@ namespace world_event {
 inline const char* EntityEntered() { return "entityEntered"; }
 inline const char* EntityLeft() { return "entityLeft"; }
 inline const char* EntityUpdated() { return "entityUpdated"; }
+/// Lifecycle channels derived from the same diff: a spawn is an enter, a
+/// death is a transition to not-alive. Kept distinct so a script can listen
+/// for the narrower event without filtering every update.
+inline const char* EntitySpawn() { return "entitySpawn"; }
+inline const char* EntityDeath() { return "entityDeath"; }
 }  // namespace world_event
 
 /// The channel a diff kind is published on, or nullptr for an unknown kind.
@@ -204,6 +210,11 @@ const char* WorldDiffChannel(WorldDiff d);
 
 /// The EventBus channel a block change is published on.
 inline const char* BlockChangedChannel() { return "blockChanged"; }
+
+/// The EventBus channel a combat observation is published on, for the
+/// `entityHurt` lifecycle event. Distinct from the internal "berry:combat"
+/// channel, whose payload is a struct pointer rather than a script string.
+inline const char* EntityHurtChannel() { return "entityHurt"; }
 
 /// Publishes a tick's block changes onto `blockChanged`. The payload is
 /// "<x>,<y>,<z>,<after>", so a listener can split it without a parser and never
@@ -220,5 +231,11 @@ std::string WorldDiffPayload(const EntitySnapshot& snap);
 /// layer; the grid itself stays a plain data structure. Returns how many
 /// events were published.
 size_t PublishWorldDiffToEvents(const std::vector<WorldDiffEvent>& events);
+
+/// Publishes one combat observation onto the `entityHurt` channel, so a script
+/// reaches it through `Events.once` with a plain "<id>:<damage>" payload. This
+/// is the bridge from the combat bus (whose payload is a struct pointer) to the
+/// script-visible event layer. Returns 1.
+size_t PublishCombatToEvents(const CombatEvent& evt);
 
 }  // namespace Berry

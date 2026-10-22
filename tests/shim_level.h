@@ -112,6 +112,29 @@ class ShimLevel final : public LevelSeam {
 
   LevelTime GetTime() const override { return time_; }
 
+  std::string GetBiome(const BlockPos& pos) const override {
+    std::lock_guard<std::mutex> lk(biomeM_);
+    auto it = biomes_.find(pos);
+    return it == biomes_.end() ? std::string() : it->second;
+  }
+
+  i32 GetLight(const BlockPos& pos) const override {
+    std::lock_guard<std::mutex> lk(lightM_);
+    auto it = lights_.find(pos);
+    return it == lights_.end() ? -1 : it->second;
+  }
+
+  ChunkState GetChunkState(const BlockPos& pos) const override {
+    std::lock_guard<std::mutex> lk(chunkM_);
+    auto it = chunks_.find(pos);
+    return it == chunks_.end() ? ChunkState::Unloaded : it->second;
+  }
+
+  LocalPlayerState GetLocalPlayerState() const override {
+    std::lock_guard<std::mutex> lk(playerM_);
+    return localPlayer_;
+  }
+
   // Test-only mutators (the shim is fake state, not the game). These are NOT
   // part of LevelSeam; the public seam is read-only.
   void SetBlock(const Vec3& worldPos, u32 blockType) {
@@ -119,6 +142,23 @@ class ShimLevel final : public LevelSeam {
     blocks_[BlockKey(worldPos)] = blockType;
   }
   void SetTime(const LevelTime& t) { time_ = t; }
+  void SetBiome(const BlockPos& pos, const std::string& name) {
+    std::lock_guard<std::mutex> lk(biomeM_);
+    biomes_[pos] = name;
+  }
+  void SetLight(const BlockPos& pos, i32 level) {
+    std::lock_guard<std::mutex> lk(lightM_);
+    lights_[pos] = level;
+  }
+  void SetChunkState(const BlockPos& pos, ChunkState state) {
+    std::lock_guard<std::mutex> lk(chunkM_);
+    chunks_[pos] = state;
+  }
+  void SetLocalPlayerState(const LocalPlayerState& st) {
+    std::lock_guard<std::mutex> lk(playerM_);
+    localPlayer_ = st;
+    localPlayer_.valid = true;
+  }
   void RecordMessage(const std::string& msg) {
     std::lock_guard<std::mutex> lk(m_);
     messages_.push_back(msg);
@@ -145,6 +185,14 @@ class ShimLevel final : public LevelSeam {
   std::map<std::array<i32, 3>, u32> blocks_;
   LevelTime time_;
   std::vector<std::string> messages_;
+  mutable std::mutex biomeM_;
+  std::map<BlockPos, std::string> biomes_;
+  mutable std::mutex lightM_;
+  std::map<BlockPos, i32> lights_;
+  mutable std::mutex chunkM_;
+  std::map<BlockPos, ChunkState> chunks_;
+  mutable std::mutex playerM_;
+  LocalPlayerState localPlayer_;
 };
 
 class CaptureRenderSeam final : public RenderSeam {
