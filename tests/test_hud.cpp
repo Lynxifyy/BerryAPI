@@ -167,6 +167,47 @@ static void TestHudAnchors() {
   CHECK(Near(hud.Get(bc)->resolvedPos.y + hud.Get(bc)->resolvedSize.y, screen.y));
 }
 
+static void TestHudOffScreenCull() {
+  Berry::Test::CaptureRenderSeam seam;
+  Renderer r;
+  r.Attach(&seam);
+  const Vec2 screen(800, 600);
+
+  Hud hud;
+  // An on-screen label and one pushed far off-screen via its offset.
+  WidgetId on = hud.Create(WidgetKind::Label, "visible", Anchor::TopLeft);
+  WidgetId off = hud.Create(WidgetKind::Label, "hidden", Anchor::TopLeft);
+  hud.SetOffset(off, Vec2(5000.0f, 5000.0f));
+
+  r.BeginFrame(screen);
+  hud.Present(r, screen);
+  r.EndFrame();
+  CHECK(hud.stats().widgetsDrawn == 1);
+  CHECK(hud.stats().widgetsCulled == 1);
+  CHECK(on != off);
+  CHECK(Near(hud.Get(on)->resolvedPos.x, 0.0f));
+
+  // An off-screen parent culls its whole subtree in one step.
+  Hud h2;
+  WidgetId root = h2.Create(WidgetKind::Column, "", Anchor::TopLeft);
+  h2.CreateChild(root, WidgetKind::Label, "child-a");
+  h2.CreateChild(root, WidgetKind::Label, "child-b");
+  h2.SetOffset(root, Vec2(-9000.0f, 0.0f));
+  r.BeginFrame(screen);
+  h2.Present(r, screen);
+  r.EndFrame();
+  CHECK(h2.stats().widgetsDrawn == 0);
+  CHECK(h2.stats().widgetsCulled == 3);   // root + two children
+
+  // Moving it back on-screen draws it again.
+  h2.SetOffset(root, Vec2(10.0f, 10.0f));
+  r.BeginFrame(screen);
+  h2.Present(r, screen);
+  r.EndFrame();
+  CHECK(h2.stats().widgetsDrawn == 3);
+  CHECK(h2.stats().widgetsCulled == 0);
+}
+
 static void TestHudGraphSamples() {
   Hud hud;
   WidgetId g = hud.Create(WidgetKind::Graph, "", Anchor::TopLeft);
@@ -516,6 +557,7 @@ int main() {
   TestHudTree();
   TestHudLayoutAndDraw();
   TestHudAnchors();
+  TestHudOffScreenCull();
   TestHudGraphSamples();
   TestHudTweenValue();
   TestHudOpacityTween();

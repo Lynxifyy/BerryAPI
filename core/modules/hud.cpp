@@ -523,6 +523,7 @@ void Hud::Present(Renderer& r, const Vec2& screen) {
   ++stats_.frames;
   stats_.layoutPasses = 0;
   stats_.widgetsDrawn = 0;
+  stats_.widgetsCulled = 0;
   stats_.primitives = 0;
 
   // Layout only the roots whose geometry changed; a dirty subtree re-lays out
@@ -548,11 +549,49 @@ void Hud::Present(Renderer& r, const Vec2& screen) {
     // An invisible widget hides its whole subtree: a hidden container must not
     // leave its children painted on screen.
     if (!w->visible) continue;
+    // An off-screen widget and its subtree cost nothing to skip: children are
+    // laid out relative to the parent, so if the parent is off-screen they are
+    // too (barring a slide tween, which the bounds below account for).
+    if (!OnScreen(*w, screen)) {
+      stats_.widgetsCulled += 1 + CountSubtree(*w);
+      continue;
+    }
     DrawWidget(*w, r);
     for (auto it = w->children.rbegin(); it != w->children.rend(); ++it) {
       stack.push_back(*it);
     }
   }
+}
+
+bool Hud::OnScreen(const Widget& w, const Vec2& screen) const {
+  // The slide tween shifts a widget vertically, so include it in the box or a
+  // widget sliding back into view would be culled while it is still visible.
+  const f32 slide = w.slide.Value();
+  const f32 minX = w.resolvedPos.x;
+  const f32 minY = w.resolvedPos.y + slide;
+  const f32 maxX = minX + w.resolvedSize.x;
+  const f32 maxY = minY + w.resolvedSize.y;
+  // A widget with no resolved size yet (never laid out) is kept: culling it
+  // would hide a widget whose geometry is simply not known this frame.
+  if (w.resolvedSize.x <= 0.0f || w.resolvedSize.y <= 0.0f) return true;
+  // A small margin keeps a widget that is exactly on the edge from flickering.
+  const f32 margin = 1.0f;
+  return maxX >= -margin && maxY >= -margin &&
+         minX <= screen.x + margin && minY <= screen.y + margin;
+}
+
+size_t Hud::CountSubtree(const Widget& w) const {
+  size_t n = 0;
+  std::vector<WidgetId> stack(w.children.begin(), w.children.end());
+  while (!stack.empty()) {
+    const WidgetId id = stack.back();
+    stack.pop_back();
+    const Widget* c = Get(id);
+    if (!c) continue;
+    ++n;
+    for (WidgetId g : c->children) stack.push_back(g);
+  }
+  return n;
 }
 
 }  // namespace Berry

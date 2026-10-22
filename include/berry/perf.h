@@ -48,6 +48,18 @@ enum class QualityKnob : u8 {
 
 const char* QualityKnobName(QualityKnob k);
 
+/// A device class the governor can tune itself for. Deliberately coarse: the
+/// point is that a low-end phone and a desktop want different knob ranges and
+/// different thermal behaviour, and neither should need hand-configuration.
+enum class PlatformClass : u8 {
+  Generic = 0,   // unknown: conservative middle-of-the-road defaults
+  MobileLow,     // entry phone: narrow ranges, aggressive thermal cap
+  MobileHigh,    // flagship phone / tablet
+  Desktop,       // desktop or laptop: wide ranges, mild thermal cap
+};
+
+const char* PlatformClassName(PlatformClass c);
+
 /// A per-knob quality value in [0,1], where 1 is full quality. Kept as a
 /// fraction so the governor can scale each knob's concrete setting from its
 /// own range.
@@ -118,8 +130,14 @@ struct BERRY_API QualityProfile {
   KnobRange lightingUpdates{1.0f, 8.0f};
   /// Entity culling turns on below this quality fraction.
   f32 cullThreshold = 0.5f;
+  /// The lowest render distance the governor may ever choose. Exposed as data
+  /// because the safe floor differs by platform (a phone can afford less than
+  /// a desktop before the world visibly unloads).
+  i32 minRenderDistance = 2;
 
   static QualityProfile Default();
+  /// Tuned ranges and a render-distance floor for a device class.
+  static QualityProfile ForPlatform(PlatformClass c);
   RenderSettings ToSettings(const QualityLevel& q, i32 targetFps) const;
 };
 
@@ -148,11 +166,35 @@ const char* GovernorActionName(GovernorAction a);
 struct BERRY_API FrameStats {
   f64 avgMs = 0;
   f64 p95Ms = 0;
+  /// 99th-percentile frame time. The governor reacts to this, not the average,
+  /// because a smooth average hiding regular long frames still feels bad.
+  f64 p99Ms = 0;
   f64 minMs = 0;
   f64 maxMs = 0;
   u64 samples = 0;
 
   f64 Fps() const { return avgMs > 0 ? 1000.0 / avgMs : 0; }
+};
+
+/// A coarse frame-time histogram, so a caller can see the shape of the tail
+/// rather than just its p99. Buckets are powers-of-two-ish bands in ms; the
+/// last bucket collects everything at or above its lower edge.
+struct BERRY_API FrameHistogram {
+  /// Lower edge (ms) of each bucket, ascending. The final entry is a catch-all.
+  static constexpr size_t kBucketCount = 7;
+  static const f64 kEdges[kBucketCount];
+
+  /// Counts per bucket; `counts[i]` covers [kEdges[i], kEdges[i+1]).
+  std::array<u64, kBucketCount> counts{};
+  u64 total = 0;
+
+  void Add(f64 frameMs);
+  void Clear() {
+    counts.fill(0);
+    total = 0;
+  }
+  /// Index of the bucket `frameMs` falls into (always in range).
+  static size_t BucketFor(f64 frameMs);
 };
 
 struct BERRY_API GovernorConfig {
@@ -172,6 +214,23 @@ struct BERRY_API GovernorConfig {
   f32 thermalCeiling = 0.4f;
   /// Never reduce below this: some visual quality is always kept.
   f32 floorQuality = 0.25f;
+  /// Frames to wait after a thermal clamp before any restoration is allowed,
+  /// even if frames are fast again. A device that just throttled will report
+  /// fast frames for a moment (it is doing less work); restoring immediately
+  /// would heat it straight back up and oscillate.
+  int thermalDwellFrames = 120;
+  /// While the platform reports Fair, hold quality at or below this. Fair is
+  /// "warm, not throttling": reacting early keeps the device out of the
+  /// Serious band instead of waiting for it.
+  f32 fairCeiling = 0.7f;
+  /// The p99 frame time must also be inside the slow threshold before the
+  /// governor reduces, so a smooth average cannot hide a spiky tail.
+  bool useTailLatency = true;
+  /// Tail-latency reaction only applies once the window holds at least this
+  /// many samples. In a short window the p99 IS the maximum, so reacting to it
+  /// would mean "reduce on any single spike for a whole window" — the opposite
+  /// of the hysteresis this governor exists for.
+  size_t tailLatencyMinSamples = 30;
 };
 
 /// Answers the render hooks' "cull or keep" question from the current
@@ -179,6 +238,19 @@ struct BERRY_API GovernorConfig {
 /// so the decision is deterministic and testable without a GPU.
 struct BERRY_API CullPolicy {
   RenderSettings settings;
+
+  /// A coarse particle category, so a cap can be spent where it matters. A
+  /// single global cap lets one cheap-but-numerous type (smoke) crowd out an
+  /// expensive one (flame) or vice versa; per-type budgets keep both visible.
+  enum class ParticleClass : u8 {
+    Ambient = 0,   // smoke, drips, dust: cheap, high volume
+    Effect,        // flame, potion, explosions: visually important
+    Combat,        // crit, damage, hit sparks
+    Count,
+  };
+
+  /// Cap per class. `Ambient` is the one to squeeze first.
+  std::array<i32, (size_t)ParticleClass::Count> classCaps{1200, 800, 300};
 
   /// Should an entity at `distance` from the camera be drawn? Entities are
   /// culled past `entityDistance` only when culling is enabled; otherwise they
@@ -202,11 +274,44 @@ struct BERRY_API CullPolicy {
     return aliveCount < settings.maxParticles;
   }
 
+  /// Per-class decision: the class cap and the global cap must both allow it.
+  /// A non-positive class cap disables that class entirely.
+  bool AllowParticleClass(ParticleClass cls, i32 aliveInClass) const {
+    if (settings.maxParticles <= 0) return false;
+    const i32 cap = classCaps[(size_t)cls];
+    if (cap <= 0) return false;
+    return aliveInClass < cap;
+  }
+
   /// Combined particle decision: a spawn is allowed when it is inside the
-  /// entity distance and the live count is under the cap.
+  /// entity distance, the live count is under the global cap, and its class is
+  /// under the class cap.
   bool AllowParticleAt(f32 distance, i32 aliveCount) const {
     return distance <= settings.entityDistance && AllowParticle(aliveCount);
   }
+
+  /// Full particle decision including the class budget and a screen-size term.
+  ///
+  /// `screenFraction` is the particle's projected size as a fraction of screen
+  /// height (0 for a particle whose size is unknown). A tiny distant particle
+  /// is skipped even when budgets allow it, because it would be invisible; a
+  /// large near one is always kept.
+  bool AllowParticleDetailed(ParticleClass cls, f32 distance, i32 aliveInClass,
+                             f32 screenFraction = 1.0f) const {
+    if (settings.maxParticles <= 0) return false;
+    if (distance > settings.entityDistance) return false;
+    if (!AllowParticleClass(cls, aliveInClass)) return false;
+    // Ambient particles get the strict screen-size test; effects and combat
+    // particles are kept because they carry information the player needs.
+    if (cls == ParticleClass::Ambient && screenFraction < kMinScreenFraction) {
+      return false;
+    }
+    return true;
+  }
+
+  /// Below this projected size (fraction of screen height) an ambient particle
+  /// is treated as invisible and culled.
+  static constexpr f32 kMinScreenFraction = 0.002f;
 };
 
 /// The adaptive quality governor.
@@ -218,6 +323,9 @@ class BERRY_API PerformanceGovernor {
   const GovernorConfig& config() const { return cfg_; }
   void SetProfile(const QualityProfile& p) { profile_ = p; }
   const QualityProfile& profile() const { return profile_; }
+  /// Sets both the profile and the thermal ceiling that suit a device class.
+  void SetPlatform(PlatformClass c);
+  PlatformClass platform() const { return platform_; }
 
   /// Records one frame's duration and re-evaluates the quality level.
   /// Returns the action taken this frame (None when inside the dead band).
@@ -246,6 +354,8 @@ class BERRY_API PerformanceGovernor {
   void ClearDirty() { dirty_ = false; }
 
   FrameStats stats() const;
+  /// Frame-time histogram over the current window.
+  FrameHistogram histogram() const;
   const std::deque<f32>& frameHistory() const { return frameMs_; }
 
   /// Forces a quality level (used by tests and a manual override).
@@ -256,16 +366,24 @@ class BERRY_API PerformanceGovernor {
  private:
   GovernorAction Step(f32 direction);
   void PushFrame(f32 frameMs);
+  /// Lowers every knob to at most `cap` (used by the thermal and Fair holds).
+  bool ClampQualityTo(f32 cap);
 
   GovernorConfig cfg_{};
   QualityProfile profile_ = QualityProfile::Default();
   QualityLevel quality_{};
   std::deque<f32> frameMs_;
   ThermalState thermal_ = ThermalState::Nominal;
+  PlatformClass platform_ = PlatformClass::Generic;
   f32 ceiling_ = 1.0f;
   f32 thermalHold_ = 1.0f;
+  /// Frames remaining before restoration is allowed again after a clamp.
+  int dwellFrames_ = 0;
   int slowStreak_ = 0;
   int fastStreak_ = 0;
+  /// Consecutive frames with a bad p99. Tracked separately from the average
+  /// streak because a fast frame between two spikes must not erase the signal.
+  int tailStreak_ = 0;
   bool dirty_ = false;
 };
 
