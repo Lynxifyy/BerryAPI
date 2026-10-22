@@ -415,3 +415,39 @@ the `input` grant — the capability the client-side intent groups share — so 
 script must already hold the capability whose policy it is querying. It only
 reports what the policy decided; it cannot widen it. With no validator bound,
 `allowed` fails closed (false) rather than reading as permitted.
+
+## Script shaders and post-processing (`shader.h`)
+
+A script can register a GLES fragment shader — a blur, a colour grade, a HUD
+material — and put it on an ordered post-process chain. The design keeps the two
+halves apart:
+
+* **Validation is pure.** `ValidateShaderSource` needs no GL context, so the
+  checks that matter run on the host and cannot be skipped by a device that
+  fails to compile: bounded name (an identifier, at most `kMaxNameLen`), bounded
+  source (`kMaxSourceBytes`), a `void main` entry point, no `#include` (which
+  would pull in text that was never validated), and a bounded, well-formed
+  uniform set. A refusal is a `ShaderReject`, so a script gets a reason rather
+  than a silent no-op.
+* **GL work is behind `IShaderCompiler`.** On the host the compiler is null and
+  registration still succeeds — the chain can be built and inspected without a
+  context. On device it is the GLES adapter.
+
+**Hot reload is re-registration.** Registering an existing name replaces the
+program in place: the chain position and every parameter whose uniform survives
+the edit are kept, and parameters whose uniform disappeared are dropped. A
+reload that fails validation leaves the old program untouched, so a broken edit
+cannot blank the screen. A reload the *device* refuses (a compile error) also
+keeps the previous program, and reports the reason through the error out-param;
+that is deliberately not a validation error, because the source was well-formed.
+
+The chain is the enabled effects in registration order (`Chain()`), which is
+what the renderer walks. Only a registered shader can be enabled, and a
+parameter must be a uniform the source actually declares, so a write that would
+silently do nothing at draw time is refused up front.
+
+Scripts drive it through `shader.*` (see [API.md](API.md)): `register`,
+`unregister`, `has`, `list`, `uniforms`, `enable`, `chain`, `set_param`,
+`param` and `clear`. The module carries the `render` grant, and every binding
+fails closed when no registry is bound.
+

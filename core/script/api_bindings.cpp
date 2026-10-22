@@ -831,6 +831,87 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Str(out);
   });
 
+  //--- Shader (script-registered post-processing) --------------------------
+  //
+  // Registration is validated before any GL call; a device that refuses the
+  // shader keeps the previous program. Every binding fails closed when no
+  // registry is bound.
+  install("shader.register", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.shaders) { ctx.RaiseError("shader.register: shader registry unavailable"); return ScriptValue::Bool(false); }
+    ShaderSource s;
+    s.name = args[0].AsString();
+    s.stage = ShaderStage::Fragment;
+    s.source = args[1].AsString();
+    std::string error;
+    const ShaderReject r = services_.shaders->Register(s, &error);
+    if (r != ShaderReject::None) {
+      ctx.RaiseError(std::string("shader.register: ") + ShaderRejectName(r));
+      return ScriptValue::Bool(false);
+    }
+    // A device compile failure is reported as false, but the previous program
+    // (if any) is still in place; surface the reason to the script.
+    if (!error.empty()) ctx.RaiseError("shader.register: " + error);
+    return ScriptValue::Bool(error.empty());
+  });
+
+  install("shader.unregister", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.shaders) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.shaders->Unregister(args[0].AsString()));
+  });
+
+  install("shader.has", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.shaders) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.shaders->Has(args[0].AsString()));
+  });
+
+  install("shader.list", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.shaders) return ScriptValue::Str("");
+    std::string out;
+    for (const auto& n : services_.shaders->Names()) {
+      if (!out.empty()) out += ",";
+      out += n;
+    }
+    return ScriptValue::Str(out);
+  });
+
+  install("shader.uniforms", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.shaders) return ScriptValue::Str("");
+    return ScriptValue::Str(services_.shaders->UniformNames(args[0].AsString()));
+  });
+
+  install("shader.enable", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.shaders) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(
+        services_.shaders->SetEffectEnabled(args[0].AsString(), args[1].Truthy()));
+  });
+
+  install("shader.chain", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.shaders) return ScriptValue::Str("");
+    return ScriptValue::Str(services_.shaders->ChainNames());
+  });
+
+  install("shader.set_param", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.shaders) return ScriptValue::Bool(false);
+    const f64 v = args[2].AsNumber();
+    if (!std::isfinite(v)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(
+        services_.shaders->SetParam(args[0].AsString(), args[1].AsString(), (f32)v));
+  });
+
+  install("shader.param", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.shaders) return ScriptValue::Num(0);
+    f32 v = 0;
+    if (!services_.shaders->Param(args[0].AsString(), args[1].AsString(), &v)) {
+      return ScriptValue::Num(0);
+    }
+    return ScriptValue::Num((f64)v);
+  });
+
+  install("shader.clear", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.shaders) services_.shaders->Clear();
+    return ScriptValue::Nil();
+  });
+
   return installed_.size();
 }
 

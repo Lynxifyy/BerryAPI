@@ -114,6 +114,21 @@ export type Intent = {
   list: () -> string,
 }
 
+-- Capability required: render.
+export type Shader = {
+  -- Script-registered GLES fragment shaders and the post-process chain. Registration is validated before any GL call, so a malformed or oversized shader is refused without touching the device. Reloading a shader by re-registering its name keeps its chain position and the parameters whose uniforms survive, and a shader the device refuses leaves the previous program in place.
+  register: (name: string, source: string) -> boolean,
+  unregister: (name: string) -> boolean,
+  has: (name: string) -> boolean,
+  list: () -> string,
+  uniforms: (name: string) -> string,
+  enable: (name: string, on: boolean) -> boolean,
+  chain: () -> string,
+  set_param: (name: string, param: string, value: number) -> boolean,
+  param: (name: string, param: string) -> number,
+  clear: () -> (),
+}
+
 export type AsyncFacade = {
   wait: (ticks: number) -> ((),
   eventsOnce: (channel: string) -> (unknown,

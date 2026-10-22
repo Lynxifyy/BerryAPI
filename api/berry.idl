@@ -133,3 +133,18 @@ module Intent {
   fn disabled_groups() -> string
   fn list() -> string
 }
+
+module Shader {
+  capability render
+  doc "Script-registered GLES fragment shaders and the post-process chain. Registration is validated before any GL call, so a malformed or oversized shader is refused without touching the device. Reloading a shader by re-registering its name keeps its chain position and the parameters whose uniforms survive, and a shader the device refuses leaves the previous program in place."
+  fn register(name: string, source: string) -> bool
+  fn unregister(name: string) -> bool
+  fn has(name: string) -> bool
+  fn list() -> string
+  fn uniforms(name: string) -> string
+  fn enable(name: string, on: bool) -> bool
+  fn chain() -> string
+  fn set_param(name: string, param: string, value: number) -> bool
+  fn param(name: string, param: string) -> number
+  fn clear() -> nil
+}

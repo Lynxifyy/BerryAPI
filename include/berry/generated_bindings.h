@@ -74,11 +74,21 @@ inline const BindingSpec* BindingSpecs() {
       {"intent.profile", CapKind::Input, 0, "Intent"},
       {"intent.disabled_groups", CapKind::Input, 0, "Intent"},
       {"intent.list", CapKind::Input, 0, "Intent"},
+      {"shader.register", CapKind::Render, 2, "Shader"},
+      {"shader.unregister", CapKind::Render, 1, "Shader"},
+      {"shader.has", CapKind::Render, 1, "Shader"},
+      {"shader.list", CapKind::Render, 0, "Shader"},
+      {"shader.uniforms", CapKind::Render, 1, "Shader"},
+      {"shader.enable", CapKind::Render, 2, "Shader"},
+      {"shader.chain", CapKind::Render, 0, "Shader"},
+      {"shader.set_param", CapKind::Render, 3, "Shader"},
+      {"shader.param", CapKind::Render, 2, "Shader"},
+      {"shader.clear", CapKind::Render, 0, "Shader"},
   };
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 53; }
+inline size_t BindingSpecCount() { return 63; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -170,6 +180,18 @@ inline const char* const kIntentNames[] = {
     "intent.disabled_groups",
     "intent.list",
 };
+inline const char* const kShaderNames[] = {
+    "shader.register",
+    "shader.unregister",
+    "shader.has",
+    "shader.list",
+    "shader.uniforms",
+    "shader.enable",
+    "shader.chain",
+    "shader.set_param",
+    "shader.param",
+    "shader.clear",
+};
 
 inline const ModuleBindings* ModuleBindingTable() {
   static const ModuleBindings kModules[] = {
@@ -183,11 +205,12 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Input", kInputNames, 3},
       {"Cosmetic", kCosmeticNames, 9},
       {"Intent", kIntentNames, 6},
+      {"Shader", kShaderNames, 10},
   };
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 10; }
+inline size_t ModuleBindingCount() { return 11; }
 
 }  // namespace api
 }  // namespace Berry

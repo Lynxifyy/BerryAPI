@@ -137,3 +137,20 @@ Capability: `input`.
 | `intent.profile() -> string` | `input` | - |
 | `intent.disabled_groups() -> string` | `input` | - |
 | `intent.list() -> string` | `input` | - |
+
+## Shader
+
+Capability: `render`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `shader.register(name: string, source: string) -> bool` | `render` | Script-registered GLES fragment shaders and the post-process chain. Registration is validated before any GL call, so a malformed or oversized shader is refused without touching the device. Reloading a shader by re-registering its name keeps its chain position and the parameters whose uniforms survive, and a shader the device refuses leaves the previous program in place. |
+| `shader.unregister(name: string) -> bool` | `render` | - |
+| `shader.has(name: string) -> bool` | `render` | - |
+| `shader.list() -> string` | `render` | - |
+| `shader.uniforms(name: string) -> string` | `render` | - |
+| `shader.enable(name: string, on: bool) -> bool` | `render` | - |
+| `shader.chain() -> string` | `render` | - |
+| `shader.set_param(name: string, param: string, value: number) -> bool` | `render` | - |
+| `shader.param(name: string, param: string) -> number` | `render` | - |
+| `shader.clear() -> nil` | `render` | - |

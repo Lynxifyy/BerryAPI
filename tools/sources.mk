@@ -24,6 +24,7 @@ CORE_SRC := \
   core/modules/input.cpp \
   core/modules/pvp.cpp \
   core/modules/cosmetic.cpp \
+  core/modules/shader.cpp \
   core/modules/governor.cpp \
   core/lifecycle/engine.cpp \
   core/lifecycle/thread.cpp \
@@ -83,7 +84,8 @@ TEST_SRC := \
   tests/test_api_bindings.cpp \
   tests/test_cosmetic.cpp \
   tests/test_pack.cpp \
-  tests/test_intent.cpp
+  tests/test_intent.cpp \
+  tests/test_shader.cpp
 # Vendored Luau (MIT). See third_party/luau/PROVENANCE.md for the pinned
 # version and why these units and not the CLI. Compiled with -w because upstream
 # is only warning-clean under its own flag set; our code stays -Wall -Wextra clean.
