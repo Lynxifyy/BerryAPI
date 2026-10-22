@@ -28,6 +28,60 @@ module Combat {
   fn observe(ticks: number) -> number
 }
 
+module CombatState {
+  capability combat
+  doc "Local combat-state telemetry (CSHR): reach validation, swing timing, hitbox history, projectile prediction, hit-prediction accuracy and a click-budget read-out. Every value is derived from data the client already has — hits the engine already applied, entity snapshots the level seam already delivered, and the local player's own clicks. Nothing here is sent, nothing writes game state, and nothing reveals another player beyond what a fight already shows: there is no reach extension, no aim assist and no packet injection. `hitbox_at`/`last_reach` return {valid, ...} and `last_reach` also carries {distance, max_reach, within_reach, tick, attacker, victim}; a check whose positions are unknown reports valid=false rather than a guessed distance."
+  doc "The configured maximum legitimate reach, in blocks."
+  fn max_reach() -> number
+  doc "Sets the reach limit. Must be a finite positive number; a bad value is refused and leaves the limit unchanged."
+  fn set_max_reach(blocks: number) -> bool
+  doc "The most recent reach check as {valid, distance, max_reach, within_reach, tick, attacker, victim}."
+  fn last_reach() -> Table
+  doc "How many applied hits so far were beyond the reach limit."
+  fn reach_violations() -> number
+  doc "How many hitbox samples are recorded for an entity."
+  fn hitbox_count(id: number) -> number
+  doc "The ticks an entity has recorded hitbox samples for, oldest first, as a table keyed \"0\",\"1\",…."
+  fn hitbox_ticks(id: number) -> Table
+  doc "The entity's recorded hitbox at an exact tick as {valid, min_x, min_y, min_z, max_x, max_y, max_z}. `valid` is false when there is no sample for that tick."
+  fn hitbox_at(id: number, tick: number) -> Table
+  doc "Records a swing by an entity at a tick, returning {valid, delta_ticks, cps, tick}. `valid` is false for the first swing, which has no interval yet."
+  fn swing(id: number, tick: number) -> Table
+  doc "The most recent swing sample, same shape as `swing`."
+  fn last_swing() -> Table
+  doc "Average swings per second for an entity across the retained window, 0 when there is not enough data."
+  fn average_swing_cps(id: number) -> number
+  doc "Extrapolates a projectile forward `ticks` ticks from a position and velocity under `gravity` (blocks/s^2, e.g. -20), returning a Vec3. Pure: it reads no state."
+  fn predict_projectile(x: number, y: number, z: number, vx: number, vy: number, vz: number, gravity: number, ticks: number) -> Vec3
+  doc "Records a projectile prediction for an id at a tick, so `resolve_projectile` can score it."
+  fn note_projectile(id: number, x: number, y: number, z: number, tick: number) -> nil
+  doc "Scores the pending prediction for an id against an actual position, returning the error in blocks, or -1 when there was no pending prediction."
+  fn resolve_projectile(id: number, x: number, y: number, z: number, tick: number) -> number
+  doc "Mean error, in blocks, across the retained projectile predictions, or -1 when none have been scored."
+  fn prediction_error() -> number
+  doc "How many projectile predictions have been scored."
+  fn prediction_count() -> number
+  doc "Records a predicted hit (attacker, victim) at a tick, so a later applied hit can confirm it."
+  fn predict_hit(attacker: number, victim: number, tick: number) -> nil
+  doc "Confirmed hits divided by predicted hits, 0 when nothing has been predicted."
+  fn hit_accuracy() -> number
+  fn predicted_hits() -> number
+  fn confirmed_hits() -> number
+  fn missed_hits() -> number
+  doc "Feeds one click into a button's budget (\"left\" or \"right\"). Returns true when the click is within budget. It only reports; the click is never blocked or dropped."
+  fn note_click(button: string, now_ms: number) -> bool
+  doc "Rolling clicks per second for a button over the last second."
+  fn click_rate(button: string) -> number
+  doc "True when the most recent `note_click` was over budget."
+  fn click_limited() -> bool
+  doc "Tokens left in a button's bucket."
+  fn click_tokens(button: string) -> number
+  doc "Sets the click budget: `per_second` sustained clicks with a `burst` allowance. Both must be finite and positive and the burst at least 1; a bad value is refused."
+  fn set_click_budget(per_second: number, burst: number) -> bool
+  doc "Drops all recorded combat state (history, swings, predictions, counters, click buckets)."
+  fn clear() -> nil
+}
+
 module Player {
   capability world
   doc "Read-only view of the LOCAL player. This is the client's own state, which it already holds; nothing here reveals another player. Reads fail closed when the local player is not bound."
@@ -335,6 +389,12 @@ module Events {
   event entityHurt(entity: string)
   event entityDeath(entity: string)
   event entitySpawn(entity: string)
+  doc "A hit the local client predicted (the swing it believes will land). Carries \"<attacker>:<victim>\"."
+  event combatPredicted(hit: string)
+  doc "A predicted hit the engine then confirmed. Carries \"<attacker>:<victim>\"."
+  event combatConfirmed(hit: string)
+  doc "A predicted hit that was never confirmed within the prediction window. Carries \"<attacker>:<victim>\"."
+  event combatMissed(hit: string)
 }
 
 module Intent {

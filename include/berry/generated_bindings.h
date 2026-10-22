@@ -24,6 +24,32 @@ inline const BindingSpec* BindingSpecs() {
       {"combat.recent_kills", CapKind::Combat, 0, "Combat"},
       {"combat.last_hit_damage", CapKind::Combat, 0, "Combat"},
       {"combat.observe", CapKind::Combat, 1, "Combat"},
+      {"combat_state.max_reach", CapKind::Combat, 0, "CombatState"},
+      {"combat_state.set_max_reach", CapKind::Combat, 1, "CombatState"},
+      {"combat_state.last_reach", CapKind::Combat, 0, "CombatState"},
+      {"combat_state.reach_violations", CapKind::Combat, 0, "CombatState"},
+      {"combat_state.hitbox_count", CapKind::Combat, 1, "CombatState"},
+      {"combat_state.hitbox_ticks", CapKind::Combat, 1, "CombatState"},
+      {"combat_state.hitbox_at", CapKind::Combat, 2, "CombatState"},
+      {"combat_state.swing", CapKind::Combat, 2, "CombatState"},
+      {"combat_state.last_swing", CapKind::Combat, 0, "CombatState"},
+      {"combat_state.average_swing_cps", CapKind::Combat, 1, "CombatState"},
+      {"combat_state.predict_projectile", CapKind::Combat, 8, "CombatState"},
+      {"combat_state.note_projectile", CapKind::Combat, 5, "CombatState"},
+      {"combat_state.resolve_projectile", CapKind::Combat, 5, "CombatState"},
+      {"combat_state.prediction_error", CapKind::Combat, 0, "CombatState"},
+      {"combat_state.prediction_count", CapKind::Combat, 0, "CombatState"},
+      {"combat_state.predict_hit", CapKind::Combat, 3, "CombatState"},
+      {"combat_state.hit_accuracy", CapKind::Combat, 0, "CombatState"},
+      {"combat_state.predicted_hits", CapKind::Combat, 0, "CombatState"},
+      {"combat_state.confirmed_hits", CapKind::Combat, 0, "CombatState"},
+      {"combat_state.missed_hits", CapKind::Combat, 0, "CombatState"},
+      {"combat_state.note_click", CapKind::Combat, 2, "CombatState"},
+      {"combat_state.click_rate", CapKind::Combat, 1, "CombatState"},
+      {"combat_state.click_limited", CapKind::Combat, 0, "CombatState"},
+      {"combat_state.click_tokens", CapKind::Combat, 1, "CombatState"},
+      {"combat_state.set_click_budget", CapKind::Combat, 2, "CombatState"},
+      {"combat_state.clear", CapKind::Combat, 0, "CombatState"},
       {"player.position", CapKind::World, 0, "Player"},
       {"player.rotation", CapKind::World, 0, "Player"},
       {"player.velocity", CapKind::World, 0, "Player"},
@@ -228,7 +254,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 203; }
+inline size_t BindingSpecCount() { return 229; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -251,6 +277,34 @@ inline const char* const kCombatNames[] = {
     "combat.recent_kills",
     "combat.last_hit_damage",
     "combat.observe",
+};
+inline const char* const kCombatStateNames[] = {
+    "combat_state.max_reach",
+    "combat_state.set_max_reach",
+    "combat_state.last_reach",
+    "combat_state.reach_violations",
+    "combat_state.hitbox_count",
+    "combat_state.hitbox_ticks",
+    "combat_state.hitbox_at",
+    "combat_state.swing",
+    "combat_state.last_swing",
+    "combat_state.average_swing_cps",
+    "combat_state.predict_projectile",
+    "combat_state.note_projectile",
+    "combat_state.resolve_projectile",
+    "combat_state.prediction_error",
+    "combat_state.prediction_count",
+    "combat_state.predict_hit",
+    "combat_state.hit_accuracy",
+    "combat_state.predicted_hits",
+    "combat_state.confirmed_hits",
+    "combat_state.missed_hits",
+    "combat_state.note_click",
+    "combat_state.click_rate",
+    "combat_state.click_limited",
+    "combat_state.click_tokens",
+    "combat_state.set_click_budget",
+    "combat_state.clear",
 };
 inline const char* const kPlayerNames[] = {
     "player.position",
@@ -496,6 +550,7 @@ inline const char* const kRecordNames[] = {
 inline const ModuleBindings* ModuleBindingTable() {
   static const ModuleBindings kModules[] = {
       {"Combat", kCombatNames, 3},
+      {"CombatState", kCombatStateNames, 26},
       {"Player", kPlayerNames, 20},
       {"Render", kRenderNames, 15},
       {"World", kWorldNames, 16},
@@ -520,7 +575,7 @@ inline const ModuleBindings* ModuleBindingTable() {
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 21; }
+inline size_t ModuleBindingCount() { return 22; }
 
 }  // namespace api
 }  // namespace Berry

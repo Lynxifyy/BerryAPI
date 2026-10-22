@@ -1112,6 +1112,206 @@ static void TestPhase2PlayerAndWorldExtras() {
         ScriptStatus::Error);
 }
 
+//----------------------------------------------------------------------------
+// CombatState bindings (Phase 3)
+//----------------------------------------------------------------------------
+
+static void TestCombatStateBindings() {
+  Renderer renderer;
+  std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
+  WorldHandle* world = worldMod->Service<WorldHandle>();
+  auto shim = std::make_shared<Berry::Test::ShimLevel>();
+  CombatStateTracker cs;
+
+  const EntityId self{1, 1};
+  EntitySnapshot me;
+  me.id = self;
+  me.type = EntityType::Player;
+  me.position = Vec3(0, 64, 0);
+  me.alive = true;
+  shim->AddEntity(self, me);
+
+  const EntityId victim{2, 2};
+  EntitySnapshot v;
+  v.id = victim;
+  v.type = EntityType::Player;
+  v.position = Vec3(2, 64, 0);   // 2 blocks away: within the default reach
+  v.alive = true;
+  shim->AddEntity(victim, v);
+
+  world->SetSeam(shim);
+
+  ScriptApi::Services services;
+  services.world = world;
+  services.renderer = &renderer;
+  services.localPlayer = self;
+  services.combatState = &cs;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+
+  //--- reach configuration and reads ---
+  CHECK(Call(bindings, "combat_state.max_reach", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(std::fabs(out.AsNumber() - 3.0) < 1e-6);
+  CHECK(Call(bindings, "combat_state.set_max_reach", {ScriptValue::Num(4.5)}, {"combat"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(std::fabs(cs.maxReach() - 4.5f) < 1e-5f);
+  // A non-positive reach is refused and leaves the limit unchanged.
+  CHECK(Call(bindings, "combat_state.set_max_reach", {ScriptValue::Num(0)}, {"combat"}, &out) ==
+        ScriptStatus::Error);
+  CHECK(std::fabs(cs.maxReach() - 4.5f) < 1e-5f);
+
+  // last_reach before any hit is invalid, not a fabricated zero-distance hit.
+  CHECK(Call(bindings, "combat_state.last_reach", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.AsTable()->at("valid").Truthy());
+  CHECK(Call(bindings, "combat_state.reach_violations", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+
+  //--- hitbox history from the seam feed ---
+  // The berry:tick hook records hitboxes; emulate the tick directly.
+  cs.ObserveEntity(me, 100);
+  cs.ObserveEntity(v, 100);
+  CHECK(Call(bindings, "combat_state.hitbox_count", {ScriptValue::Num(2)}, {"combat"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+
+  CHECK(Call(bindings, "combat_state.hitbox_ticks", {ScriptValue::Num(2)}, {"combat"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("0").AsNumber() == 100);
+
+  CHECK(Call(bindings, "combat_state.hitbox_at",
+             {ScriptValue::Num(2), ScriptValue::Num(100)}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("valid").Truthy());
+  CHECK(std::fabs(out.AsTable()->at("min_x").AsNumber() - 1.7) < 1e-4);
+
+  // An exact tick with no sample reports valid=false.
+  CHECK(Call(bindings, "combat_state.hitbox_at",
+             {ScriptValue::Num(2), ScriptValue::Num(999)}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.AsTable()->at("valid").Truthy());
+
+  //--- reach validation through the combat event ---
+  CombatEvent hit;
+  hit.attacker = self;
+  hit.victim = victim;
+  hit.finalDamage = 5.0f;
+  hit.tick = 100;
+  cs.ObserveHit(hit, 100);
+  CHECK(Call(bindings, "combat_state.last_reach", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("valid").Truthy());
+  CHECK(out.AsTable()->at("within_reach").Truthy());
+  CHECK(out.AsTable()->at("victim").AsNumber() == 2);
+
+  //--- swing timing ---
+  CHECK(Call(bindings, "combat_state.swing",
+             {ScriptValue::Num(1), ScriptValue::Num(100)}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.AsTable()->at("valid").Truthy());   // first swing
+  CHECK(Call(bindings, "combat_state.swing",
+             {ScriptValue::Num(1), ScriptValue::Num(104)}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("valid").Truthy());
+  CHECK(std::fabs(out.AsTable()->at("cps").AsNumber() - 5.0) < 1e-6);
+  CHECK(Call(bindings, "combat_state.last_swing", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("tick").AsNumber() == 104);
+  CHECK(Call(bindings, "combat_state.average_swing_cps", {ScriptValue::Num(1)}, {"combat"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsNumber() > 0);
+
+  //--- projectile prediction ---
+  CHECK(Call(bindings, "combat_state.predict_projectile",
+             {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(20), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(0), ScriptValue::Num(10)}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(std::fabs(out.AsTable()->at("x").AsNumber() - 10.0) < 1e-4);
+
+  CHECK(Call(bindings, "combat_state.note_projectile",
+             {ScriptValue::Num(7), ScriptValue::Num(10), ScriptValue::Num(0),
+              ScriptValue::Num(0), ScriptValue::Num(10)}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "combat_state.resolve_projectile",
+             {ScriptValue::Num(7), ScriptValue::Num(11), ScriptValue::Num(0),
+              ScriptValue::Num(0), ScriptValue::Num(15)}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(std::fabs(out.AsNumber() - 1.0) < 1e-5);
+  CHECK(Call(bindings, "combat_state.prediction_count", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  CHECK(Call(bindings, "combat_state.prediction_error", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(std::fabs(out.AsNumber() - 1.0) < 1e-5);
+
+  //--- hit-prediction accuracy ---
+  cs.PredictHit(self, victim, 200);
+  cs.ConfirmHit(hit, 200);
+  CHECK(Call(bindings, "combat_state.predicted_hits", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  CHECK(Call(bindings, "combat_state.confirmed_hits", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  CHECK(Call(bindings, "combat_state.missed_hits", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "combat_state.hit_accuracy", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(std::fabs(out.AsNumber() - 1.0) < 1e-9);
+
+  //--- click budget ---
+  CHECK(Call(bindings, "combat_state.set_click_budget",
+             {ScriptValue::Num(20), ScriptValue::Num(20)}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "combat_state.set_click_budget",
+             {ScriptValue::Num(0), ScriptValue::Num(20)}, {"combat"}, &out) == ScriptStatus::Error);
+
+  CHECK(Call(bindings, "combat_state.note_click",
+             {ScriptValue::Str("left"), ScriptValue::Num(1000)}, {"combat"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "combat_state.click_rate", {ScriptValue::Str("left")}, {"combat"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsNumber() >= 1.0);
+  CHECK(Call(bindings, "combat_state.click_limited", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "combat_state.click_tokens", {ScriptValue::Str("left")}, {"combat"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsNumber() >= 19.0);
+  // An unknown button is refused.
+  CHECK(Call(bindings, "combat_state.note_click",
+             {ScriptValue::Str("middle"), ScriptValue::Num(1001)}, {"combat"}, &out) ==
+        ScriptStatus::Error);
+
+  //--- clear ---
+  CHECK(Call(bindings, "combat_state.clear", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(cs.TrackedEntities() == 0);
+  CHECK(cs.PredictedHits() == 0);
+
+  //--- a bad argument fails closed ---
+  CHECK(Call(bindings, "combat_state.hitbox_count", {ScriptValue::Num(-1)}, {"combat"}, &out) ==
+        ScriptStatus::Error);
+}
+
+//----------------------------------------------------------------------------
+// CombatState fails closed without the service
+//----------------------------------------------------------------------------
+
+static void TestCombatStateFailsClosedWithoutService() {
+  ScriptApi::Services services;   // no combatState, no world
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  // Every read returns a neutral value and raises rather than fabricating
+  // combat state.
+  CHECK(Call(bindings, "combat_state.max_reach", {}, {"combat"}, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "combat_state.hit_accuracy", {}, {"combat"}, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "combat_state.last_reach", {}, {"combat"}, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "combat_state.reach_violations", {}, {"combat"}, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "combat_state.prediction_error", {}, {"combat"}, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "combat_state.note_click",
+             {ScriptValue::Str("left"), ScriptValue::Num(0)}, {"combat"}, &out) == ScriptStatus::Error);
+  // clear is a no-op that still reports success-shaped nil.
+  CHECK(Call(bindings, "combat_state.clear", {}, {"combat"}, &out) == ScriptStatus::Error);
+
+  // Without the grant, the capability gate denies before the body runs.
+  CHECK(Call(bindings, "combat_state.max_reach", {}, {"world"}, &out) == ScriptStatus::CapabilityDenied);
+}
+
+
+
 static void TestModBindings() {
   ScriptModuleRegistry modules;
   ScriptApi::Services services;
@@ -1421,6 +1621,8 @@ int main() {
   TestArityFailsClosed();
   TestWorldAndEntityReads();
   TestPhase2PlayerAndWorldExtras();
+  TestCombatStateBindings();
+  TestCombatStateFailsClosedWithoutService();
   TestModBindings();
   TestFsAndAudioBindings();
   TestPvpBindings();

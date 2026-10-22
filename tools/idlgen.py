@@ -72,6 +72,7 @@ CAPABILITY_ENUM = {
 # lower-cased name.
 MODULE_BINDING_PREFIX = {
     "JsonRpc": "json_rpc",
+    "CombatState": "combat_state",
 }
 
 

@@ -238,6 +238,7 @@ ScriptApi::~ScriptApi() { RemoveHooks(); }
 
 void ScriptApi::InitHooks() {
   InitCombatCache();
+  InitCombatStateHook();
   InitFrameHook();
 }
 
@@ -300,6 +301,14 @@ void ScriptApi::RemoveHooks() {
   if (combatListener_) {
     EventBus::Instance().Off("berry:combat", combatListener_);
     combatListener_ = 0;
+  }
+  if (tickListener_) {
+    EventBus::Instance().Off("berry:tick", tickListener_);
+    tickListener_ = 0;
+  }
+  if (combatStateListener_) {
+    EventBus::Instance().Off("berry:combat", combatStateListener_);
+    combatStateListener_ = 0;
   }
 }
 
@@ -375,6 +384,321 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
       if (e.tick >= lo) ++n;
     }
     return ScriptValue::Num((f64)n);
+  });
+
+  //--- CombatState (local combat-state telemetry / CSHR) --------------------
+  //
+  // Everything here derives from data the client already has. When the service
+  // is not wired the reads fail closed with neutral values rather than
+  // fabricating combat state.
+
+  auto combatStateOrFail = [this](ScriptContext& ctx, const char* who)
+      -> CombatStateTracker* {
+    if (!services_.combatState) {
+      ctx.RaiseError(std::string(who) + ": combat-state tracker unavailable");
+      return nullptr;
+    }
+    return services_.combatState;
+  };
+
+  auto parseCombatButton = [](ScriptContext& ctx, const char* who,
+                              const std::string& raw, MouseButton* out) -> bool {
+    const std::string b = Lower(raw);
+    if (b == "left") { *out = MouseButton::Left; return true; }
+    if (b == "right") { *out = MouseButton::Right; return true; }
+    ctx.RaiseError(std::string(who) + ": button must be \"left\" or \"right\"");
+    return false;
+  };
+
+  install("combat_state.max_reach", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.max_reach");
+    if (!cs) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)cs->maxReach());
+  });
+
+  install("combat_state.set_max_reach", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.set_max_reach");
+    if (!cs) return ScriptValue::Bool(false);
+    const f64 blocks = args[0].AsNumber();
+    if (!std::isfinite(blocks) || blocks <= 0) {
+      ctx.RaiseError("combat_state.set_max_reach: blocks must be a finite positive number");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(cs->SetMaxReach((f32)blocks));
+  });
+
+  install("combat_state.last_reach", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.last_reach");
+    if (!cs) return ScriptValue::Nil();
+    const ReachCheck rc = cs->lastReach();
+    ScriptTable t;
+    t["valid"] = ScriptValue::Bool(rc.valid);
+    t["distance"] = ScriptValue::Num((f64)rc.distance);
+    t["max_reach"] = ScriptValue::Num((f64)rc.maxReach);
+    t["within_reach"] = ScriptValue::Bool(rc.withinReach);
+    t["tick"] = ScriptValue::Num((f64)rc.tick);
+    t["attacker"] = ScriptValue::Num((f64)rc.attacker.raw);
+    t["victim"] = ScriptValue::Num((f64)rc.victim.raw);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("combat_state.reach_violations", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.reach_violations");
+    if (!cs) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)cs->reachViolations());
+  });
+
+  install("combat_state.hitbox_count", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.hitbox_count");
+    if (!cs) return ScriptValue::Num(0);
+    const f64 raw = args[0].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0) {
+      ctx.RaiseError("combat_state.hitbox_count: entity id must be a positive number");
+      return ScriptValue::Num(0);
+    }
+    EntityId id; id.raw = (u64)raw;
+    return ScriptValue::Num((f64)cs->HitboxCount(id));
+  });
+
+  install("combat_state.hitbox_ticks", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.hitbox_ticks");
+    if (!cs) return ScriptValue::Nil();
+    const f64 raw = args[0].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0) {
+      ctx.RaiseError("combat_state.hitbox_ticks: entity id must be a positive number");
+      return ScriptValue::Nil();
+    }
+    EntityId id; id.raw = (u64)raw;
+    const std::vector<u64> ticks = cs->HitboxTicks(id);
+    ScriptTable t;
+    for (size_t i = 0; i < ticks.size(); ++i) {
+      t[std::to_string(i)] = ScriptValue::Num((f64)ticks[i]);
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("combat_state.hitbox_at", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.hitbox_at");
+    if (!cs) return ScriptValue::Nil();
+    const f64 raw = args[0].AsNumber();
+    const f64 tick = args[1].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0 || !std::isfinite(tick) || tick < 0) {
+      ctx.RaiseError("combat_state.hitbox_at: entity id must be positive and tick non-negative");
+      return ScriptValue::Nil();
+    }
+    EntityId id; id.raw = (u64)raw;
+    Aabb box;
+    ScriptTable t;
+    const bool ok = cs->HitboxAt(id, (u64)tick, &box);
+    t["valid"] = ScriptValue::Bool(ok);
+    t["min_x"] = ScriptValue::Num((f64)box.min.x);
+    t["min_y"] = ScriptValue::Num((f64)box.min.y);
+    t["min_z"] = ScriptValue::Num((f64)box.min.z);
+    t["max_x"] = ScriptValue::Num((f64)box.max.x);
+    t["max_y"] = ScriptValue::Num((f64)box.max.y);
+    t["max_z"] = ScriptValue::Num((f64)box.max.z);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  auto swingToTable = [](const SwingSample& s) {
+    ScriptTable t;
+    t["valid"] = ScriptValue::Bool(s.valid);
+    t["delta_ticks"] = ScriptValue::Num((f64)s.deltaTicks);
+    t["cps"] = ScriptValue::Num(s.cps);
+    t["tick"] = ScriptValue::Num((f64)s.tick);
+    t["attacker"] = ScriptValue::Num((f64)s.attacker.raw);
+    return ScriptValue::Tbl(std::move(t));
+  };
+
+  install("combat_state.swing", [this, combatStateOrFail, swingToTable](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.swing");
+    if (!cs) return ScriptValue::Nil();
+    const f64 raw = args[0].AsNumber();
+    const f64 tick = args[1].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0 || !std::isfinite(tick) || tick < 0) {
+      ctx.RaiseError("combat_state.swing: entity id must be positive and tick non-negative");
+      return ScriptValue::Nil();
+    }
+    EntityId id; id.raw = (u64)raw;
+    return swingToTable(cs->ObserveSwing(id, (u64)tick));
+  });
+
+  install("combat_state.last_swing", [this, combatStateOrFail, swingToTable](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.last_swing");
+    if (!cs) return ScriptValue::Nil();
+    return swingToTable(cs->lastSwing());
+  });
+
+  install("combat_state.average_swing_cps", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.average_swing_cps");
+    if (!cs) return ScriptValue::Num(0);
+    const f64 raw = args[0].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0) {
+      ctx.RaiseError("combat_state.average_swing_cps: entity id must be a positive number");
+      return ScriptValue::Num(0);
+    }
+    EntityId id; id.raw = (u64)raw;
+    return ScriptValue::Num(cs->AverageSwingCps(id));
+  });
+
+  install("combat_state.predict_projectile", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    const f64 x = args[0].AsNumber(), y = args[1].AsNumber(), z = args[2].AsNumber();
+    const f64 vx = args[3].AsNumber(), vy = args[4].AsNumber(), vz = args[5].AsNumber();
+    const f64 gravity = args[6].AsNumber(), ticks = args[7].AsNumber();
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+        !std::isfinite(vx) || !std::isfinite(vy) || !std::isfinite(vz) ||
+        !std::isfinite(gravity) || !std::isfinite(ticks) || ticks < 0) {
+      ctx.RaiseError("combat_state.predict_projectile: arguments must be finite and ticks non-negative");
+      return Vec3Value(Vec3());
+    }
+    const Vec3 p = CombatStateTracker::Extrapolate(
+        Vec3((f32)x, (f32)y, (f32)z), Vec3((f32)vx, (f32)vy, (f32)vz),
+        (f32)gravity, (u32)ticks);
+    return Vec3Value(p);
+  });
+
+  install("combat_state.note_projectile", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.note_projectile");
+    if (!cs) return ScriptValue::Nil();
+    const f64 raw = args[0].AsNumber();
+    const f64 x = args[1].AsNumber(), y = args[2].AsNumber(), z = args[3].AsNumber();
+    const f64 tick = args[4].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0 || !std::isfinite(x) || !std::isfinite(y) ||
+        !std::isfinite(z) || !std::isfinite(tick) || tick < 0) {
+      ctx.RaiseError("combat_state.note_projectile: id must be positive and coordinates/tick finite");
+      return ScriptValue::Nil();
+    }
+    EntityId id; id.raw = (u64)raw;
+    cs->NoteProjectile(id, Vec3((f32)x, (f32)y, (f32)z), (u64)tick);
+    return ScriptValue::Nil();
+  });
+
+  install("combat_state.resolve_projectile", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.resolve_projectile");
+    if (!cs) return ScriptValue::Num(-1);
+    const f64 raw = args[0].AsNumber();
+    const f64 x = args[1].AsNumber(), y = args[2].AsNumber(), z = args[3].AsNumber();
+    const f64 tick = args[4].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0 || !std::isfinite(x) || !std::isfinite(y) ||
+        !std::isfinite(z) || !std::isfinite(tick) || tick < 0) {
+      ctx.RaiseError("combat_state.resolve_projectile: id must be positive and coordinates/tick finite");
+      return ScriptValue::Num(-1);
+    }
+    EntityId id; id.raw = (u64)raw;
+    return ScriptValue::Num((f64)cs->ResolveProjectile(id, Vec3((f32)x, (f32)y, (f32)z), (u64)tick));
+  });
+
+  install("combat_state.prediction_error", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.prediction_error");
+    if (!cs) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)cs->MeanPredictionError());
+  });
+
+  install("combat_state.prediction_count", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.prediction_count");
+    if (!cs) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)cs->PredictionCount());
+  });
+
+  install("combat_state.predict_hit", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.predict_hit");
+    if (!cs) return ScriptValue::Nil();
+    const f64 attacker = args[0].AsNumber();
+    const f64 victim = args[1].AsNumber();
+    const f64 tick = args[2].AsNumber();
+    if (!std::isfinite(attacker) || attacker <= 0 || !std::isfinite(victim) || victim <= 0 ||
+        !std::isfinite(tick) || tick < 0) {
+      ctx.RaiseError("combat_state.predict_hit: attacker/victim must be positive and tick non-negative");
+      return ScriptValue::Nil();
+    }
+    EntityId a; a.raw = (u64)attacker;
+    EntityId v; v.raw = (u64)victim;
+    cs->PredictHit(a, v, (u64)tick);
+    return ScriptValue::Nil();
+  });
+
+  install("combat_state.hit_accuracy", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.hit_accuracy");
+    if (!cs) return ScriptValue::Num(0);
+    return ScriptValue::Num(cs->HitAccuracy());
+  });
+
+  install("combat_state.predicted_hits", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.predicted_hits");
+    if (!cs) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)cs->PredictedHits());
+  });
+
+  install("combat_state.confirmed_hits", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.confirmed_hits");
+    if (!cs) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)cs->ConfirmedHits());
+  });
+
+  install("combat_state.missed_hits", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.missed_hits");
+    if (!cs) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)cs->MissedHits());
+  });
+
+  install("combat_state.note_click", [this, combatStateOrFail, parseCombatButton](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.note_click");
+    if (!cs) return ScriptValue::Bool(false);
+    MouseButton button;
+    if (!parseCombatButton(ctx, "combat_state.note_click", args[0].ToDisplay(), &button)) {
+      return ScriptValue::Bool(false);
+    }
+    const f64 nowMs = args[1].AsNumber();
+    if (!std::isfinite(nowMs) || nowMs < 0) {
+      ctx.RaiseError("combat_state.note_click: now_ms must be non-negative");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(cs->NoteClick(button, (u64)nowMs));
+  });
+
+  install("combat_state.click_rate", [this, combatStateOrFail, parseCombatButton](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.click_rate");
+    if (!cs) return ScriptValue::Num(0);
+    MouseButton button;
+    if (!parseCombatButton(ctx, "combat_state.click_rate", args[0].ToDisplay(), &button)) {
+      return ScriptValue::Num(0);
+    }
+    return ScriptValue::Num(cs->ClickRate(button));
+  });
+
+  install("combat_state.click_limited", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.click_limited");
+    if (!cs) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(cs->ClickLimited());
+  });
+
+  install("combat_state.click_tokens", [this, combatStateOrFail, parseCombatButton](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.click_tokens");
+    if (!cs) return ScriptValue::Num(0);
+    MouseButton button;
+    if (!parseCombatButton(ctx, "combat_state.click_tokens", args[0].ToDisplay(), &button)) {
+      return ScriptValue::Num(0);
+    }
+    return ScriptValue::Num((f64)cs->ClickTokens(button));
+  });
+
+  install("combat_state.set_click_budget", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.set_click_budget");
+    if (!cs) return ScriptValue::Bool(false);
+    const f64 perSecond = args[0].AsNumber();
+    const f64 burst = args[1].AsNumber();
+    if (!std::isfinite(perSecond) || perSecond <= 0 ||
+        !std::isfinite(burst) || burst < 1) {
+      ctx.RaiseError("combat_state.set_click_budget: per_second must be positive and burst at least 1");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(cs->SetClickBudget((f32)perSecond, (f32)burst));
+  });
+
+  install("combat_state.clear", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.clear");
+    if (cs) cs->Clear();
+    return ScriptValue::Nil();
   });
 
   //--- Player (read-only view of the LOCAL player) -------------------------
@@ -2724,6 +3048,56 @@ void ScriptApi::InitCombatCache() {
         std::lock_guard<std::mutex> lk(combatMutex_);
         observed_.push_back(ObservedHit{evt->tick, dmg});
         while (observed_.size() > kMaxObserved) observed_.pop_front();
+        return EventResult::Continue;
+      });
+}
+
+void ScriptApi::InitCombatStateHook() {
+  // The tracker is a client-side service, not a strict module, so the bridge
+  // feeds it from the same events everything else sees:
+  //
+  //   berry:tick    -> record the current tick's hitboxes and age predictions
+  //   berry:combat  -> validate reach, confirm a predicted hit, record a swing
+  //
+  // Both run on the game-tick thread and read only seam data / event payloads,
+  // never game memory. When the service is not wired the hook is a no-op.
+  tickListener_ = EventBus::Instance().On(
+      "berry:tick", [this](const EventContext& e) {
+        if (!services_.combatState) return EventResult::Continue;
+        const GameTick* t = static_cast<const GameTick*>(e.data);
+        if (!t) return EventResult::Continue;
+        const u64 tick = (u64)*t;
+        // Snapshot every entity the world already knows about, so the reach
+        // check has a box to measure against. This is the same cache the World
+        // module refreshes; nothing new is read from the engine.
+        if (services_.world) {
+          auto seam = services_.world->Seam();
+          if (seam) {
+            for (const EntityId& id : seam->AllEntities()) {
+              EntitySnapshot snap;
+              if (seam->GetEntity(id, &snap)) {
+                services_.combatState->ObserveEntity(snap, tick);
+              }
+            }
+          }
+        }
+        // Age pending hit predictions: anything past the window becomes a miss.
+        services_.combatState->Tick(tick);
+        return EventResult::Continue;
+      });
+
+  combatStateListener_ = EventBus::Instance().On(
+      "berry:combat", [this](const EventContext& e) {
+        if (!services_.combatState) return EventResult::Continue;
+        const CombatEvent* evt = static_cast<const CombatEvent*>(e.data);
+        if (!evt) return EventResult::Continue;
+        // Reach validation, swing timing and hit confirmation, all from the one
+        // applied-hit observation. The tracker is read-only: it never changes
+        // the event or the damage. `ConfirmHit` publishes the confirmed event,
+        // so it runs outside `ObserveHit`'s lock.
+        services_.combatState->ObserveHit(*evt, evt->tick);
+        services_.combatState->ConfirmHit(*evt, evt->tick);
+        services_.combatState->ObserveSwing(evt->attacker, evt->tick);
         return EventResult::Continue;
       });
 }

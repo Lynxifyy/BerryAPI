@@ -15,6 +15,39 @@ Capability: `combat`.
 | `combat.last_hit_damage() -> number` | `combat` | - |
 | `combat.observe(ticks: number) -> number` | `combat` | - |
 
+## CombatState
+
+Capability: `combat`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `combat_state.max_reach() -> number` | `combat` | The configured maximum legitimate reach, in blocks. |
+| `combat_state.set_max_reach(blocks: number) -> bool` | `combat` | Sets the reach limit. Must be a finite positive number; a bad value is refused and leaves the limit unchanged. |
+| `combat_state.last_reach() -> Table` | `combat` | The most recent reach check as {valid, distance, max_reach, within_reach, tick, attacker, victim}. |
+| `combat_state.reach_violations() -> number` | `combat` | How many applied hits so far were beyond the reach limit. |
+| `combat_state.hitbox_count(id: number) -> number` | `combat` | How many hitbox samples are recorded for an entity. |
+| `combat_state.hitbox_ticks(id: number) -> Table` | `combat` | The ticks an entity has recorded hitbox samples for, oldest first, as a table keyed \"0\",\"1\",…. |
+| `combat_state.hitbox_at(id: number, tick: number) -> Table` | `combat` | The entity's recorded hitbox at an exact tick as {valid, min_x, min_y, min_z, max_x, max_y, max_z}. `valid` is false when there is no sample for that tick. |
+| `combat_state.swing(id: number, tick: number) -> Table` | `combat` | Records a swing by an entity at a tick, returning {valid, delta_ticks, cps, tick}. `valid` is false for the first swing, which has no interval yet. |
+| `combat_state.last_swing() -> Table` | `combat` | The most recent swing sample, same shape as `swing`. |
+| `combat_state.average_swing_cps(id: number) -> number` | `combat` | Average swings per second for an entity across the retained window, 0 when there is not enough data. |
+| `combat_state.predict_projectile(x: number, y: number, z: number, vx: number, vy: number, vz: number, gravity: number, ticks: number) -> Vec3` | `combat` | Extrapolates a projectile forward `ticks` ticks from a position and velocity under `gravity` (blocks/s^2, e.g. -20), returning a Vec3. Pure: it reads no state. |
+| `combat_state.note_projectile(id: number, x: number, y: number, z: number, tick: number) -> nil` | `combat` | Records a projectile prediction for an id at a tick, so `resolve_projectile` can score it. |
+| `combat_state.resolve_projectile(id: number, x: number, y: number, z: number, tick: number) -> number` | `combat` | Scores the pending prediction for an id against an actual position, returning the error in blocks, or -1 when there was no pending prediction. |
+| `combat_state.prediction_error() -> number` | `combat` | Mean error, in blocks, across the retained projectile predictions, or -1 when none have been scored. |
+| `combat_state.prediction_count() -> number` | `combat` | How many projectile predictions have been scored. |
+| `combat_state.predict_hit(attacker: number, victim: number, tick: number) -> nil` | `combat` | Records a predicted hit (attacker, victim) at a tick, so a later applied hit can confirm it. |
+| `combat_state.hit_accuracy() -> number` | `combat` | Confirmed hits divided by predicted hits, 0 when nothing has been predicted. |
+| `combat_state.predicted_hits() -> number` | `combat` | - |
+| `combat_state.confirmed_hits() -> number` | `combat` | - |
+| `combat_state.missed_hits() -> number` | `combat` | - |
+| `combat_state.note_click(button: string, now_ms: number) -> bool` | `combat` | Feeds one click into a button's budget (\"left\" or \"right\"). Returns true when the click is within budget. It only reports; the click is never blocked or dropped. |
+| `combat_state.click_rate(button: string) -> number` | `combat` | Rolling clicks per second for a button over the last second. |
+| `combat_state.click_limited() -> bool` | `combat` | True when the most recent `note_click` was over budget. |
+| `combat_state.click_tokens(button: string) -> number` | `combat` | Tokens left in a button's bucket. |
+| `combat_state.set_click_budget(per_second: number, burst: number) -> bool` | `combat` | Sets the click budget: `per_second` sustained clicks with a `burst` allowance. Both must be finite and positive and the burst at least 1; a bad value is refused. |
+| `combat_state.clear() -> nil` | `combat` | Drops all recorded combat state (history, swings, predictions, counters, click buckets). |
+
 ## Player
 
 Capability: `world`.
@@ -307,6 +340,9 @@ Events (await with `Events.once`):
 - `entityHurt(entity: string)` — -
 - `entityDeath(entity: string)` — -
 - `entitySpawn(entity: string)` — -
+- `combatPredicted(hit: string)` — A hit the local client predicted (the swing it believes will land). Carries \"<attacker>:<victim>\".
+- `combatConfirmed(hit: string)` — A predicted hit the engine then confirmed. Carries \"<attacker>:<victim>\".
+- `combatMissed(hit: string)` — A predicted hit that was never confirmed within the prediction window. Carries \"<attacker>:<victim>\".
 
 ## Intent
 

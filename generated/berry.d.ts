@@ -16,6 +16,59 @@ export interface Combat {
   observe(ticks: number): number;
 }
 
+/** Capability required: combat. */
+export interface CombatState {
+  /** The configured maximum legitimate reach, in blocks. */
+  max_reach(): number;
+  /** Sets the reach limit. Must be a finite positive number; a bad value is refused and leaves the limit unchanged. */
+  set_max_reach(blocks: number): boolean;
+  /** The most recent reach check as {valid, distance, max_reach, within_reach, tick, attacker, victim}. */
+  last_reach(): Record<string, unknown>;
+  /** How many applied hits so far were beyond the reach limit. */
+  reach_violations(): number;
+  /** How many hitbox samples are recorded for an entity. */
+  hitbox_count(id: number): number;
+  /** The ticks an entity has recorded hitbox samples for, oldest first, as a table keyed \"0\",\"1\",…. */
+  hitbox_ticks(id: number): Record<string, unknown>;
+  /** The entity's recorded hitbox at an exact tick as {valid, min_x, min_y, min_z, max_x, max_y, max_z}. `valid` is false when there is no sample for that tick. */
+  hitbox_at(id: number, tick: number): Record<string, unknown>;
+  /** Records a swing by an entity at a tick, returning {valid, delta_ticks, cps, tick}. `valid` is false for the first swing, which has no interval yet. */
+  swing(id: number, tick: number): Record<string, unknown>;
+  /** The most recent swing sample, same shape as `swing`. */
+  last_swing(): Record<string, unknown>;
+  /** Average swings per second for an entity across the retained window, 0 when there is not enough data. */
+  average_swing_cps(id: number): number;
+  /** Extrapolates a projectile forward `ticks` ticks from a position and velocity under `gravity` (blocks/s^2, e.g. -20), returning a Vec3. Pure: it reads no state. */
+  predict_projectile(x: number, y: number, z: number, vx: number, vy: number, vz: number, gravity: number, ticks: number): Vec3;
+  /** Records a projectile prediction for an id at a tick, so `resolve_projectile` can score it. */
+  note_projectile(id: number, x: number, y: number, z: number, tick: number): void;
+  /** Scores the pending prediction for an id against an actual position, returning the error in blocks, or -1 when there was no pending prediction. */
+  resolve_projectile(id: number, x: number, y: number, z: number, tick: number): number;
+  /** Mean error, in blocks, across the retained projectile predictions, or -1 when none have been scored. */
+  prediction_error(): number;
+  /** How many projectile predictions have been scored. */
+  prediction_count(): number;
+  /** Records a predicted hit (attacker, victim) at a tick, so a later applied hit can confirm it. */
+  predict_hit(attacker: number, victim: number, tick: number): void;
+  /** Confirmed hits divided by predicted hits, 0 when nothing has been predicted. */
+  hit_accuracy(): number;
+  predicted_hits(): number;
+  confirmed_hits(): number;
+  missed_hits(): number;
+  /** Feeds one click into a button's budget (\"left\" or \"right\"). Returns true when the click is within budget. It only reports; the click is never blocked or dropped. */
+  note_click(button: string, now_ms: number): boolean;
+  /** Rolling clicks per second for a button over the last second. */
+  click_rate(button: string): number;
+  /** True when the most recent `note_click` was over budget. */
+  click_limited(): boolean;
+  /** Tokens left in a button's bucket. */
+  click_tokens(button: string): number;
+  /** Sets the click budget: `per_second` sustained clicks with a `burst` allowance. Both must be finite and positive and the burst at least 1; a bad value is refused. */
+  set_click_budget(per_second: number, burst: number): boolean;
+  /** Drops all recorded combat state (history, swings, predictions, counters, click buckets). */
+  clear(): void;
+}
+
 /** Capability required: world. */
 export interface Player {
   /** Read-only view of the LOCAL player. This is the client's own state, which it already holds; nothing here reveals another player. Reads fail closed when the local player is not bound. */
@@ -384,6 +437,7 @@ export interface AsyncFacade {
 }
 
 declare const Combat: Combat;
+declare const CombatState: CombatState;
 declare const Player: Player;
 declare const Render: Render;
 declare const World: World;
