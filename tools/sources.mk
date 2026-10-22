@@ -54,6 +54,7 @@ CORE_SRC := \
   core/script/record.cpp \
   core/net/rpc.cpp \
   core/script/layout.cpp \
+  core/script/sigpack.cpp \
   util/logger.cpp \
   util/mem.cpp
 
@@ -104,7 +105,8 @@ TEST_SRC := \
   tests/test_fs.cpp \
   tests/test_audio.cpp \
   tests/test_packet.cpp \
-  tests/test_profiler.cpp
+  tests/test_profiler.cpp \
+  tests/test_sigpack.cpp
 # Vendored Luau (MIT). See third_party/luau/PROVENANCE.md for the pinned
 # version and why these units and not the CLI. Compiled with -w because upstream
 # is only warning-clean under its own flag set; our code stays -Wall -Wextra clean.

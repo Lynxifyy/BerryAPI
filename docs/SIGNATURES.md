@@ -170,3 +170,65 @@ for (auto& e : kV1_20_50)
 
 Resolution failures are logged with the rule id and put the rule in
 `SigState::Missing`; the dependent feature disables itself.
+## OTA signature packs (no client rebuild)
+
+A hardcoded table means a game update needs a new client build. An **OTA
+signature pack** turns that into a data update: one JSON document carries the
+signature rows and the struct layouts for a build, and applying it registers
+both into the registries that already exist. Shipping a new pack file is enough;
+the library is unchanged. See `include/berry/sigpack.h`.
+
+A pack names the build it was written against and is gated on it, exactly like
+the table it replaces:
+
+```json
+{
+  "format": 1,
+  "name": "berry-1.20.50",
+  "build": "1a2b3c4d",
+  "signatures": [
+    { "id": "combat:damageFn", "pattern": "E8 ?? ?? ?? ?? 48 83 C4 20 5B C3" },
+    { "id": "world:levelTick", "pattern": "F0 ?? ?? ?? ?? 4C 8D 05", "from_end": 4 }
+  ],
+  "layouts": [
+    {
+      "name": "Actor", "version": "1.20", "build": "1a2b3c4d", "size": 16,
+      "fields": [
+        { "name": "health", "type": "f32", "offset": 0 },
+        { "name": "id", "type": "u64", "offset": 8 }
+      ]
+    }
+  ]
+}
+```
+
+Rules that make this safe to ship over the air:
+
+- **Build-gated, fail closed.** `ApplySignaturePack` refuses the whole pack when
+  its `build` does not equal the active fingerprint, and an empty active build
+  refuses every pack. A pack for another build can never resolve to addresses in
+  the live build — which would be worse than resolving nothing.
+- **Atomic.** Every pattern is parsed and every layout validated at parse time,
+  before anything registers. One bad row means the pack contributes nothing;
+  the registries are never left half-updated.
+- **Strict.** An unknown key, a duplicate signature id, a layout targeting a
+  different build, or an over-cap document is refused as a whole.
+- **Seam-read.** Packs load through `IScriptFileSystem`, so a device build
+  routes reads through the game's own file layer and the host tests need no disk.
+
+```cpp
+MemoryScriptFileSystem fs;              // or RealScriptFileSystem on device
+fs.Write("packs/1.20.50.sigpack.json", packJson);
+
+LayoutRegistry layouts;                 // owned by the engine
+SignaturePackLoader loader(&fs, "packs");
+SigPackLoadReport rep = loader.LoadDirectory("1a2b3c4d",   // active fingerprint
+                                             SigCache::Instance(),
+                                             &layouts);
+```
+
+Only `*.sigpack.json` files are discovered; unrelated JSON in the directory is
+ignored. A failed pack does not stop the others, and the report carries a
+per-pack reason. The loaded layouts answer through `LayoutRegistry::Find`, which
+already gates on the active build, so a decoded field read is bound to the same
+fingerprint that gated the pack.
