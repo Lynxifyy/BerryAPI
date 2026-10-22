@@ -380,3 +380,38 @@ client-side (zoom, freelook, FOV, keybinds, HUD, sounds, perspective). Server-
 aware policy profiles can auto-disable capability groups on servers that ban
 them. Everything above is local-only by construction, which is what keeps users
 unbanned.
+
+`intent.h` makes that concrete. An intent is a named request, classified once in
+a static table (`ClassifyIntent`, pure — no per-call-site drift):
+
+* **ClientSide** — what normal player input could do or what stays on this
+  screen: `zoom`, `freelook`, `fov`, `perspective`, `keybind`, `hud`, `nametag`,
+  `cosmetic`, `sound`. Allowed.
+* **WorldWrite** — anything that would mutate the world or the player's
+  authoritative state: `place_block`, `break_block`, `attack`, `interact`,
+  `move`, `set_time`, `set_weather`. Denied. The client is not a second
+  authority on the world.
+* **Unknown** — an action the table does not name. Denied, so a typo or a future
+  name fails closed.
+
+Intents are grouped (Camera, Input, Hud, Audio, Cosmetic, World). A
+`ServerPolicyProfile` matches a server address (`"*"`, an exact host, or a `*.`
+suffix wildcard) and disables whole groups. `IntentPolicy::ForServer` picks the
+most specific match — exact host beats a longer wildcard beats `"*"` — and
+`IntentValidator::SelectFor` installs it for the session, so the profile follows
+the server the client connects to. `BuiltinProfiles()` supplies an open default
+plus the documented strict template.
+
+The two layers are independent: classification says what may ever be done, the
+profile says what may be done *here*. A profile cannot re-enable a world write —
+`Validate` returns `WorldWrite` before it consults the mask — and a
+classification of `Unknown` is denied before the profile too. `Validate(kind,
+granted)` additionally requires the caller's grant set to cover the group's
+capability, so the intent gate and the binding gate agree.
+
+Scripts read the policy through `intent.*` (see [API.md](API.md)): `allowed`,
+`classify`, `server`, `profile`, `disabled_groups` and `list`. The module carries
+the `input` grant — the capability the client-side intent groups share — so a
+script must already hold the capability whose policy it is querying. It only
+reports what the policy decided; it cannot widen it. With no validator bound,
+`allowed` fails closed (false) rather than reading as permitted.

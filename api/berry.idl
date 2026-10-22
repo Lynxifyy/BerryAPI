@@ -122,3 +122,14 @@ module Events {
   event kill(victim: string)
   event tick_count(count: number)
 }
+
+module Intent {
+  capability input
+  doc "Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share."
+  fn allowed(name: string) -> bool
+  fn classify(name: string) -> string
+  fn server() -> string
+  fn profile() -> string
+  fn disabled_groups() -> string
+  fn list() -> string
+}

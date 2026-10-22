@@ -124,3 +124,16 @@ Events (await with `Events.once`):
 - `hit(damage: number)` — Event channels scripts may await with Events.once.
 - `kill(victim: string)` — -
 - `tick_count(count: number)` — -
+
+## Intent
+
+Capability: `input`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `intent.allowed(name: string) -> bool` | `input` | Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share. |
+| `intent.classify(name: string) -> string` | `input` | - |
+| `intent.server() -> string` | `input` | - |
+| `intent.profile() -> string` | `input` | - |
+| `intent.disabled_groups() -> string` | `input` | - |
+| `intent.list() -> string` | `input` | - |

@@ -103,6 +103,17 @@ export type Cosmetic = {
   reload_packs: () -> number,
 }
 
+-- Capability required: input.
+export type Intent = {
+  -- Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share.
+  allowed: (name: string) -> boolean,
+  classify: (name: string) -> string,
+  server: () -> string,
+  profile: () -> string,
+  disabled_groups: () -> string,
+  list: () -> string,
+}
+
 export type AsyncFacade = {
   wait: (ticks: number) -> ((),
   eventsOnce: (channel: string) -> (unknown,

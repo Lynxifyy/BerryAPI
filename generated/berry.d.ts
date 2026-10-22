@@ -103,6 +103,17 @@ export interface Cosmetic {
   reload_packs(): number;
 }
 
+/** Capability required: input. */
+export interface Intent {
+  /** Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share. */
+  allowed(name: string): boolean;
+  classify(name: string): string;
+  server(): string;
+  profile(): string;
+  disabled_groups(): string;
+  list(): string;
+}
+
 /** Coroutine-native async facade (Phase 4). */
 export interface AsyncFacade {
   /** Suspend until `ticks` game ticks have elapsed. */
@@ -122,4 +133,5 @@ declare const Hud: Hud;
 declare const Perf: Perf;
 declare const Input: Input;
 declare const Cosmetic: Cosmetic;
+declare const Intent: Intent;
 declare const async: AsyncFacade;

@@ -68,11 +68,17 @@ inline const BindingSpec* BindingSpecs() {
       {"cosmetic.presets", CapKind::Cosmetic, 0, "Cosmetic"},
       {"cosmetic.set_local_only", CapKind::Cosmetic, 1, "Cosmetic"},
       {"cosmetic.reload_packs", CapKind::Cosmetic, 0, "Cosmetic"},
+      {"intent.allowed", CapKind::Input, 1, "Intent"},
+      {"intent.classify", CapKind::Input, 1, "Intent"},
+      {"intent.server", CapKind::Input, 0, "Intent"},
+      {"intent.profile", CapKind::Input, 0, "Intent"},
+      {"intent.disabled_groups", CapKind::Input, 0, "Intent"},
+      {"intent.list", CapKind::Input, 0, "Intent"},
   };
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 47; }
+inline size_t BindingSpecCount() { return 53; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -156,6 +162,14 @@ inline const char* const kCosmeticNames[] = {
     "cosmetic.set_local_only",
     "cosmetic.reload_packs",
 };
+inline const char* const kIntentNames[] = {
+    "intent.allowed",
+    "intent.classify",
+    "intent.server",
+    "intent.profile",
+    "intent.disabled_groups",
+    "intent.list",
+};
 
 inline const ModuleBindings* ModuleBindingTable() {
   static const ModuleBindings kModules[] = {
@@ -168,11 +182,12 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Perf", kPerfNames, 6},
       {"Input", kInputNames, 3},
       {"Cosmetic", kCosmeticNames, 9},
+      {"Intent", kIntentNames, 6},
   };
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 9; }
+inline size_t ModuleBindingCount() { return 10; }
 
 }  // namespace api
 }  // namespace Berry

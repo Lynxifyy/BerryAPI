@@ -34,6 +34,7 @@
 #include "berry/cosmetic.h"
 #include "berry/hud.h"
 #include "berry/input.h"
+#include "berry/intent.h"
 #include "berry/perf.h"
 #include "berry/pack.h"
 #include "berry/render.h"
@@ -117,6 +118,9 @@ class BERRY_API ScriptApi {
     /// Local player velocity (motionX/Y/Z). Null makes `input.velocity` fail
     /// closed (returns zero, i.e. "stationary").
     LocalVelocitySource* velocity = nullptr;
+    /// The intent validator for the current session. Null makes the `intent.*`
+    /// bindings fail closed (every intent reports "not allowed").
+    IntentValidator* intents = nullptr;
     /// The local player's entity id, used as the origin for `world.query`.
     /// Default 0 means "unknown", which makes the query fail closed.
     EntityId localPlayer;

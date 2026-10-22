@@ -432,6 +432,15 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
       ctx.RaiseError("render.set_zoom: factor must be positive");
       return ScriptValue::Nil();
     }
+    // Zoom is a client-side camera intent. A server profile that disables the
+    // camera group must genuinely disable it, so the intent layer is consulted
+    // before the value is stored. An unbound validator is permissive here
+    // (the policy layer is opt-in), unlike the read-only intent.* bindings.
+    if (services_.intents &&
+        !services_.intents->Allowed(IntentKind::Zoom)) {
+      ctx.RaiseError("render.set_zoom: zoom disabled by server policy");
+      return ScriptValue::Nil();
+    }
     // Zoom is client-side camera state; the camera consumer reads it back via
     // zoomFactor(). Clamped to a sane multiplier so a script cannot divide the
     // projection by ~zero.
@@ -775,6 +784,51 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     // atomically; the return value is how many packs loaded cleanly.
     const PackLoadReport report = services_.packs->LoadDirectory();
     return ScriptValue::Num((f64)report.packsLoaded);
+  });
+
+  //--- Intent (what may be done on this server) ----------------------------
+  //
+  // The read side of the intent layer. `intent.allowed` is what a module
+  // consults before it acts, so a server profile that disables a group
+  // genuinely disables it. Fails closed when no validator is bound: an unknown
+  // policy must not read as "allowed".
+  install("intent.allowed", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.intents) return ScriptValue::Bool(false);
+    const IntentKind k = IntentKindFromName(args[0].AsString());
+    return ScriptValue::Bool(services_.intents->Allowed(k));
+  });
+
+  install("intent.classify", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    const IntentKind k = IntentKindFromName(args[0].AsString());
+    return ScriptValue::Str(IntentClassName(ClassifyIntent(k)));
+  });
+
+  install("intent.server", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.intents) return ScriptValue::Str("");
+    return ScriptValue::Str(services_.intents->server());
+  });
+
+  install("intent.profile", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.intents) return ScriptValue::Str("");
+    return ScriptValue::Str(services_.intents->profile().name);
+  });
+
+  install("intent.disabled_groups", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.intents) return ScriptValue::Str("");
+    return ScriptValue::Str(IntentGroupList(services_.intents->disabledGroups()));
+  });
+
+  install("intent.list", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    // Every named intent, comma separated, so a script can enumerate the
+    // vocabulary without hard-coding it.
+    std::string out;
+    for (u32 i = 1; i < (u32)IntentKind::Count; ++i) {
+      const IntentKind k = (IntentKind)i;
+      if (k == IntentKind::Unknown) continue;
+      if (!out.empty()) out += ",";
+      out += IntentKindName(k);
+    }
+    return ScriptValue::Str(out);
   });
 
   return installed_.size();
