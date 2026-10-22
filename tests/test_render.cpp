@@ -322,6 +322,59 @@ int main() {
     r.EndFrame();
   }
 
+  // --- Frame pipeline integration ---
+  {
+    Renderer r;
+    auto cap = std::make_shared<Berry::Test::CaptureRenderSeam>();
+    r.BindSeam(cap.get());
+    CameraState cam;
+    cam.width = 1280;
+    cam.height = 720;
+    cam.view = Mat4::LookAt(Vec3(0, 0, -10), Vec3(0, 0, 0), Vec3(0, 1, 0));
+    cam.projection = Mat4::Perspective(70, 1280.0f / 720.0f, 0.1f, 200.0f);
+    cam.valid = true;
+    r.SetCamera(cam);
+
+    // Each frame advances the pipeline's frame counter and records the batch.
+    r.BeginFrame(Vec2(1280, 720));
+    r.DrawRect(Rect2D{Vec2(0, 0), Vec2(4, 4), Rgba::White(), Rgba::White(), true, 0.0f});
+    r.EndFrame();
+    CHECK(r.pipelineStats().frames == 1);
+    CHECK(r.pipelineStats().batches == 1);
+    CHECK(r.pipelineStats().drawCalls == 1);   // fill only, no outline
+
+    // A fill plus its default outline is two draw calls.
+    r.BeginFrame(Vec2(1280, 720));
+    r.DrawRect(Rect2D{Vec2(0, 0), Vec2(4, 4), Rgba::Black(), Rgba::White(), true});
+    r.EndFrame();
+    CHECK(r.pipelineStats().frames == 2);
+    CHECK(r.pipelineStats().drawCalls == 3);
+
+    // lastBatchCounts matches what the seam presented.
+    CHECK(r.lastBatchCounts().vertexCount() > 0);
+
+    // Visible() is the frustum test: a box at the view centre is visible, one
+    // far behind the eye is not.
+    CHECK(r.Visible(Aabb(Vec3(-0.5f, -0.5f, -0.5f), Vec3(0.5f, 0.5f, 0.5f))));
+    CHECK(!r.Visible(Aabb(Vec3(-0.5f, -0.5f, -60.5f), Vec3(0.5f, 0.5f, -59.5f))));
+
+    // A billboard behind the camera is culled by the pipeline before it
+    // projects, so the seam presents an empty frame.
+    r.BeginFrame(Vec2(1280, 720));
+    Billboard3D behind;
+    behind.position = Vec3(0, 0, -80);
+    behind.size = Vec2(1, 1);
+    CHECK(!r.DrawBillboard(behind));
+    r.EndFrame();
+    CHECK(cap->rects == 0);
+
+    // With no camera the frustum is invalid and nothing is culled, so a
+    // billboard that cannot project is still refused by the projection, not
+    // silently dropped by a garbage frustum.
+    Renderer noCam;
+    CHECK(noCam.Visible(Aabb(Vec3(-100, -100, -100), Vec3(-99, -99, -99))));
+  }
+
   // --- Platform backend factory (host) ---
   {
     std::unique_ptr<IRenderBackend> bk(CreateRenderBackend());

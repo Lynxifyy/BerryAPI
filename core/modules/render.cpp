@@ -1,4 +1,5 @@
 #include "berry/render.h"
+#include "berry/pipeline.h"
 #include "berry/logger.h"
 #include "berry/event.h"
 #include <cmath>
@@ -23,6 +24,21 @@ Vec4 Mat4::operator*(const Vec4& v) const {
 Mat4 Mat4::Identity() {
   Mat4 r;
   r.m[0] = r.m[5] = r.m[10] = r.m[15] = 1;
+  return r;
+}
+
+Mat4 Mat4::operator*(const Mat4& o) const {
+  // Column-major: out.column[j] = this * o.column[j].
+  Mat4 r;
+  for (int c = 0; c < 4; ++c) {
+    for (int row = 0; row < 4; ++row) {
+      f32 sum = 0;
+      for (int k = 0; k < 4; ++k) {
+        sum += m[k * 4 + row] * o.m[c * 4 + k];
+      }
+      r.m[c * 4 + row] = sum;
+    }
+  }
   return r;
 }
 
@@ -162,6 +178,10 @@ void Renderer::BeginFrame(const Vec2& screenSize) {
   // The clip stack is per-frame state; a script's unmatched push must not leak
   // into the next frame.
   clips_.clear();
+  // Start the frame pipeline: rebuild the frustum from the bound camera and
+  // adopt the governor's settings, so this frame's culls and LOD tiers follow
+  // the quality level the governor settled on.
+  pipeline_.BeginFrame(cam_, settings_);
 }
 
 void Renderer::Clear() {
@@ -176,12 +196,20 @@ void Renderer::Clear() {
 void Renderer::EndFrame() {
   std::lock_guard<std::mutex> lk(mutex_);
   if (!inFrame_) return;
+  // Account the frame's geometry before presenting: the shape of the batch the
+  // backend will upload, and the draw calls it costs (triangles + lines). The
+  // pipeline records the same numbers, so its stats describe the real frame
+  // rather than a synthetic one.
+  lastCounts_ = BatchBuilder::Count(lines_, rects_, circles_);
+  pipeline_.SubmitCounts(lastCounts_);
+  stats_.drawCalls = (u64)lastCounts_.drawCalls();
+  stats_.primitives = lines_.size() + texts_.size() + rects_.size() + circles_.size();
   if (showOverlay_ && seam_) {
     u64 t0 = NowNs();
     seam_->Present(lines_, texts_, rects_, circles_, Vec2(cam_.width, cam_.height));
     stats_.frameMs = (f32)((NowNs() - t0) / 1e6);
-    stats_.primitives = lines_.size() + texts_.size() + rects_.size() + circles_.size();
   }
+  pipeline_.EndFrame();
   lines_.clear();
   texts_.clear();
   rects_.clear();
@@ -356,6 +384,13 @@ bool Renderer::DrawBillboard(const Billboard3D& bb) {
   std::lock_guard<std::mutex> lk(mutex_);
   if (!inFrame_ || !cam_.valid) return false;
   if (!(bb.size.x > 0.0f) || !(bb.size.y > 0.0f)) return false;
+  // Frustum pre-test: a billboard whose world AABB is entirely outside the view
+  // volume cannot project, so skip the projection work. This is the one cull
+  // the overlay path needs, and it runs against the same frustum the pipeline
+  // built for the frame.
+  if (!pipeline_.frustum().Intersects(Aabb::Around(bb.position, Vec3(0, 0, 0)))) {
+    return false;
+  }
 
   // Project the centre, then a point offset by half the size along the camera's
   // right and up axes, so the quad's screen size tracks perspective instead of
@@ -410,6 +445,41 @@ void Renderer::SetCamera(const CameraState& cam) {
 CameraState Renderer::camera() const {
   std::lock_guard<std::mutex> lk(mutex_);
   return cam_;
+}
+
+void Renderer::SetRenderSettings(const RenderSettings& s) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  settings_ = s;
+}
+
+RenderSettings Renderer::renderSettings() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return settings_;
+}
+
+f32 Renderer::OnFrameTime(f32 frameMs) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return pipeline_.OnFrameTime(frameMs);
+}
+
+PipelineStats Renderer::pipelineStats() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return pipeline_.stats();
+}
+
+DrawCounts Renderer::lastBatchCounts() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return lastCounts_;
+}
+
+LodTier Renderer::LodFor(f32 distance) const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return pipeline_.lod().TierFor(distance);
+}
+
+bool Renderer::Visible(const Aabb& box) const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return pipeline_.frustum().Intersects(box);
 }
 
 bool Renderer::EspBoxForEntity(const EntitySnapshot& ent, const CameraState& cam,

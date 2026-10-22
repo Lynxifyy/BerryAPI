@@ -3,6 +3,8 @@
 #include "berry/types.h"
 #include "berry/math.h"
 #include "berry/event.h"
+#include "berry/render.h"
+#include "berry/pipeline.h"
 
 //----------------------------------------------------------------------------
 // Berry::Render — on-device GLES/EGL overlay adapter.
@@ -18,13 +20,19 @@
 //     eglSwapBuffers hook calls BeginFrame/EndFrame on the Renderer right
 //     before the real swap, so a debug overlay is composited under the UI.
 //
-// The implementation is thin: IRenderBackend owns the GL resources and the
-// frame callback. The Renderer itself stays backend-agnostic.
+// The geometry path is the same on the host and the device: `CreateBackendSeam`
+// wraps a backend in a RenderSeam that coalesces the frame's primitives into a
+// vertex batch (`BatchBuilder`) and hands it to the backend in two draw calls.
+// The host harness therefore exercises the real batch conversion, and the
+// device backend only has to upload vertices.
+//
+// The implementation is thin: IRenderBackend owns the GL resources. The
+// Renderer itself stays backend-agnostic.
 //----------------------------------------------------------------------------
 
 namespace Berry {
 
-/// Abstract GL/EGL backend. A null backend (host tests) is a no-op.
+/// Abstract GL/EGL backend. A null backend (host tests) records nothing.
 class BERRY_API IRenderBackend {
  public:
   virtual ~IRenderBackend() = default;
@@ -37,6 +45,10 @@ class BERRY_API IRenderBackend {
   virtual bool Start() = 0;
   virtual void Stop() = 0;
 
+  /// Uploads and draws one frame's coalesced geometry. `screenSize` is in
+  /// physical pixels.
+  virtual void PresentBatch(const DrawBatch& batch, const Vec2& screenSize) = 0;
+
   virtual bool running() const = 0;
   virtual const char* name() const = 0;
 };
@@ -44,5 +56,10 @@ class BERRY_API IRenderBackend {
 /// Instantiates the platform render backend. On-device this is the GLES
 /// overlay; on the host it is a null stub (name() == "null").
 BERRY_API IRenderBackend* CreateRenderBackend();
+
+/// Wraps `backend` in a RenderSeam that builds a `DrawBatch` from each frame and
+/// forwards it to `PresentBatch`. The returned seam is owned by the caller and
+/// must not outlive `backend`. Returns nullptr when `backend` is null.
+BERRY_API RenderSeam* CreateBackendSeam(IRenderBackend* backend);
 
 }  // namespace Berry

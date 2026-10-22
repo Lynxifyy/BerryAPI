@@ -63,6 +63,11 @@ struct GlProcs {
   void (*(glGetProgramInfoLog))(uint32_t, int32_t, int32_t*, char*);
   void (*(glUniform1i))(int32_t, int32_t);
   void (*(glViewport))(int32_t, int32_t, int32_t, int32_t);
+  uint32_t (*(glCreateProgram))(void);
+  uint32_t (*(glCreateShader))(uint32_t);
+  void (*(glDeleteShader))(uint32_t);
+  void (*(glBindAttribLocation))(uint32_t, uint32_t, const char*);
+  int32_t (*(glGetUniformLocation))(uint32_t, const char*);
 };
 
 constexpr int32_t  kGlArrayBuffer      = 0x8892;
@@ -148,6 +153,11 @@ class GlesOverlayBackend final : public IRenderBackend {
     Load("glGetProgramInfoLog", &gl_.glGetProgramInfoLog);
     Load("glUniform1i",    &gl_.glUniform1i);
     Load("glViewport",     &gl_.glViewport);
+    Load("glCreateProgram",&gl_.glCreateProgram);
+    Load("glCreateShader", &gl_.glCreateShader);
+    Load("glDeleteShader", &gl_.glDeleteShader);
+    Load("glBindAttribLocation", &gl_.glBindAttribLocation);
+    Load("glGetUniformLocation", &gl_.glGetUniformLocation);
 
     if (!gl_.glShaderSource || !gl_.glGenBuffers || !gl_.glDrawArrays) {
       Log::Warn("GlesBackend: partial GLES2 symbols — overlay disabled");
@@ -179,7 +189,92 @@ class GlesOverlayBackend final : public IRenderBackend {
   bool running() const override { return running_; }
   const char* name() const override { return "GLES-overlay"; }
 
+  /// Uploads the frame's coalesced geometry and issues the two draw calls.
+  /// Triangles first (fills), then lines (strokes), both from the same vertex
+  /// format and the same program, so a frame costs two `glDrawArrays` calls no
+  /// matter how many primitives the script queued.
+  void PresentBatch(const DrawBatch& batch, const Vec2& screenSize) override {
+    if (!running_ || !EnsureProgram()) return;
+    if (screenSize.x > 0 && screenSize.y > 0) {
+      gl_.glViewport(0, 0, (int32_t)screenSize.x, (int32_t)screenSize.y);
+      Ortho(proj_, screenSize.x, screenSize.y);
+    }
+    gl_.glUseProgram(program_);
+    gl_.glUniformMatrix4fv(projLoc_, 1, 0, proj_);
+    gl_.glEnable(kGlBlend);
+    gl_.glBlendFunc(kGlSrcAlpha, kGlOneMinusSrcAlpha);
+    gl_.glBindVertexArray(vao_);
+
+    if (!batch.triangles.empty()) {
+      Upload(batch.triangles);
+      gl_.glDrawArrays(kGlTriangles, 0, (int32_t)batch.triangles.size());
+    }
+    if (!batch.lines.empty()) {
+      Upload(batch.lines);
+      gl_.glDrawArrays(kGlLines, 0, (int32_t)batch.lines.size());
+    }
+  }
+
  private:
+  /// Uploads one vertex stream into the shared VBO and re-points the
+  /// attributes at it. The stream is interleaved (x, y, r, g, b, a), so the
+  /// stride is 6 floats and the colour attribute starts at offset 2.
+  void Upload(const std::vector<PipelineVertex>& verts) {
+    gl_.glBindBuffer(kGlArrayBuffer, vbo_);
+    gl_.glBufferData(kGlArrayBuffer, (intptr_t)(verts.size() * sizeof(PipelineVertex)),
+                     verts.data(), kGlStaticDraw);
+    const int32_t stride = (int32_t)sizeof(PipelineVertex);
+    gl_.glEnableVertexAttribArray(0);
+    gl_.glVertexAttribPointer(0, 2, kGlFloat, 0, stride, (const void*)0);
+    gl_.glEnableVertexAttribArray(1);
+    gl_.glVertexAttribPointer(1, 4, kGlFloat, 0, stride,
+                              (const void*)(2 * sizeof(float)));
+  }
+
+  /// Builds the shader program on first use. Deferred out of Start() so the
+  /// context is current when it runs.
+  bool EnsureProgram() {
+    if (program_) return true;
+    const uint32_t vs = Compile(kGlVertexShader, g_vertexSrc);
+    const uint32_t fs = Compile(kGlFragmentShader, g_fragmentSrc);
+    if (!vs || !fs) return false;
+    program_ = gl_.glCreateProgram ? gl_.glCreateProgram() : 0;
+    if (!program_) return false;
+    gl_.glAttachShader(program_, vs);
+    gl_.glAttachShader(program_, fs);
+    gl_.glBindAttribLocation(program_, 0, "aPos");
+    gl_.glBindAttribLocation(program_, 1, "aColor");
+    gl_.glLinkProgram(program_);
+    int32_t ok = 0;
+    gl_.glGetProgramiv(program_, kGlLinkStatus, &ok);
+    if (!ok) {
+      Log::Warn("GlesBackend: program link failed");
+      gl_.glDeleteProgram(program_);
+      program_ = 0;
+      return false;
+    }
+    projLoc_ = gl_.glGetUniformLocation(program_, "uProj");
+    return true;
+  }
+
+  uint32_t Compile(uint32_t type, const char* src) {
+    if (!gl_.glCreateShader) return 0;
+    const uint32_t sh = gl_.glCreateShader(type);
+    if (!sh) return 0;
+    gl_.glShaderSource(sh, 1, &src, nullptr);
+    gl_.glCompileShader(sh);
+    int32_t ok = 0;
+    gl_.glGetShaderiv(sh, kGlCompileStatus, &ok);
+    if (!ok) {
+      char log[256] = {0};
+      if (gl_.glGetShaderInfoLog) gl_.glGetShaderInfoLog(sh, sizeof(log) - 1, nullptr, log);
+      Log::Warn("GlesBackend: shader compile failed: %s", log);
+      gl_.glDeleteShader(sh);
+      return 0;
+    }
+    return sh;
+  }
+
   template <typename Fn>
   void Load(const char* name, Fn* out) {
     void* p = dlsym(RTLD_DEFAULT, name);
@@ -189,7 +284,7 @@ class GlesOverlayBackend final : public IRenderBackend {
   GlProcs gl_{};
   uint32_t vbo_ = 0, vao_ = 0, program_ = 0;
   int32_t projLoc_ = -1;
-  float proj_[16];
+  float proj_[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
   bool running_ = false;
 };
 
@@ -210,6 +305,7 @@ class NullRenderBackend final : public IRenderBackend {
   bool Init() override { return false; }
   bool Start() override { return false; }
   void Stop() override {}
+  void PresentBatch(const DrawBatch&, const Vec2&) override {}
   bool running() const override { return false; }
   const char* name() const override { return "null"; }
 };
@@ -219,3 +315,40 @@ IRenderBackend* CreateRenderBackend() { return new NullRenderBackend(); }
 }  // namespace Berry
 
 #endif
+
+//----------------------------------------------------------------------------
+// The seam that turns a frame's primitives into one backend batch. It lives
+// outside the platform guard: the host tests use it too, so the batch path is
+// the same code on both.
+//----------------------------------------------------------------------------
+namespace Berry {
+namespace {
+
+class BackendSeam final : public RenderSeam {
+ public:
+  explicit BackendSeam(IRenderBackend* backend) : backend_(backend) {}
+
+  void Present(const std::vector<Line2D>& lines,
+               const std::vector<Text2D>& texts,
+               const std::vector<Rect2D>& rects,
+               const std::vector<Circle2D>& circles,
+               const Vec2& screenSize) override {
+    (void)texts;   // text is rasterised by the backend's own glyph path
+    if (!backend_) return;
+    BatchBuilder::Build(lines, rects, circles, &batch_);
+    backend_->PresentBatch(batch_, screenSize);
+  }
+
+ private:
+  IRenderBackend* backend_ = nullptr;
+  DrawBatch batch_;
+};
+
+}  // namespace
+
+RenderSeam* CreateBackendSeam(IRenderBackend* backend) {
+  if (!backend) return nullptr;
+  return new BackendSeam(backend);
+}
+
+}  // namespace Berry

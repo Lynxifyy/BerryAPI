@@ -4,124 +4,15 @@
 #include "berry/math.h"
 #include "berry/game.h"
 #include "berry/event.h"
+#include "berry/perf.h"
+#include "berry/draw.h"
+#include "berry/pipeline.h"
 #include <functional>
 #include <string>
 #include <vector>
 #include <mutex>
 
 namespace Berry {
-
-//----------------------------------------------------------------------------
-// Berry::Render module.
-//
-// Presents debug overlays and auxiliary UI through a render seam. The genuine
-// Dear ImGui integration (GLES3 backend, eglSwapBuffers hook, input capture)
-// lives behind the seam; the host shim provides a "null" (measurement-only)
-// implementation. The API here is immediate-mode: every frame the module
-// clears the draw list and re-renders whatever is active.
-//----------------------------------------------------------------------------
-
-// Colors as RGBA bytes for the 2D API.
-struct BERRY_API Rgba {
-  u8 r, g, b, a;
-  Rgba() : r(255), g(255), b(255), a(255) {}
-  Rgba(u8 r_, u8 g_, u8 b_, u8 a_ = 255) : r(r_), g(g_), b(b_), a(a_) {}
-  static Rgba Red()    { return Rgba(255, 60, 60); }
-  static Rgba Green()  { return Rgba(60, 255, 120); }
-  static Rgba Blue()   { return Rgba(80, 140, 255); }
-  static Rgba Yellow() { return Rgba(255, 210, 60); }
-  static Rgba White()  { return Rgba(255, 255, 255); }
-  static Rgba Black()  { return Rgba(20, 20, 20); }
-  Rgba WithAlpha(u8 alpha) const { return Rgba(r, g, b, alpha); }
-};
-
-struct BERRY_API Line2D {
-  Vec2 a, b;
-  Rgba color;
-  f32 thickness = 1.0f;
-};
-
-struct BERRY_API Text2D {
-  Vec2 pos;
-  std::string text;
-  Rgba color;
-  f32 scale = 1.0f;
-};
-
-struct BERRY_API Rect2D {
-  Vec2 min, max;
-  Rgba color;
-  Rgba fill;
-  bool filled = false;
-  f32 thickness = 1.0f;
-};
-
-struct BERRY_API Circle2D {
-  Vec2 center;
-  f32 radius;
-  Rgba color;
-  i32 segments = 32;
-};
-
-struct BERRY_API EspBox {
-  EntityId id;
-  Vec2 screenMin, screenMax;
-  Rgba color;
-  std::string label;
-};
-
-/// A world-space quad the renderer projects with the current camera. This is
-/// how world geometry (a cosmetic asset on a bone, a nameplate, a marker)
-/// enters the overlay: the caller supplies a world centre and a world size, and
-/// the renderer turns it into the same 2D batch every other draw uses, so it
-/// presents through the one RenderSeam. Nothing here is 3D state the device
-/// backend must learn: a billboard is a quad facing the camera.
-struct BERRY_API Billboard3D {
-  Vec3 position;             // world centre
-  Vec2 size;                 // world width/height, in blocks
-  /// Screen-space roll, in degrees, about the quad's centre. 0 leaves the quad
-  /// upright. A caller approximating a world orientation maps it here.
-  f32 rollDeg = 0.0f;
-  Rgba tint;                 // fill and outline colour
-  u64 geometry = 0;          // opaque asset handle, for the device backend
-  u64 texture = 0;           // opaque asset handle, for the device backend
-  EntityId entity;           // whose billboard this is
-};
-
-class BERRY_API RenderSeam {
- public:
-  virtual ~RenderSeam() = default;
-  /// Called once per frame after presenting the batch. `screenSize` is in
-  /// physical pixels.
-  virtual void Present(const std::vector<Line2D>& lines,
-                       const std::vector<Text2D>& texts,
-                       const std::vector<Rect2D>& rects,
-                       const std::vector<Circle2D>& circles,
-                       const Vec2& screenSize) = 0;
-};
-
-// Minimal column-major 4x4 matrix.
-struct BERRY_API Mat4 {
-  f32 m[16] = {};
-  Vec4 operator*(const Vec4& v) const;
-
-  static Mat4 Identity();
-  static Mat4 Perspective(f32 fovyDeg, f32 aspect, f32 znear, f32 zfar);
-  static Mat4 LookAt(const Vec3& eye, const Vec3& target, const Vec3& up);
-};
-
-// Camera state for projecting world points to screen.
-struct BERRY_API CameraState {
-  Mat4 view;       // world -> view
-  Mat4 projection; // view -> NDC (column-major)
-  f32  width = 0;  // pixels
-  f32  height = 0;
-  bool valid = false;
-
-  /// Projects world position to pixel coordinates. Returns false when behind
-  /// the camera or out of frustum.
-  bool WorldToScreen(const Vec3& world, Vec2* out) const;
-};
 
 //----------------------------------------------------------------------------
 // The strict module.
@@ -225,6 +116,37 @@ class BERRY_API Renderer {
   void SetShowOverlay(bool v) { showOverlay_ = v; }
   const RenderStats& stats() const { return stats_; }
 
+  //--- frame pipeline -------------------------------------------------------
+  //
+  // The frame path that decides what is worth drawing: a frustum cull, a LOD
+  // tier per entity, a dynamic-resolution scale, and the coalesced vertex batch
+  // the backend uploads. It is driven from BeginFrame/EndFrame, so a caller
+  // only has to bind a camera and feed the governor's settings.
+  //
+  // `pipeline()` hands out the object itself and takes no lock: it is for a
+  // caller that already owns the frame (a test, or the render thread inside a
+  // frame). Every cross-thread use goes through the locked methods below.
+  RenderPipeline& pipeline() { return pipeline_; }
+  const RenderPipeline& pipeline() const { return pipeline_; }
+
+  /// The governor's settings, adopted at the next BeginFrame. Default (unset)
+  /// means no culling and the default LOD tiers. Thread-safe.
+  void SetRenderSettings(const RenderSettings& s);
+  RenderSettings renderSettings() const;
+  /// Feeds one frame time to the resolution controller. Thread-safe; called
+  /// from the frame publisher, which may not be inside a frame.
+  f32 OnFrameTime(f32 frameMs);
+  /// A snapshot of the pipeline counters. Thread-safe.
+  PipelineStats pipelineStats() const;
+  /// The shape of the batch the last frame produced (vertex count, draw calls),
+  /// without the vertices. Lets a script read what the frame actually cost.
+  DrawCounts lastBatchCounts() const;
+  /// The LOD tier for an entity at `distance` under the frame's policy.
+  LodTier LodFor(f32 distance) const;
+  /// True when `box` is inside the last frame's frustum. Entities are drawn
+  /// through this so a caller never queues geometry the camera cannot see.
+  bool Visible(const Aabb& box) const;
+
  private:
   /// True when `box` intersects the active clip (or no clip is active). When
   /// `exact` is set, `box` is narrowed to the intersection.
@@ -242,6 +164,11 @@ class BERRY_API Renderer {
   CameraState cam_;
   std::vector<Rect2D> clips_;
   RenderStats stats_;
+  /// The frame pipeline: cull, LOD, resolution, batch accounting. Guarded by
+  /// the same mutex as the draw lists, because BeginFrame/EndFrame drive both.
+  RenderPipeline pipeline_;
+  RenderSettings settings_{};
+  DrawCounts lastCounts_{};
 
   void PresentLocked();
 };
