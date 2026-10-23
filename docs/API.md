@@ -478,3 +478,40 @@ Capability: `world`.
 | `record.replay_tick() -> number` | `world` | The tick of the current replay frame, or 0 when there is none. |
 | `record.replay_index() -> number` | `world` | The current replay frame index, or -1 before the first step. |
 | `record.replay_end() -> bool` | `world` | - |
+
+## Replay
+
+Capability: `world`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `replay.add_key(tick: number, x: number, y: number, z: number, pitch: number, yaw: number, roll: number, fov: number) -> bool` | `world` | Adds a camera key at a tick. False when the position or angles are not finite, the FOV is outside [1, 179], the key cap is reached, or a key already exists at that tick (remove it first). |
+| `replay.remove_key(tick: number) -> bool` | `world` | Removes the key at a tick. False when there is none. |
+| `replay.clear() -> nil` | `world` | Drops every key and stops playback. Keeps whether the timeline is active. |
+| `replay.key_count() -> number` | `world` | - |
+| `replay.has_key(tick: number) -> bool` | `world` | - |
+| `replay.first_tick() -> number` | `world` | The first key's tick, or 0 when there are no keys. |
+| `replay.last_tick() -> number` | `world` | The last key's tick, or 0 when there are no keys. |
+| `replay.duration_ticks() -> number` | `world` | The span between the first and last key, or 0 with fewer than two keys. |
+| `replay.smoothing() -> string` | `world` | The interpolation mode, \"linear\" or \"smooth\". |
+| `replay.set_smoothing(name: string) -> bool` | `world` | Sets the interpolation mode. False when the name is neither \"linear\" nor \"smooth\". |
+| `replay.active() -> bool` | `world` | True when the frame's camera is driven by this timeline. |
+| `replay.activate() -> bool` | `world` | Hands the frame's camera to this timeline (and starts playback). False when there are no keys to play. |
+| `replay.deactivate() -> nil` | `world` | Gives the camera back to the player and pauses. |
+| `replay.play() -> bool` | `world` | Starts (or resumes) playback from the current playhead. False when there are no keys. |
+| `replay.pause() -> nil` | `world` | - |
+| `replay.stop() -> nil` | `world` | Pauses and rewinds to the first key. |
+| `replay.playing() -> bool` | `world` | - |
+| `replay.speed() -> number` | `world` | - |
+| `replay.set_speed(speed: number) -> bool` | `world` | Sets the playback speed multiplier. Must be finite and in (0, 64]; a bad value is refused. |
+| `replay.playhead() -> number` | `world` | The playhead in ticks (fractional, so it can fall between keys). |
+| `replay.seek(tick: number) -> bool` | `world` | Moves the playhead, clamped into the key range. False when there are no keys. |
+| `replay.sample(tick: number) -> Table` | `world` | The pose at an absolute tick as {valid, x, y, z, pitch, yaw, roll, fov}. Before the first key it holds the first, past the last it holds the last. |
+| `replay.sample_now() -> Table` | `world` | The pose at the current playhead, same shape as `sample`. |
+| `replay.fov_override() -> number` | `world` | The FOV override in degrees, or 0 when the keyframed FOV is used. |
+| `replay.set_fov_override(fov: number) -> bool` | `world` | Pins the FOV, or clears the pin with 0. A non-zero value must be finite and in [1, 179]; a bad value is refused. |
+| `replay.export_begin(fps: number, width: number, height: number) -> bool` | `world` | Begins a fixed-rate export from the first key. False when the rate is not finite and in (0, 240], the viewport is not finite and positive, or there are no keys. While exporting, the client's frame hook yields one video frame per rendered frame at this rate — independent of the machine's real frame rate — so the export's length is a property of the timeline, not the renderer. |
+| `replay.export_end() -> nil` | `world` | Ends an export. A no-op when none is running. |
+| `replay.exporting() -> bool` | `world` | - |
+| `replay.export_frame() -> number` | `world` | How many frames the current export has yielded. |
+| `replay.export_fps() -> number` | `world` | The export frame rate, or 0 when not exporting. |

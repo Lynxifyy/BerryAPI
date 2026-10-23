@@ -286,6 +286,34 @@ void ScriptApi::InitFrameHook() {
         // here. Apply the draw/HUD commands a script posted from the worker
         // BEFORE presenting, so a command issued this frame is drawn this frame.
         DrainOnRenderThread();
+        // The replay camera, when a script has activated one, owns the frame's
+        // camera: the renderer is pointed at the scripted viewpoint BEFORE any
+        // overlay draws, so world-to-screen, 3D debug geometry and billboards
+        // all project through the replay pose rather than the player's. While
+        // an export is running the export clock drives it at its fixed rate
+        // instead of wall time, so a rendered video has a deterministic length.
+        if (services_.replayCamera && services_.renderer) {
+          const Vec2 screen = screenSize();
+          const f32 aspect = (screen.x > 0 && screen.y > 0) ? screen.x / screen.y : 0.0f;
+          CameraState cam;
+          if (services_.replayCamera->exporting()) {
+            if (services_.replayCamera->ExportStep(&cam)) {
+              services_.renderer->SetCamera(cam);
+            }
+          } else if (services_.replayCamera->active()) {
+            const u64 now = NowMs();
+            if (lastReplayMs_ != 0 && now > lastReplayMs_) {
+              f32 dt = (f32)(now - lastReplayMs_) / 1000.0f;
+              if (dt > 0.1f) dt = 0.1f;   // a stall must not fast-forward a replay
+              services_.replayCamera->Advance(dt);
+            }
+            lastReplayMs_ = now;
+            if (aspect > 0.0f &&
+                services_.replayCamera->BuildCamera(aspect, screen.x, screen.y, &cam)) {
+              services_.renderer->SetCamera(cam);
+            }
+          }
+        }
         if (services_.hud && services_.renderer) {
           const Vec2 screen = screenSize();
           if (screen.x > 0 && screen.y > 0) {
@@ -2915,6 +2943,238 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
   install("record.replay_end", [this](ScriptContext&, const std::vector<ScriptValue>&) {
     if (!services_.recorder) return ScriptValue::Bool(true);
     return ScriptValue::Bool(services_.recorder->ReplayAtEnd());
+  });
+
+  //--- Replay (the camera timeline over the recorded tape) ------------------
+  //
+  // Client-side only: this changes where THIS client looks while replaying what
+  // it already recorded. It never writes world state and never reveals anything
+  // the client was not already sent. The frame hook adopts the pose as the
+  // frame's camera while the timeline is active (see InitFrameHook), so a
+  // binding that authors a key actually changes what the next frame draws.
+  auto replayOrFail = [this](ScriptContext& ctx, const char* who) -> ReplayCamera* {
+    if (!services_.replayCamera) {
+      ctx.RaiseError(std::string(who) + ": replay camera unavailable");
+      return nullptr;
+    }
+    return services_.replayCamera;
+  };
+  auto cameraPoseTable = [](const CameraSample& s) {
+    ScriptTable t;
+    t["valid"] = ScriptValue::Bool(s.valid);
+    t["x"] = ScriptValue::Num((f64)s.position.x);
+    t["y"] = ScriptValue::Num((f64)s.position.y);
+    t["z"] = ScriptValue::Num((f64)s.position.z);
+    t["pitch"] = ScriptValue::Num((f64)s.pitch);
+    t["yaw"] = ScriptValue::Num((f64)s.yaw);
+    t["roll"] = ScriptValue::Num((f64)s.roll);
+    t["fov"] = ScriptValue::Num((f64)s.fov);
+    return t;
+  };
+
+  install("replay.add_key", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.add_key");
+    if (!c) return ScriptValue::Bool(false);
+    const f64 tick = args[0].AsNumber();
+    // A tick names a position on the tape, so it must be a whole, non-negative
+    // number; a fractional or negative tick cannot name a frame.
+    if (!std::isfinite(tick) || tick < 0.0) return ScriptValue::Bool(false);
+    CameraKey k;
+    k.tick = (u64)tick;
+    k.position = Vec3((f32)args[1].AsNumber(), (f32)args[2].AsNumber(),
+                      (f32)args[3].AsNumber());
+    k.pitch = (f32)args[4].AsNumber();
+    k.yaw = (f32)args[5].AsNumber();
+    k.roll = (f32)args[6].AsNumber();
+    k.fov = (f32)args[7].AsNumber();
+    return ScriptValue::Bool(c->AddKey(k));
+  });
+
+  install("replay.remove_key", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.remove_key");
+    if (!c) return ScriptValue::Bool(false);
+    const f64 tick = args[0].AsNumber();
+    if (!std::isfinite(tick) || tick < 0.0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(c->RemoveKey((u64)tick));
+  });
+
+  install("replay.clear", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.replayCamera) services_.replayCamera->Clear();
+    return ScriptValue::Nil();
+  });
+
+  install("replay.key_count", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replayCamera->keyCount());
+  });
+
+  install("replay.has_key", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.has_key");
+    if (!c) return ScriptValue::Bool(false);
+    const f64 tick = args[0].AsNumber();
+    if (!std::isfinite(tick) || tick < 0.0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(c->hasKeyAt((u64)tick));
+  });
+
+  install("replay.first_tick", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replayCamera->firstTick());
+  });
+
+  install("replay.last_tick", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replayCamera->lastTick());
+  });
+
+  install("replay.duration_ticks", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replayCamera->durationTicks());
+  });
+
+  install("replay.smoothing", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Str("linear");
+    return ScriptValue::Str(CameraSmoothingName(services_.replayCamera->smoothing()));
+  });
+
+  install("replay.set_smoothing", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.set_smoothing");
+    if (!c) return ScriptValue::Bool(false);
+    CameraSmoothing s;
+    // The doc promises false for a name that is neither mode, not an error, so
+    // a script can try a name and branch without unwinding.
+    if (!CameraSmoothingFromName(Lower(args[0].ToDisplay()), &s)) {
+      return ScriptValue::Bool(false);
+    }
+    c->SetSmoothing(s);
+    return ScriptValue::Bool(true);
+  });
+
+  install("replay.active", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replayCamera->active());
+  });
+
+  install("replay.activate", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.activate");
+    if (!c) return ScriptValue::Bool(false);
+    // Activating with nothing to play would silently hijack the camera to an
+    // invalid pose; refuse it instead.
+    if (c->empty()) {
+      ctx.RaiseError("replay.activate: no camera keys");
+      return ScriptValue::Bool(false);
+    }
+    c->SetActive(true);
+    c->Play();
+    return ScriptValue::Bool(true);
+  });
+
+  install("replay.deactivate", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.replayCamera) {
+      services_.replayCamera->SetActive(false);
+      services_.replayCamera->Pause();
+    }
+    return ScriptValue::Nil();
+  });
+
+  install("replay.play", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Bool(false);
+    if (services_.replayCamera->empty()) return ScriptValue::Bool(false);
+    services_.replayCamera->Play();
+    return ScriptValue::Bool(true);
+  });
+
+  install("replay.pause", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.replayCamera) services_.replayCamera->Pause();
+    return ScriptValue::Nil();
+  });
+
+  install("replay.stop", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.replayCamera) services_.replayCamera->Stop();
+    return ScriptValue::Nil();
+  });
+
+  install("replay.playing", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replayCamera->playing());
+  });
+
+  install("replay.speed", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(1);
+    return ScriptValue::Num((f64)services_.replayCamera->speed());
+  });
+
+  install("replay.set_speed", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.set_speed");
+    if (!c) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(c->SetSpeed((f32)args[0].AsNumber()));
+  });
+
+  install("replay.playhead", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replayCamera->playhead());
+  });
+
+  install("replay.seek", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.seek");
+    if (!c) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(c->Seek((f32)args[0].AsNumber()));
+  });
+
+  install("replay.sample", [this, replayOrFail, cameraPoseTable](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.sample");
+    if (!c) return ScriptValue::Nil();
+    return ScriptValue::Tbl(cameraPoseTable(c->Sample((f32)args[0].AsNumber())));
+  });
+
+  install("replay.sample_now", [this, replayOrFail, cameraPoseTable](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.sample_now");
+    if (!c) return ScriptValue::Nil();
+    return ScriptValue::Tbl(cameraPoseTable(c->SampleNow()));
+  });
+
+  install("replay.fov_override", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replayCamera->fovOverride());
+  });
+
+  install("replay.set_fov_override", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.set_fov_override");
+    if (!c) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(c->SetFovOverride((f32)args[0].AsNumber()));
+  });
+
+  install("replay.export_begin", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.export_begin");
+    if (!c) return ScriptValue::Bool(false);
+    const f32 fps = (f32)args[0].AsNumber();
+    const f32 w = (f32)args[1].AsNumber();
+    const f32 h = (f32)args[2].AsNumber();
+    // A non-finite or non-positive viewport has no aspect; fail closed rather
+    // than build a camera from a garbage size.
+    if (!std::isfinite(w) || !std::isfinite(h) || w <= 0.0f || h <= 0.0f) {
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(c->ExportBegin(fps, w / h, w, h));
+  });
+
+  install("replay.export_end", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.replayCamera) services_.replayCamera->ExportEnd();
+    return ScriptValue::Nil();
+  });
+
+  install("replay.exporting", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replayCamera->exporting());
+  });
+
+  install("replay.export_frame", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replayCamera->exportFrame());
+  });
+
+  install("replay.export_fps", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replayCamera->exportFps());
   });
 
   //--- Fs (sandboxed file store) --------------------------------------------

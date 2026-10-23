@@ -307,11 +307,41 @@ inline const BindingSpec* BindingSpecs() {
       {"record.replay_tick", CapKind::World, 0, "Record"},
       {"record.replay_index", CapKind::World, 0, "Record"},
       {"record.replay_end", CapKind::World, 0, "Record"},
+      {"replay.add_key", CapKind::World, 8, "Replay"},
+      {"replay.remove_key", CapKind::World, 1, "Replay"},
+      {"replay.clear", CapKind::World, 0, "Replay"},
+      {"replay.key_count", CapKind::World, 0, "Replay"},
+      {"replay.has_key", CapKind::World, 1, "Replay"},
+      {"replay.first_tick", CapKind::World, 0, "Replay"},
+      {"replay.last_tick", CapKind::World, 0, "Replay"},
+      {"replay.duration_ticks", CapKind::World, 0, "Replay"},
+      {"replay.smoothing", CapKind::World, 0, "Replay"},
+      {"replay.set_smoothing", CapKind::World, 1, "Replay"},
+      {"replay.active", CapKind::World, 0, "Replay"},
+      {"replay.activate", CapKind::World, 0, "Replay"},
+      {"replay.deactivate", CapKind::World, 0, "Replay"},
+      {"replay.play", CapKind::World, 0, "Replay"},
+      {"replay.pause", CapKind::World, 0, "Replay"},
+      {"replay.stop", CapKind::World, 0, "Replay"},
+      {"replay.playing", CapKind::World, 0, "Replay"},
+      {"replay.speed", CapKind::World, 0, "Replay"},
+      {"replay.set_speed", CapKind::World, 1, "Replay"},
+      {"replay.playhead", CapKind::World, 0, "Replay"},
+      {"replay.seek", CapKind::World, 1, "Replay"},
+      {"replay.sample", CapKind::World, 1, "Replay"},
+      {"replay.sample_now", CapKind::World, 0, "Replay"},
+      {"replay.fov_override", CapKind::World, 0, "Replay"},
+      {"replay.set_fov_override", CapKind::World, 1, "Replay"},
+      {"replay.export_begin", CapKind::World, 3, "Replay"},
+      {"replay.export_end", CapKind::World, 0, "Replay"},
+      {"replay.exporting", CapKind::World, 0, "Replay"},
+      {"replay.export_frame", CapKind::World, 0, "Replay"},
+      {"replay.export_fps", CapKind::World, 0, "Replay"},
   };
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 286; }
+inline size_t BindingSpecCount() { return 316; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -664,6 +694,38 @@ inline const char* const kRecordNames[] = {
     "record.replay_index",
     "record.replay_end",
 };
+inline const char* const kReplayNames[] = {
+    "replay.add_key",
+    "replay.remove_key",
+    "replay.clear",
+    "replay.key_count",
+    "replay.has_key",
+    "replay.first_tick",
+    "replay.last_tick",
+    "replay.duration_ticks",
+    "replay.smoothing",
+    "replay.set_smoothing",
+    "replay.active",
+    "replay.activate",
+    "replay.deactivate",
+    "replay.play",
+    "replay.pause",
+    "replay.stop",
+    "replay.playing",
+    "replay.speed",
+    "replay.set_speed",
+    "replay.playhead",
+    "replay.seek",
+    "replay.sample",
+    "replay.sample_now",
+    "replay.fov_override",
+    "replay.set_fov_override",
+    "replay.export_begin",
+    "replay.export_end",
+    "replay.exporting",
+    "replay.export_frame",
+    "replay.export_fps",
+};
 
 inline const ModuleBindings* ModuleBindingTable() {
   static const ModuleBindings kModules[] = {
@@ -691,11 +753,12 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Shader", kShaderNames, 10},
       {"Package", kPackageNames, 6},
       {"Record", kRecordNames, 14},
+      {"Replay", kReplayNames, 30},
   };
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 24; }
+inline size_t ModuleBindingCount() { return 25; }
 
 }  // namespace api
 }  // namespace Berry

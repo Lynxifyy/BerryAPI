@@ -36,6 +36,8 @@ static int g_fail = 0;
 #define CHECK(cond) do { if (!(cond)) { \
   printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); ++g_fail; } } while (0)
 
+static bool Near(f64 a, f64 b, f64 eps = 1e-3) { return std::fabs(a - b) <= eps; }
+
 namespace {
 
 CapabilitySet Grant(const std::vector<std::string>& caps) {
@@ -306,6 +308,178 @@ static void TestFrameHookAdvancesAnimator() {
   CHECK(step > 0.0f);
   CHECK(step <= 0.1f + 1e-4f);
 
+  eng.Detach();
+}
+
+// The replay camera bindings: authoring through the real capability gate, and
+// the frame hook actually adopting the pose (the real caller, not just the
+// service). Nothing here writes world state; it only moves the camera.
+static void TestReplayCameraBindings() {
+  Renderer renderer;
+  Berry::Test::CaptureRenderSeam seam;
+  renderer.BindSeam(&seam);
+  ReplayCamera cam;
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.replayCamera = &cam;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  const std::vector<std::string> grants{"world"};
+
+  // Every declared replay binding is callable with the world capability.
+  CHECK(bindings.Has("replay.add_key"));
+  CHECK(bindings.Has("replay.activate"));
+  CHECK(bindings.Has("replay.export_begin"));
+
+  // Authoring through the binding lands in the service.
+  ScriptValue out;
+  ScriptStatus st = Call(bindings, "replay.add_key",
+                         {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(64),
+                          ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+                          ScriptValue::Num(0), ScriptValue::Num(70)},
+                         grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  st = Call(bindings, "replay.add_key",
+            {ScriptValue::Num(40), ScriptValue::Num(10), ScriptValue::Num(64),
+             ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(90),
+             ScriptValue::Num(0), ScriptValue::Num(70)},
+            grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(cam.keyCount() == 2);
+
+  // A duplicate tick is refused by the service, reported as false not an error.
+  st = Call(bindings, "replay.add_key",
+            {ScriptValue::Num(0), ScriptValue::Num(1), ScriptValue::Num(1),
+             ScriptValue::Num(1), ScriptValue::Num(0), ScriptValue::Num(0),
+             ScriptValue::Num(0), ScriptValue::Num(70)},
+            grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  // A negative tick cannot name a frame.
+  st = Call(bindings, "replay.add_key",
+            {ScriptValue::Num(-1), ScriptValue::Num(0), ScriptValue::Num(0),
+             ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+             ScriptValue::Num(0), ScriptValue::Num(70)},
+            grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  // The reads answer from the service.
+  st = Call(bindings, "replay.key_count", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 2);
+  st = Call(bindings, "replay.first_tick", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  st = Call(bindings, "replay.last_tick", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 40);
+  st = Call(bindings, "replay.has_key", {ScriptValue::Num(40)}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  // sample returns a pose table with the fields the docs promise.
+  st = Call(bindings, "replay.sample", {ScriptValue::Num(20)}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  const ScriptTable* t = out.AsTable();
+  CHECK(t && t->at("valid").Truthy());
+  CHECK(t && Near(t->at("x").AsNumber(), 5.0));
+  CHECK(t && Near(t->at("yaw").AsNumber(), 45.0));
+
+  // Smoothing is a name, and a bad one is refused.
+  st = Call(bindings, "replay.set_smoothing", {ScriptValue::Str("smooth")}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  st = Call(bindings, "replay.set_smoothing", {ScriptValue::Str("cubic")}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  // Activating with keys succeeds and turns playback on.
+  st = Call(bindings, "replay.activate", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(cam.active());
+  CHECK(cam.playing());
+
+  // The frame hook now adopts the replay camera: a frame with a published size
+  // sets the renderer's camera from the timeline. Before activation the camera
+  // was invalid; after, it is valid and points where the first key says.
+  api.PublishFrame(16.0f, Vec2(1280.0f, 720.0f));
+  Engine& eng = Engine::Instance();
+  eng.Bootstrap();
+  CHECK(eng.Attach());
+  eng.OnFrame();
+  const CameraState frameCam = renderer.camera();
+  CHECK(frameCam.valid);
+  CHECK(Near(frameCam.width, 1280.0f));
+  CHECK(Near(frameCam.height, 720.0f));
+  eng.Detach();
+
+  // Deactivating hands the camera back (the hook stops writing it).
+  st = Call(bindings, "replay.deactivate", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(!cam.active());
+  CHECK(!cam.playing());
+
+  // With no service bound every binding fails closed rather than crashing.
+  ScriptApi none((ScriptApi::Services{}));
+  ScriptBindings nb;
+  none.InstallBindings(&nb);
+  st = Call(nb, "replay.key_count", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  st = Call(nb, "replay.add_key",
+            {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+             ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+             ScriptValue::Num(0), ScriptValue::Num(70)},
+            grants, &out);
+  CHECK(st == ScriptStatus::Error);   // no camera: raises, like every other module
+  st = Call(nb, "replay.activate", {}, grants, &out);
+  CHECK(st == ScriptStatus::Error);   // raises rather than hijacking the camera
+}
+
+// An export through the frame hook: each frame yields one video frame at the
+// fixed rate, so the number of frames is the timeline's, not the wall clock's.
+static void TestReplayCameraExportThroughFrameHook() {
+  Renderer renderer;
+  Berry::Test::CaptureRenderSeam seam;
+  renderer.BindSeam(&seam);
+  ReplayCamera cam;
+  // 40 ticks is a 2-second timeline at 20 ticks/s.
+  CHECK(cam.AddKey(CameraKey{0, Vec3(0, 64, 0), 0, 0, 0, 70}));
+  CHECK(cam.AddKey(CameraKey{40, Vec3(0, 64, 40), 0, 0, 0, 70}));
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.replayCamera = &cam;
+  ScriptApi api(services);
+
+  api.PublishFrame(16.0f, Vec2(1920.0f, 1080.0f));
+  CHECK(cam.ExportBegin(20.0f, 1920.0f / 1080.0f, 1920.0f, 1080.0f));
+  CHECK(cam.exporting());
+
+  Engine& eng = Engine::Instance();
+  eng.Bootstrap();
+  CHECK(eng.Attach());
+  // 40 ticks at 20 fps export yields 41 video frames (ticks 0..40); the next
+  // frame finds the end, ends the export and yields nothing, so the loop body
+  // runs 42 times and 41 of those set a camera.
+  u64 frames = 0;
+  while (cam.exporting()) {
+    eng.OnFrame();
+    ++frames;
+    CHECK(frames < 1000);   // guard: the loop must terminate
+  }
+  CHECK(frames == 42);
+  CHECK(cam.exportFrame() == 41);
+  CHECK(renderer.camera().valid);
   eng.Detach();
 }
 
@@ -2338,6 +2512,8 @@ int main() {
   TestQueueIsBoundedAndFailsClosed();
   TestFrameHookDrainsQueue();
   TestFrameHookAdvancesAnimator();
+  TestReplayCameraBindings();
+  TestReplayCameraExportThroughFrameHook();
   TestFrameHookDrawsCosmetics();
   TestFrameHookPresentsUi();
   TestPublishedReads();

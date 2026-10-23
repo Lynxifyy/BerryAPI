@@ -580,3 +580,62 @@ module Record {
   fn replay_index() -> number
   fn replay_end() -> bool
 }
+
+module Replay {
+  capability world
+  doc "The replay mod's camera: a keyframed timeline over the recorded tape. A replay is only worth watching if the viewpoint is scripted, so this is the camera path — keys of (position, pitch/yaw/roll, fov) at tape ticks — sampled into the camera the frame draws with while a replay plays. `activate` hands the frame's camera to this timeline; `deactivate` gives it back to the player. Sampling is linear or a Catmull-Rom `smooth` path; angles interpolate along the shorter arc and never overshoot a key. Playback is driven by the frame clock, so a paused client does not advance, and `export_*` walks the timeline at a fixed frame rate for offline rendering. It is client-side and read-only with respect to the world: it changes where this client looks while replaying what it already recorded, and reveals nothing the client was not already sent. Every feed is bounded (key count, FOV range, speed) and every bad value is refused rather than clamped, so a script cannot leave the renderer with a camera it cannot trust."
+  doc "Adds a camera key at a tick. False when the position or angles are not finite, the FOV is outside [1, 179], the key cap is reached, or a key already exists at that tick (remove it first)."
+  fn add_key(tick: number, x: number, y: number, z: number, pitch: number, yaw: number, roll: number, fov: number) -> bool
+  doc "Removes the key at a tick. False when there is none."
+  fn remove_key(tick: number) -> bool
+  doc "Drops every key and stops playback. Keeps whether the timeline is active."
+  fn clear() -> nil
+  fn key_count() -> number
+  fn has_key(tick: number) -> bool
+  doc "The first key's tick, or 0 when there are no keys."
+  fn first_tick() -> number
+  doc "The last key's tick, or 0 when there are no keys."
+  fn last_tick() -> number
+  doc "The span between the first and last key, or 0 with fewer than two keys."
+  fn duration_ticks() -> number
+  doc "The interpolation mode, \"linear\" or \"smooth\"."
+  fn smoothing() -> string
+  doc "Sets the interpolation mode. False when the name is neither \"linear\" nor \"smooth\"."
+  fn set_smoothing(name: string) -> bool
+  doc "True when the frame's camera is driven by this timeline."
+  fn active() -> bool
+  doc "Hands the frame's camera to this timeline (and starts playback). False when there are no keys to play."
+  fn activate() -> bool
+  doc "Gives the camera back to the player and pauses."
+  fn deactivate() -> nil
+  doc "Starts (or resumes) playback from the current playhead. False when there are no keys."
+  fn play() -> bool
+  fn pause() -> nil
+  doc "Pauses and rewinds to the first key."
+  fn stop() -> nil
+  fn playing() -> bool
+  fn speed() -> number
+  doc "Sets the playback speed multiplier. Must be finite and in (0, 64]; a bad value is refused."
+  fn set_speed(speed: number) -> bool
+  doc "The playhead in ticks (fractional, so it can fall between keys)."
+  fn playhead() -> number
+  doc "Moves the playhead, clamped into the key range. False when there are no keys."
+  fn seek(tick: number) -> bool
+  doc "The pose at an absolute tick as {valid, x, y, z, pitch, yaw, roll, fov}. Before the first key it holds the first, past the last it holds the last."
+  fn sample(tick: number) -> Table
+  doc "The pose at the current playhead, same shape as `sample`."
+  fn sample_now() -> Table
+  doc "The FOV override in degrees, or 0 when the keyframed FOV is used."
+  fn fov_override() -> number
+  doc "Pins the FOV, or clears the pin with 0. A non-zero value must be finite and in [1, 179]; a bad value is refused."
+  fn set_fov_override(fov: number) -> bool
+  doc "Begins a fixed-rate export from the first key. False when the rate is not finite and in (0, 240], the viewport is not finite and positive, or there are no keys. While exporting, the client's frame hook yields one video frame per rendered frame at this rate — independent of the machine's real frame rate — so the export's length is a property of the timeline, not the renderer."
+  fn export_begin(fps: number, width: number, height: number) -> bool
+  doc "Ends an export. A no-op when none is running."
+  fn export_end() -> nil
+  fn exporting() -> bool
+  doc "How many frames the current export has yielded."
+  fn export_frame() -> number
+  doc "The export frame rate, or 0 when not exporting."
+  fn export_fps() -> number
+}

@@ -543,6 +543,64 @@ export interface Record {
   replay_end(): boolean;
 }
 
+/** Capability required: world. */
+export interface Replay {
+  /** Adds a camera key at a tick. False when the position or angles are not finite, the FOV is outside [1, 179], the key cap is reached, or a key already exists at that tick (remove it first). */
+  add_key(tick: number, x: number, y: number, z: number, pitch: number, yaw: number, roll: number, fov: number): boolean;
+  /** Removes the key at a tick. False when there is none. */
+  remove_key(tick: number): boolean;
+  /** Drops every key and stops playback. Keeps whether the timeline is active. */
+  clear(): void;
+  key_count(): number;
+  has_key(tick: number): boolean;
+  /** The first key's tick, or 0 when there are no keys. */
+  first_tick(): number;
+  /** The last key's tick, or 0 when there are no keys. */
+  last_tick(): number;
+  /** The span between the first and last key, or 0 with fewer than two keys. */
+  duration_ticks(): number;
+  /** The interpolation mode, \"linear\" or \"smooth\". */
+  smoothing(): string;
+  /** Sets the interpolation mode. False when the name is neither \"linear\" nor \"smooth\". */
+  set_smoothing(name: string): boolean;
+  /** True when the frame's camera is driven by this timeline. */
+  active(): boolean;
+  /** Hands the frame's camera to this timeline (and starts playback). False when there are no keys to play. */
+  activate(): boolean;
+  /** Gives the camera back to the player and pauses. */
+  deactivate(): void;
+  /** Starts (or resumes) playback from the current playhead. False when there are no keys. */
+  play(): boolean;
+  pause(): void;
+  /** Pauses and rewinds to the first key. */
+  stop(): void;
+  playing(): boolean;
+  speed(): number;
+  /** Sets the playback speed multiplier. Must be finite and in (0, 64]; a bad value is refused. */
+  set_speed(speed: number): boolean;
+  /** The playhead in ticks (fractional, so it can fall between keys). */
+  playhead(): number;
+  /** Moves the playhead, clamped into the key range. False when there are no keys. */
+  seek(tick: number): boolean;
+  /** The pose at an absolute tick as {valid, x, y, z, pitch, yaw, roll, fov}. Before the first key it holds the first, past the last it holds the last. */
+  sample(tick: number): Record<string, unknown>;
+  /** The pose at the current playhead, same shape as `sample`. */
+  sample_now(): Record<string, unknown>;
+  /** The FOV override in degrees, or 0 when the keyframed FOV is used. */
+  fov_override(): number;
+  /** Pins the FOV, or clears the pin with 0. A non-zero value must be finite and in [1, 179]; a bad value is refused. */
+  set_fov_override(fov: number): boolean;
+  /** Begins a fixed-rate export from the first key. False when the rate is not finite and in (0, 240], the viewport is not finite and positive, or there are no keys. While exporting, the client's frame hook yields one video frame per rendered frame at this rate — independent of the machine's real frame rate — so the export's length is a property of the timeline, not the renderer. */
+  export_begin(fps: number, width: number, height: number): boolean;
+  /** Ends an export. A no-op when none is running. */
+  export_end(): void;
+  exporting(): boolean;
+  /** How many frames the current export has yielded. */
+  export_frame(): number;
+  /** The export frame rate, or 0 when not exporting. */
+  export_fps(): number;
+}
+
 /** Coroutine-native async facade (Phase 4). */
 export interface AsyncFacade {
   /** Suspend until `ticks` game ticks have elapsed. */
@@ -577,4 +635,5 @@ declare const Intent: Intent;
 declare const Shader: Shader;
 declare const Package: Package;
 declare const Record: Record;
+declare const Replay: Replay;
 declare const async: AsyncFacade;
