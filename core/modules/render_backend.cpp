@@ -189,6 +189,14 @@ class GlesOverlayBackend final : public IRenderBackend {
   bool running() const override { return running_; }
   const char* name() const override { return "GLES-overlay"; }
 
+  /// The dynamic-resolution scale. The overlay is drawn into a viewport of
+  /// `screenSize * scale` physical pixels with the ortho projection still over
+  /// the full logical screen, so fewer pixels are shaded and the embedder's
+  /// compositor upscales the result. Clamped to (0, 1]; 1.0 is native.
+  void SetRenderScale(f32 scale) override {
+    renderScale_ = (scale > 0.0f && scale <= 1.0f) ? scale : 1.0f;
+  }
+
   /// Uploads the frame's coalesced geometry and issues the two draw calls.
   /// Triangles first (fills), then lines (strokes), both from the same vertex
   /// format and the same program, so a frame costs two `glDrawArrays` calls no
@@ -196,7 +204,9 @@ class GlesOverlayBackend final : public IRenderBackend {
   void PresentBatch(const DrawBatch& batch, const Vec2& screenSize) override {
     if (!running_ || !EnsureProgram()) return;
     if (screenSize.x > 0 && screenSize.y > 0) {
-      gl_.glViewport(0, 0, (int32_t)screenSize.x, (int32_t)screenSize.y);
+      const int32_t vw = (int32_t)(screenSize.x * renderScale_);
+      const int32_t vh = (int32_t)(screenSize.y * renderScale_);
+      gl_.glViewport(0, 0, vw > 0 ? vw : 1, vh > 0 ? vh : 1);
       Ortho(proj_, screenSize.x, screenSize.y);
     }
     gl_.glUseProgram(program_);
@@ -286,6 +296,7 @@ class GlesOverlayBackend final : public IRenderBackend {
   int32_t projLoc_ = -1;
   float proj_[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
   bool running_ = false;
+  f32 renderScale_ = 1.0f;
 };
 
 }  // namespace
@@ -337,6 +348,10 @@ class BackendSeam final : public RenderSeam {
     if (!backend_) return;
     BatchBuilder::Build(lines, rects, circles, &batch_);
     backend_->PresentBatch(batch_, screenSize);
+  }
+
+  void SetRenderScale(f32 scale) override {
+    if (backend_) backend_->SetRenderScale(scale);
   }
 
  private:

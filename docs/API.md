@@ -96,6 +96,9 @@ Capability: `render`.
 | `render.pop_clip_rect() -> nil` | `render` | Pops the innermost clip rectangle. An unmatched pop is a no-op. |
 | `render.clip_rect() -> Table` | `render` | The active clip rectangle as {active, x, y, w, h}; `active` is false when no clip is pushed. |
 | `render.camera() -> Table` | `render` | The camera the renderer last drew with, as {valid, x, y, z, yaw, pitch}. `valid` is false until a camera is bound. |
+| `render.add_occluder(min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number) -> nil` | `render` | Submits a world box as an opaque occluder for this frame's software occlusion grid. Submit large near geometry (terrain, walls) front to back; boxes the grid then proves hidden are dropped by `render.occluded`. Purely CPU-side and conservative: it never hides anything it cannot prove is behind a submitted occluder. |
+| `render.occluded(min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number) -> bool` | `render` | True when the world box is entirely behind the occluders submitted this frame with `render.add_occluder`. False with no camera, no occluders, or any doubt, so it never over-culls. Resets every frame. |
+| `render.cull_box(min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number) -> bool` | `render` | The full visibility test: false when the box is outside the camera frustum or hidden behind a submitted occluder. The one call an overlay makes per candidate before queuing its geometry. |
 
 ## World
 
@@ -335,6 +338,7 @@ Capability: `perf`.
 | `perf.flame_reset() -> nil` | `perf` | Drops the flame tree, the span stats and the per-frame ring, starting the profiler over. |
 | `perf.pipeline() -> Table` | `perf` | The render pipeline's frame counters as {frames, entities_submitted, entities_drawn, entities_culled, entities_lod_reduced, batches, draw_calls, vertices, resolution_scale}. `draw_calls` counts the two coalesced calls (triangles + lines) a frame issues, so it stays flat however many primitives a script queued; `resolution_scale` is the factor the dynamic-resolution controller settled on (1.0 is native). |
 | `perf.lod_tier(distance: number) -> string` | `perf` | The level-of-detail tier an entity `distance` blocks from the camera would be drawn at: \"full\", \"reduced\", \"static\" or \"culled\". Follows the same policy the renderer culls with, so a script can predict whether its overlay will be given geometry. |
+| `perf.lod_should_tick(distance: number, tick: number, phase: number) -> bool` | `perf` | Whether an entity `distance` blocks away should advance its animation/physics on `tick`, keyed by `phase` (pass the entity id so a crowd does not all update on one tick). True every tick at \"full\", one tick in the policy's reduced interval at \"reduced\", never at \"static\"/\"culled\". This is the tick-rate half of LOD: a script that drives a crowd skips a false result to throttle it. |
 
 ## Input
 

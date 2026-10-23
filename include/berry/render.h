@@ -134,7 +134,8 @@ class BERRY_API Renderer {
   void SetRenderSettings(const RenderSettings& s);
   RenderSettings renderSettings() const;
   /// Feeds one frame time to the resolution controller. Thread-safe; called
-  /// from the frame publisher, which may not be inside a frame.
+  /// from the frame publisher, which may not be inside a frame. When the scale
+  /// changes, the seam is told so it can render at the new fraction.
   f32 OnFrameTime(f32 frameMs);
   /// A snapshot of the pipeline counters. Thread-safe.
   PipelineStats pipelineStats() const;
@@ -143,9 +144,26 @@ class BERRY_API Renderer {
   DrawCounts lastBatchCounts() const;
   /// The LOD tier for an entity at `distance` under the frame's policy.
   LodTier LodFor(f32 distance) const;
+  /// Whether an entity at `distance` should advance its animation/physics on
+  /// `tick` under the frame's LOD policy, keyed by `phase` (its id). A caller
+  /// throttles a distant entity by not advancing it on a false result, which is
+  /// the tick-rate half of LOD; `LodFor` alone only reports the tier. Not const:
+  /// it records the skipped-tick accounting.
+  bool ShouldTickEntity(f32 distance, u64 tick, u64 phase);
   /// True when `box` is inside the last frame's frustum. Entities are drawn
   /// through this so a caller never queues geometry the camera cannot see.
   bool Visible(const Aabb& box) const;
+
+  /// Rasterises a world box into this frame's occlusion grid as an opaque
+  /// occluder. A caller submits large near geometry (terrain, walls) front to
+  /// back; only boxes the grid proves hidden are then culled. Thread-safe.
+  void AddOccluder(const Aabb& box);
+  /// True when `box` is entirely behind the occluders submitted this frame.
+  /// False with no camera, no occluders, or any doubt — it never over-culls.
+  bool IsOccluded(const Aabb& box) const;
+  /// The full cull decision: false when `box` is outside the frustum or hidden
+  /// behind an occluder. Records the drop in the pipeline counters. Thread-safe.
+  bool CullEntity(const Aabb& box);
 
  private:
   /// True when `box` intersects the active clip (or no clip is active). When
@@ -169,6 +187,8 @@ class BERRY_API Renderer {
   RenderPipeline pipeline_;
   RenderSettings settings_{};
   DrawCounts lastCounts_{};
+  /// The render scale last pushed to the seam, so it is told only on a change.
+  f32 lastPushedScale_ = 1.0f;
 
   void PresentLocked();
 };

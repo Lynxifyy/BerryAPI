@@ -102,6 +102,12 @@ class BERRY_API RenderSeam {
                        const std::vector<Rect2D>& rects,
                        const std::vector<Circle2D>& circles,
                        const Vec2& screenSize) = 0;
+
+  /// The dynamic-resolution scale the renderer has settled on: 1.0 is native,
+  /// below 1.0 means "render at a fraction and upscale". Called only when the
+  /// value changes, so a seam that does not care ignores it. The default is a
+  /// no-op, so a seam that never scales is unaffected.
+  virtual void SetRenderScale(f32 scale) { (void)scale; }
 };
 
 // Minimal column-major 4x4 matrix.

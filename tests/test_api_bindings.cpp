@@ -617,6 +617,79 @@ static void TestRenderDrawHelpers() {
   CHECK(seam.lines == 1);
 }
 
+static void TestRenderOcclusionBindings() {
+  Berry::Test::CaptureRenderSeam seam;
+  Renderer renderer;
+  renderer.Attach(&seam);
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  CameraState cam;
+  cam.width = 800;
+  cam.height = 600;
+  cam.view = Mat4::LookAt(Vec3(0, 0, 0), Vec3(0, 0, 1), Vec3(0, 1, 0));
+  cam.projection = Mat4::Perspective(70, 800.0f / 600.0f, 0.1f, 200.0f);
+  cam.valid = true;
+  renderer.SetCamera(cam);
+  renderer.BeginFrame(Vec2(800, 600));
+
+  ScriptValue out;
+  auto box = [](f32 mnx, f32 mny, f32 mnz, f32 mxx, f32 mxy, f32 mxz) {
+    return std::vector<ScriptValue>{ScriptValue::Num(mnx), ScriptValue::Num(mny),
+                                    ScriptValue::Num(mnz), ScriptValue::Num(mxx),
+                                    ScriptValue::Num(mxy), ScriptValue::Num(mxz)};
+  };
+
+  // No occluder yet: nothing is occluded, and cull_box keeps the box (in view).
+  CHECK(Call(bindings, "render.occluded", box(-1, -1, 19, 1, 1, 21),
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "render.cull_box", box(-1, -1, 19, 1, 1, 21),
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());   // frustum keeps it, no occluder hides it
+
+  // Submit a wall, then the box behind it is occluded.
+  CHECK(Call(bindings, "render.add_occluder", box(-3, -3, 9, 3, 3, 11),
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "render.occluded", box(-1, -1, 19, 1, 1, 21),
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  // cull_box now drops it.
+  CHECK(Call(bindings, "render.cull_box", box(-1, -1, 19, 1, 1, 21),
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  // A box in front of the wall is kept.
+  CHECK(Call(bindings, "render.cull_box", box(-1, -1, 3, 1, 1, 5),
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  // A malformed box (min > max) is refused rather than culling on garbage; the
+  // cull path fails open.
+  CHECK(Call(bindings, "render.occluded", box(1, 0, 0, -1, 0, 0),
+             {"render"}, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "render.cull_box", box(1, 0, 0, -1, 0, 0),
+             {"render"}, &out) == ScriptStatus::Error);
+
+  // A fresh frame clears the grid: the box is no longer occluded.
+  renderer.EndFrame();
+  renderer.BeginFrame(Vec2(800, 600));
+  CHECK(Call(bindings, "render.occluded", box(-1, -1, 19, 1, 1, 21),
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  renderer.EndFrame();
+
+  // With no renderer bound the surface fails closed.
+  ScriptApi bare(ScriptApi::Services{});
+  ScriptBindings bareBindings;
+  bare.InstallBindings(&bareBindings);
+  CHECK(Call(bareBindings, "render.occluded", box(0, 0, 0, 1, 1, 1),
+             {"render"}, &out) == ScriptStatus::Error);
+}
+
 static void TestWorldReads() {
   std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
   WorldHandle* world = worldMod->Service<WorldHandle>();
@@ -826,6 +899,30 @@ static void TestPerfPipelineBindings() {
 
   // A negative distance is refused rather than mapped to a tier.
   CHECK(Call(bindings, "perf.lod_tier", {ScriptValue::Num(-1)},
+             {"perf"}, &out) == ScriptStatus::Error);
+
+  // The tick-rate half of LOD: a near entity ticks every tick, a distant one is
+  // throttled, and the phase spreads a crowd so they do not hitch together.
+  CHECK(Call(bindings, "perf.lod_should_tick",
+             {ScriptValue::Num(1), ScriptValue::Num(1), ScriptValue::Num(0)},
+             {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());   // full: every tick
+  CHECK(Call(bindings, "perf.lod_should_tick",
+             {ScriptValue::Num(1000), ScriptValue::Num(1), ScriptValue::Num(0)},
+             {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());  // culled: never
+  // Two phases at the same reduced distance must differ on the same tick.
+  CHECK(Call(bindings, "perf.lod_should_tick",
+             {ScriptValue::Num(24), ScriptValue::Num(0), ScriptValue::Num(0)},
+             {"perf"}, &out) == ScriptStatus::Ok);
+  const bool p0 = out.Truthy();
+  CHECK(Call(bindings, "perf.lod_should_tick",
+             {ScriptValue::Num(24), ScriptValue::Num(0), ScriptValue::Num(1)},
+             {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(p0 != out.Truthy());
+  // A bad argument is refused rather than silently treated as 0.
+  CHECK(Call(bindings, "perf.lod_should_tick",
+             {ScriptValue::Num(-1), ScriptValue::Num(0), ScriptValue::Num(0)},
              {"perf"}, &out) == ScriptStatus::Error);
 
   // The perf grant gates the surface.
@@ -2054,6 +2151,7 @@ int main() {
   TestWorldQueryNeedsSeamAndLocalPlayer();
   TestPlayerReadsFailClosedAndResolve();
   TestRenderDrawHelpers();
+  TestRenderOcclusionBindings();
   TestWorldReads();
   TestPerfStatsAndPlatform();
   TestPerfFlameBindings();

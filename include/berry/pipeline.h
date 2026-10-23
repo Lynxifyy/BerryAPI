@@ -113,6 +113,83 @@ struct BERRY_API LodPolicy {
   LodTier TierFor(f32 distance) const;
   bool Animates(LodTier t) const { return t == LodTier::Full || t == LodTier::Reduced; }
   bool TicksPhysics(LodTier t) const { return t == LodTier::Full; }
+
+  /// Ticks between animation/physics updates for an entity at `Reduced`. A
+  /// tier that animates but does not tick physics every tick still needs its
+  /// *animation* advanced; this is how often. 1 means every tick. Values below
+  /// 1 are treated as 1, so a caller can never make a tier tick more than the
+  /// engine does.
+  u32 reducedTickInterval = 4;
+
+  /// Whether an entity at `tier` should advance on `tick`. `Full` ticks every
+  /// tick; `Reduced` one tick in `reducedTickInterval`; `Static`/`Culled` never.
+  /// `phase` (an entity id) offsets the count so a crowd does not all update on
+  /// the same tick — without it every distant entity would hitch in lockstep.
+  bool ShouldTick(LodTier tier, u64 tick, u64 phase) const;
+};
+
+//----------------------------------------------------------------------------
+// Occlusion buffer
+//----------------------------------------------------------------------------
+
+/// A conservative CPU-side software occlusion buffer (a Hi-Z style depth grid).
+///
+/// The frame is split into a coarse grid of cells. Large opaque geometry is
+/// rasterised into the grid as the *nearest* depth covering each cell it touches
+/// (an occluder pass, drawn front to back). A query box is then rejected only
+/// when every cell it covers is filled and the box is strictly behind the depth
+/// already stored there — a box that straddles a cell edge, pokes into a nearer
+/// depth, or falls outside the view is never culled. That one-sided test is the
+/// whole point: a false "visible" costs a draw call, a false "occluded" makes
+/// geometry vanish, so the buffer always fails toward drawing.
+///
+/// The buffer is deliberately approximate: it knows nothing about a depth
+/// buffer the GPU may have, and a cell is marked only from occluders the caller
+/// has proven opaque. With no camera, or before any occluder is submitted, it
+/// culls nothing.
+class BERRY_API OcclusionBuffer {
+ public:
+  /// The grid resolution. Coarser is cheaper and culls less; the default is a
+  /// quarter of the frame per cell, which is enough to drop a wall-hidden mob
+  /// without a per-pixel cost.
+  static constexpr i32 kDefaultCellsX = 32;
+  static constexpr i32 kDefaultCellsY = 18;
+
+  /// Resets the depth grid for a new frame and adopts the camera's projection.
+  /// A null camera leaves the buffer invalid, so `IsOccluded` returns false and
+  /// nothing is culled (fail open).
+  void BeginFrame(const CameraState& camera);
+
+  /// Rasterises `box` into the grid as an occluder: every cell the box covers is
+  /// filled with the box's *nearest* depth, but only where that is nearer than
+  /// what is already stored. Call after `BeginFrame`, front to back.
+  void AddOccluder(const Aabb& box);
+
+  /// True when `box` is entirely behind already-rasterised occluders. False when
+  /// the buffer is invalid, the box overlaps any empty cell, or any covered cell
+  /// still holds a farther depth. Never culls on an incomplete grid.
+  bool IsOccluded(const Aabb& box) const;
+
+  /// The number of cells filled this frame, for the pipeline accounting.
+  i32 filledCells() const;
+  bool valid() const { return valid_; }
+
+  void Reset();
+
+ private:
+  /// Projects `box` to a screen-space rectangle and the depth range it spans.
+  /// Returns false when the box is not fully in front of the camera (a box
+  /// crossing the near plane is never treated as an occluder or a cull target).
+  bool ProjectBox(const Aabb& box, Vec2* mn, Vec2* mx, f32* nearDepth,
+                  f32* farDepth) const;
+
+  CameraState cam_{};
+  bool valid_ = false;
+  i32 cellsX_ = kDefaultCellsX;
+  i32 cellsY_ = kDefaultCellsY;
+  /// Per-cell nearest depth. A negative value means "empty" (nothing drawn), so
+  /// a query over any empty cell is never occluded.
+  std::vector<f32> depth_;
 };
 
 //----------------------------------------------------------------------------
@@ -246,6 +323,8 @@ struct BERRY_API PipelineStats {
   u64 entitiesDrawn = 0;
   u64 entitiesCulled = 0;
   u64 entitiesLodReduced = 0;    // drawn at Static or Reduced
+  u64 entitiesTickThrottled = 0;  // animation/physics ticks skipped by LOD
+  u64 entitiesOccluded = 0;      // dropped by the occlusion buffer
   u64 batches = 0;               // frames that produced a non-empty batch
   u64 drawCalls = 0;             // triangles + lines draw calls submitted
   u64 vertices = 0;
@@ -278,6 +357,23 @@ class BERRY_API RenderPipeline {
 
   /// The LOD tier for an entity at `distance`, and the accounting.
   LodTier LodFor(f32 distance);
+
+  /// The LOD tick decision for an entity at `distance` on `tick`, keyed by
+  /// `phase` (its id). Counts a skipped tick when the tier throttles or stops
+  /// it, so a caller can see the animation/physics work LOD saved. `Full`
+  /// always returns true; `Static`/`Culled` always false.
+  bool ShouldTickEntity(f32 distance, u64 tick, u64 phase);
+
+  /// The occlusion buffer for this frame. Callers rasterise large opaque
+  /// geometry with `AddOccluder` (front to back), then drop anything
+  /// `IsOccluded`. The buffer is rebuilt in `BeginFrame` from the camera.
+  OcclusionBuffer& occlusion() { return occlusion_; }
+  const OcclusionBuffer& occlusion() const { return occlusion_; }
+
+  /// The full cull decision for an entity box: false when it is outside the
+  /// frustum *or* hidden behind already-rasterised occluders. Updates the
+  /// cull/occluded counters. Frustum first (cheap), then the occlusion test.
+  bool CullEntity(const Aabb& box);
 
   /// Feeds a frame time to the resolution controller.
   f32 OnFrameTime(f32 frameMs);
@@ -316,6 +412,7 @@ class BERRY_API RenderPipeline {
  private:
   Frustum frustum_;
   LodPolicy lod_ = LodPolicy::Default();
+  OcclusionBuffer occlusion_;
   DynamicResolution resolution_;
   RenderSettings settings_{};
   PipelineStats stats_{};

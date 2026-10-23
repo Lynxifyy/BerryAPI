@@ -85,6 +85,9 @@ inline const BindingSpec* BindingSpecs() {
       {"render.pop_clip_rect", CapKind::Render, 0, "Render"},
       {"render.clip_rect", CapKind::Render, 0, "Render"},
       {"render.camera", CapKind::Render, 0, "Render"},
+      {"render.add_occluder", CapKind::Render, 6, "Render"},
+      {"render.occluded", CapKind::Render, 6, "Render"},
+      {"render.cull_box", CapKind::Render, 6, "Render"},
       {"world.query", CapKind::World, 1, "World"},
       {"world.entity_count", CapKind::World, 0, "World"},
       {"world.block_at", CapKind::World, 3, "World"},
@@ -233,6 +236,7 @@ inline const BindingSpec* BindingSpecs() {
       {"perf.flame_reset", CapKind::Perf, 0, "Perf"},
       {"perf.pipeline", CapKind::Perf, 0, "Perf"},
       {"perf.lod_tier", CapKind::Perf, 1, "Perf"},
+      {"perf.lod_should_tick", CapKind::Perf, 3, "Perf"},
       {"input.is_key_down", CapKind::Input, 1, "Input"},
       {"input.clicks_per_second", CapKind::Input, 0, "Input"},
       {"input.velocity", CapKind::Input, 0, "Input"},
@@ -285,7 +289,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 260; }
+inline size_t BindingSpecCount() { return 264; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -375,6 +379,9 @@ inline const char* const kRenderNames[] = {
     "render.pop_clip_rect",
     "render.clip_rect",
     "render.camera",
+    "render.add_occluder",
+    "render.occluded",
+    "render.cull_box",
 };
 inline const char* const kWorldNames[] = {
     "world.query",
@@ -549,6 +556,7 @@ inline const char* const kPerfNames[] = {
     "perf.flame_reset",
     "perf.pipeline",
     "perf.lod_tier",
+    "perf.lod_should_tick",
 };
 inline const char* const kInputNames[] = {
     "input.is_key_down",
@@ -616,7 +624,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Combat", kCombatNames, 3},
       {"CombatState", kCombatStateNames, 26},
       {"Player", kPlayerNames, 20},
-      {"Render", kRenderNames, 15},
+      {"Render", kRenderNames, 18},
       {"World", kWorldNames, 16},
       {"Entity", kEntityNames, 10},
       {"Fs", kFsNames, 10},
@@ -629,7 +637,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"JsonRpc", kJsonRpcNames, 1},
       {"Hud", kHudNames, 5},
       {"Ui", kUiNames, 29},
-      {"Perf", kPerfNames, 11},
+      {"Perf", kPerfNames, 12},
       {"Input", kInputNames, 3},
       {"Cosmetic", kCosmeticNames, 9},
       {"Intent", kIntentNames, 6},

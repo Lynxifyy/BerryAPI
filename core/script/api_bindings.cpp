@@ -1195,6 +1195,52 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Tbl(std::move(t));
   });
 
+  // The software occlusion grid: a caller submits occluders, then asks whether a
+  // candidate box is hidden. Every argument is validated so a malformed box
+  // fails closed (draws) rather than culling on garbage.
+  auto boxFromArgs = [](const std::vector<ScriptValue>& args, Aabb* out) -> bool {
+    f32 v[6];
+    for (int i = 0; i < 6; ++i) {
+      const f64 d = args[i].AsNumber();
+      if (!std::isfinite(d)) return false;
+      v[i] = (f32)d;
+    }
+    if (v[0] > v[3] || v[1] > v[4] || v[2] > v[5]) return false;   // min > max
+    *out = Aabb(Vec3(v[0], v[1], v[2]), Vec3(v[3], v[4], v[5]));
+    return true;
+  };
+
+  install("render.add_occluder", [this, boxFromArgs](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.add_occluder: renderer unavailable"); return ScriptValue::Nil(); }
+    Aabb box;
+    if (!boxFromArgs(args, &box)) {
+      ctx.RaiseError("render.add_occluder: box must be six finite numbers with min <= max");
+      return ScriptValue::Nil();
+    }
+    services_.renderer->AddOccluder(box);
+    return ScriptValue::Nil();
+  });
+
+  install("render.occluded", [this, boxFromArgs](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.occluded: renderer unavailable"); return ScriptValue::Bool(false); }
+    Aabb box;
+    if (!boxFromArgs(args, &box)) {
+      ctx.RaiseError("render.occluded: box must be six finite numbers with min <= max");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(services_.renderer->IsOccluded(box));
+  });
+
+  install("render.cull_box", [this, boxFromArgs](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.cull_box: renderer unavailable"); return ScriptValue::Bool(true); }
+    Aabb box;
+    if (!boxFromArgs(args, &box)) {
+      ctx.RaiseError("render.cull_box: box must be six finite numbers with min <= max");
+      return ScriptValue::Bool(true);   // fail open: draw rather than cull on garbage
+    }
+    return ScriptValue::Bool(services_.renderer->CullEntity(box));
+  });
+
   //--- World (read-only queries) -------------------------------------------
   install("world.query", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
     if (!services_.world) { ctx.RaiseError("world.query: world unavailable"); return ScriptValue::Num(0); }
@@ -2213,6 +2259,7 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     out["entities_drawn"] = ScriptValue::Num((f64)st.entitiesDrawn);
     out["entities_culled"] = ScriptValue::Num((f64)st.entitiesCulled);
     out["entities_lod_reduced"] = ScriptValue::Num((f64)st.entitiesLodReduced);
+    out["entities_tick_throttled"] = ScriptValue::Num((f64)st.entitiesTickThrottled);
     out["batches"] = ScriptValue::Num((f64)st.batches);
     out["draw_calls"] = ScriptValue::Num((f64)st.drawCalls);
     out["vertices"] = ScriptValue::Num((f64)st.vertices);
@@ -2228,6 +2275,20 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
       return ScriptValue::Str("");
     }
     return ScriptValue::Str(LodTierName(services_.renderer->LodFor((f32)distance)));
+  });
+
+  install("perf.lod_should_tick", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("perf.lod_should_tick: renderer unavailable"); return ScriptValue::Bool(false); }
+    const f64 distance = args[0].AsNumber();
+    const f64 tick = args[1].AsNumber();
+    const f64 phase = args[2].AsNumber();
+    if (!std::isfinite(distance) || distance < 0 || !std::isfinite(tick) || tick < 0 ||
+        !std::isfinite(phase) || phase < 0) {
+      ctx.RaiseError("perf.lod_should_tick: distance, tick and phase must be non-negative numbers");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(services_.renderer->ShouldTickEntity(
+        (f32)distance, (u64)tick, (u64)phase));
   });
 
   //--- Input (local, already-visible state) --------------------------------
