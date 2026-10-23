@@ -121,6 +121,7 @@ enum class ReplayRecordKind : u32 {
   TimeWeather = 8,   // level time or weather
   PlayerInput = 9,   // the local player's own input for a tick
   Event = 10,        // a Berry script/combat event (a timeline marker)
+  EntityLeave = 11,  // an entity left the client's view
   Count,
 };
 

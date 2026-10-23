@@ -290,13 +290,14 @@ const char* ReplayRecordKindName(ReplayRecordKind k) {
     case ReplayRecordKind::TimeWeather: return "time_weather";
     case ReplayRecordKind::PlayerInput: return "player_input";
     case ReplayRecordKind::Event: return "event";
+    case ReplayRecordKind::EntityLeave: return "entity_leave";
     case ReplayRecordKind::Count: return "count";
   }
   return "unknown";
 }
 
 bool ReplayRecordKindFromName(const std::string& name, ReplayRecordKind* out) {
-  for (u32 i = 0; i <= (u32)ReplayRecordKind::Event; ++i) {
+  for (u32 i = 0; i <= (u32)ReplayRecordKind::EntityLeave; ++i) {
     const ReplayRecordKind k = (ReplayRecordKind)i;
     if (name == ReplayRecordKindName(k)) { *out = k; return true; }
   }
