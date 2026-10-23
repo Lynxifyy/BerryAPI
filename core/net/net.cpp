@@ -510,21 +510,28 @@ HttpResponse HttpRequest::Do() {
 // WebSocket (RFC6455)
 //----------------------------------------------------------------------------
 
+WebSocket::WebSocket() = default;
 WebSocket::~WebSocket() { Close(); }
 
 static std::string WsBase64(const unsigned char* data, size_t len);
 
 bool WebSocket::Connect(const char* url, int timeoutMs) {
+  const Deadline deadline = Deadline::After(timeoutMs);
   std::string u = url;
   std::string rest = u;
+  bool wantTls = false;
   if (rest.rfind("ws://", 0) == 0) {
     rest = rest.substr(5);
   } else if (rest.rfind("wss://", 0) == 0) {
-    // TLS is not implemented, so `wss://` must FAIL CLOSED. Downgrading to a
-    // plaintext socket on port 443 would silently send the caller's traffic
-    // unencrypted while they asked for TLS — the worst possible failure mode.
-    err_ = "wss not supported (TLS not implemented)";
-    return false;
+    rest = rest.substr(6);
+    wantTls = true;
+    if (!TlsSocket::Available()) {
+      // FAIL CLOSED. Downgrading to a plaintext socket on port 443 would
+      // silently send the caller's traffic unencrypted while they asked for
+      // TLS — the worst possible failure mode.
+      err_ = "wss not supported (TLS not available)";
+      return false;
+    }
   } else {
     err_ = "bad ws url";
     return false;
@@ -534,17 +541,30 @@ bool WebSocket::Connect(const char* url, int timeoutMs) {
   std::string path = slash == std::string::npos ? "/" : rest.substr(slash);
 
   std::string host = authority;
-  u16 port = 80;
+  u16 port = wantTls ? 443 : 80;
   size_t colon = authority.rfind(':');
   if (colon != std::string::npos) {
     host = authority.substr(0, colon);
     port = (u16)atoi(authority.substr(colon + 1).c_str());
   }
 
-  sock_.reset(new TcpSocket());
-  if (!sock_->Connect(host.c_str(), port, timeoutMs)) {
-    err_ = sock_->LastError();
-    return false;
+  StreamClose();
+  tls_ = wantTls;
+  if (wantTls) {
+    tlsSock_.reset(new TlsSocket());
+    if (!tlsSock_->Connect(host.c_str(), port, deadline)) {
+      err_ = tlsSock_->LastError();
+      tlsSock_.reset();
+      tls_ = false;
+      return false;
+    }
+  } else {
+    sock_.reset(new TcpSocket());
+    if (!sock_->Connect(host.c_str(), port, deadline)) {
+      err_ = sock_->LastError();
+      sock_.reset();
+      return false;
+    }
   }
 
   // Random-ish key (16 bytes base64). Deterministic is fine for private use,
@@ -561,13 +581,13 @@ bool WebSocket::Connect(const char* url, int timeoutMs) {
       "Sec-WebSocket-Key: " + key + "\r\n"
       "Sec-WebSocket-Version: 13\r\n"
       "User-Agent: BerryAPI\r\n\r\n";
-  if (sock_->Send(req.data(), req.size()) != (ssize_t)req.size()) return false;
+  if (StreamSend(req.data(), req.size(), deadline) != (ssize_t)req.size()) return false;
 
   // Read handshake response.
   char buf[4096];
   std::string raw;
   while (raw.find("\r\n\r\n") == std::string::npos) {
-    ssize_t n = sock_->Recv(buf, sizeof buf, timeoutMs);
+    ssize_t n = StreamRecv(buf, sizeof buf, deadline);
     if (n <= 0) {
       err_ = "handshake timeout";
       return false;
@@ -587,6 +607,34 @@ bool WebSocket::Connect(const char* url, int timeoutMs) {
   return true;
 }
 
+ssize_t WebSocket::StreamSend(const void* data, size_t len, const Deadline& dl) {
+  if (tlsSock_) return tlsSock_->Send(data, len, dl);
+  if (sock_) return sock_->SendAll(data, len, dl);
+  return -1;
+}
+
+ssize_t WebSocket::StreamRecv(void* buf, size_t len, const Deadline& dl) {
+  if (tlsSock_) return tlsSock_->Recv(buf, len, dl);
+  if (sock_) return sock_->Recv(buf, len, dl);
+  return -1;
+}
+
+bool WebSocket::StreamWaitReadable(const Deadline& dl) {
+  if (tlsSock_) {
+    // A TLS record may already be buffered inside mbedTLS; `Readable` checks
+    // that first, then the socket, so a Pump never misses a frame.
+    return tlsSock_->Readable(dl.remainingMs());
+  }
+  if (sock_) return sock_->WaitReadable(dl);
+  return false;
+}
+
+void WebSocket::StreamClose() {
+  if (tlsSock_) { tlsSock_->Close(); tlsSock_.reset(); }
+  if (sock_) { sock_->Close(); sock_.reset(); }
+  tls_ = false;
+}
+
 void WebSocket::Close(int code, const char* reason) {
   if (!open_) return;
   open_ = false;
@@ -595,9 +643,10 @@ void WebSocket::Close(int code, const char* reason) {
   frame[1] = 0x02;
   frame[2] = (unsigned char)(code >> 8);
   frame[3] = (unsigned char)(code & 0xff);
-  if (sock_) sock_->Send(frame, sizeof frame);
+  const Deadline dl = Deadline::After(1000);
+  if (sock_ || tlsSock_) StreamSend(frame, sizeof frame, dl);
   if (onClose_) onClose_(code, reason ? reason : "");
-  if (sock_) { sock_->Close(); sock_.reset(); }
+  StreamClose();
 }
 
 bool WebSocket::IsOpen() const { return open_; }
@@ -613,7 +662,7 @@ bool WebSocket::SendPing() {
 }
 
 bool WebSocket::SendFrame(WsOpcode op, const void* payload, size_t len) {
-  if (!open_ || !sock_) return false;
+  if (!open_ || (!sock_ && !tlsSock_)) return false;
   std::vector<u8> frame;
   frame.push_back(0x80 | (u8)op);   // FIN + opcode
   size_t n = len;
@@ -639,7 +688,8 @@ bool WebSocket::SendFrame(WsOpcode op, const void* payload, size_t len) {
   for (size_t i = 0; i < n; ++i) frame.push_back((u8)(p[i] ^ key[i % 4]));
 
   std::lock_guard<std::mutex> lk(sendMutex_);
-  return sock_ && sock_->Send(frame.data(), frame.size()) == (ssize_t)frame.size();
+  return StreamSend(frame.data(), frame.size(), Deadline::After(5000)) ==
+         (ssize_t)frame.size();
 }
 
 //----------------------------------------------------------------------------
@@ -708,10 +758,13 @@ WsFrameStatus ParseWsFrame(const u8* data, size_t len, WsFrameView* out,
 }
 
 void WebSocket::Pump() {
-  if (!open_ || !sock_) return;
-  if (!sock_->WaitReadable(0)) return;
+  if (!open_ || (!sock_ && !tlsSock_)) return;
+  // A Pump is a bounded read attempt, not an operation with a deadline; each
+  // partial read is given a short slice so one Pump cannot stall the worker.
+  const Deadline poll = Deadline::After(200);
+  if (!StreamWaitReadable(poll)) return;
   unsigned char hdr[2];
-  ssize_t hr = sock_->Recv(hdr, 2, 100);
+  ssize_t hr = StreamRecv(hdr, 2, poll);
   if (hr < 2) {
     if (hr == 0) { open_ = false; if (onClose_) onClose_(1006, "eof"); }
     return;
@@ -720,23 +773,24 @@ void WebSocket::Pump() {
   u8 opcode = hdr[0] & 0x0f;
   bool masked = (hdr[1] & 0x80) != 0;
   u64 len = hdr[1] & 0x7f;
+  const Deadline body = Deadline::After(1000);
   if (len == 126) {
     unsigned char ext[2];
-    if (sock_->Recv(ext, 2, 500) != 2) return;
+    if (StreamRecv(ext, 2, body) != 2) return;
     len = ((u64)ext[0] << 8) | ext[1];
   } else if (len == 127) {
     unsigned char ext[8];
-    if (sock_->Recv(ext, 8, 500) != 8) return;
+    if (StreamRecv(ext, 8, body) != 8) return;
     len = 0;
     for (int i = 0; i < 8; ++i) len = (len << 8) | ext[i];
   }
   unsigned char maskKey[4] = {0, 0, 0, 0};
-  if (masked && sock_->Recv(maskKey, 4, 500) != 4) return;
+  if (masked && StreamRecv(maskKey, 4, body) != 4) return;
   if (len > 16u * 1024 * 1024) return;   // sanity cap
   std::vector<u8> payload((size_t)len);
   size_t got = 0;
   while (got < len) {
-    ssize_t n = sock_->Recv(payload.data() + got, (size_t)(len - got), 1000);
+    ssize_t n = StreamRecv(payload.data() + got, (size_t)(len - got), body);
     if (n <= 0) return;
     got += (size_t)n;
   }
@@ -767,7 +821,7 @@ void WebSocket::HandleCloseFrame(const WsMessage& frame) {
     reply[2] = frame.payload[0];
     reply[3] = frame.payload[1];
   }
-  if (sock_) sock_->Send(reply, 4);
+  if (sock_ || tlsSock_) StreamSend(reply, 4, Deadline::After(1000));
 }
 
 //----------------------------------------------------------------------------

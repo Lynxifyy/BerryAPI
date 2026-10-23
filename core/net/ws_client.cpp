@@ -15,6 +15,7 @@
 
 #include "berry/logger.h"
 #include "berry/net.h"
+#include "berry/tls.h"
 #include "berry/url.h"
 
 #include <vector>
@@ -35,13 +36,18 @@ const char* WsOpcodeName(u8 op) {
   return "unknown";
 }
 
-/// The host of a `ws://` URL, lower-cased and bracket-stripped, so the grant
-/// check sees the same spelling the HTTP path would. Empty when the URL is not
-/// a `ws://` URL with a usable host.
+/// The host of a `ws://` or `wss://` URL, lower-cased and bracket-stripped, so
+/// the grant check sees the same spelling the HTTP path would. Empty when the
+/// URL is not a WebSocket URL with a usable host.
 std::string WsHost(const std::string& url) {
-  const std::string kScheme = "ws://";
-  if (url.rfind(kScheme, 0) != 0) return std::string();
-  std::string rest = url.substr(kScheme.size());
+  std::string rest;
+  if (url.rfind("wss://", 0) == 0) {
+    rest = url.substr(6);
+  } else if (url.rfind("ws://", 0) == 0) {
+    rest = url.substr(5);
+  } else {
+    return std::string();
+  }
   const size_t slash = rest.find_first_of("/?#");
   std::string authority = slash == std::string::npos ? rest : rest.substr(0, slash);
   if (authority.empty() || authority.find('@') != std::string::npos) {
@@ -62,15 +68,20 @@ std::string WsHost(const std::string& url) {
   return host;
 }
 
-/// The egress check for a WebSocket URL: a ws:// URL, a usable host, and the
-/// same host grant the HTTP path enforces. The URL policy is written for
-/// http/https, so the equivalent ws rule (no IP literal, no private/reserved
+/// The egress check for a WebSocket URL: a ws:// or wss:// URL, a usable host,
+/// and the same host grant the HTTP path enforces. The URL policy is written
+/// for http/https, so the equivalent ws rule (no IP literal, no private/reserved
 /// address, unless the harness opted into loopback) is applied here directly
 /// rather than pretending the URL is http.
+///
+/// `wss://` is accepted (the transport now does a verified TLS handshake); it
+/// is never downgraded to `ws://`, because the caller asked for TLS.
 WsClientError CheckDestination(const std::string& url,
                                const CapabilitySet& granted,
                                const UrlPolicy& policy, std::string* host) {
-  if (url.rfind("wss://", 0) == 0) return WsClientError::BadUrl;  // TLS absent
+  if (url.rfind("wss://", 0) == 0 && !TlsSocket::Available()) {
+    return WsClientError::BadUrl;   // TLS absent: fail closed
+  }
   const std::string h = WsHost(url);
   if (h.empty()) return WsClientError::BadUrl;
   const bool loopbackHttp = policy.allowLoopbackHttp && IsLoopbackHost(h);

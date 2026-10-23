@@ -238,7 +238,9 @@ using WsCloseCb = std::function<void(int code, const std::string& reason)>;
 
 class BERRY_API WebSocket {
  public:
-  WebSocket() = default;
+  // Out of line: the two transport members are incomplete here (forward
+  // declared), and a unique_ptr's deleter needs the complete type.
+  WebSocket();
   ~WebSocket();
 
   bool Connect(const char* url, int timeoutMs = 8000);
@@ -255,11 +257,24 @@ class BERRY_API WebSocket {
   void OnMessage(WsMessageCb cb) { onMessage_ = std::move(cb); }
   void OnClose(WsCloseCb cb) { onClose_ = std::move(cb); }
 
+  /// True when the connection was opened over `wss://`.
+  bool isTls() const { return tls_; }
+
  private:
   bool SendFrame(WsOpcode op, const void* payload, size_t len);
   void HandleCloseFrame(const WsMessage& frame);
 
+  /// Transport dispatch: the connection is either a plaintext `TcpSocket` or a
+  /// verified `TlsSocket`. One of the two is live at a time; these keep the
+  /// frame code from caring which.
+  ssize_t StreamSend(const void* data, size_t len, const Deadline& dl);
+  ssize_t StreamRecv(void* buf, size_t len, const Deadline& dl);
+  bool StreamWaitReadable(const Deadline& dl);
+  void StreamClose();
+
   std::unique_ptr<TcpSocket> sock_;
+  std::unique_ptr<TlsSocket> tlsSock_;
+  bool tls_ = false;
   std::mutex sendMutex_;
   std::string err_;
   bool open_ = false;

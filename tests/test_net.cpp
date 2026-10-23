@@ -112,9 +112,11 @@ int main() {
     CHECK(weirdResp.body.empty());
     CHECK(weirdResp.reason.find("unsupported scheme") != std::string::npos);
 
-    // A wss:// websocket is refused before any socket is opened.
+    // A wss:// URL is accepted by the transport (the egress policy is checked
+    // by the script-facing pool, not here); the connect fails only because the
+    // host is not reachable in a test, never by refusing the scheme.
     WebSocket wss;
-    CHECK(!wss.Connect("wss://example.com/ws"));
+    CHECK(!wss.Connect("wss://example.com/ws", 1000));
     // A malformed ws url is refused.
     WebSocket bad;
     CHECK(!bad.Connect("http://example.com/ws"));
@@ -297,9 +299,11 @@ int main() {
     WsClientError err = WsClientError::Ok;
     WsClientPool pool;
 
-    // A wss:// URL fails closed (TLS is not implemented).
+    // A wss:// URL is accepted by the egress policy now (TLS is implemented);
+    // the connect fails because the host is unreachable in a test, not because
+    // the scheme was refused.
     CHECK(pool.Connect("wss://example.com/ws", wildcard, loopback, 1000, &err) == 0);
-    CHECK(err == WsClientError::BadUrl);
+    CHECK(err == WsClientError::ConnectFailed);
     // A non-ws scheme is refused.
     CHECK(pool.Connect("http://example.com/ws", wildcard, loopback, 1000, &err) == 0);
     CHECK(err == WsClientError::BadUrl);

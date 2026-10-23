@@ -37,6 +37,27 @@ make lib             # builds build/libBerryAPI.so
   editing a header rebuilds every translation unit that includes it. Without
   this a stale object can link against a changed struct layout and crash.
 
+## Network / TLS
+
+- `Berry::TlsSocket` (`core/net/tls.cpp`, `include/berry/tls.h`) is the verified
+  TLS client under HTTPS (`HttpRequest`) and WSS (`WebSocket`). mbedTLS is a
+  vendored C dependency (`third_party/mbedtls`, Apache-2.0); its headers are
+  behind a pimpl so no caller needs its include path.
+- The handshake is `MBEDTLS_SSL_VERIFY_REQUIRED` with the URL host set as the
+  expected name, so an untrusted chain, an expired certificate, or a
+  certificate for another name all fail. There is deliberately **no**
+  "skip verify" / "insecure" mode. When the CA store cannot be loaded, `Connect`
+  refuses rather than trusting anything.
+- Every wait (connect, handshake, each read) is clamped to one absolute
+  `Deadline` for the whole operation, so a peer that dribbles bytes cannot
+  extend a request past its timeout. `Deadline::After`/`expired`/`remainingMs`
+  live in `include/berry/net.h`.
+- mbedTLS is compiled with the vendored client config in the `.so`; the host
+  tests rebuild it with `tests/tls_test_config` (server role) so a test can run
+  a **real** handshake (`tests/shim_tls.h`). `core/net/tls.cpp` is recompiled
+  with the same config as the objects it links (a struct-layout mismatch there
+  fails at runtime, not at link time).
+
 ## Scripting layer
 
 - `api/berry.idl` is the single source of truth for the script API; run
