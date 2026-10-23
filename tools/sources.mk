@@ -65,6 +65,7 @@ CORE_SRC := \
   core/script/audio.cpp \
   core/script/packet.cpp \
   core/script/record.cpp \
+  core/replay/replay_format.cpp \
   core/script/jsonrpc_client.cpp \
   core/net/rpc.cpp \
   core/script/layout.cpp \
@@ -86,6 +87,14 @@ ED25519_SRC := \
   third_party/ed25519/keypair.c \
   third_party/ed25519/sign.c \
   third_party/ed25519/verify.c
+
+# Vendored LZ4 (C): the block compressor behind the replay container
+# (berry/replay_format.h). Only lib/ is vendored (BSD-2-Clause); the block API
+# is used directly, so no LZ4 frame layer is needed. See
+# third_party/lz4/PROVENANCE.md.
+LZ4_SRC := \
+  third_party/lz4/lib/lz4.c \
+  third_party/lz4/lib/lz4hc.c
 
 # Vendored mbedTLS (C): the client-side TLS 1.2/1.3 stack behind Berry::TlsSocket.
 # It is compiled with the trimmed third_party/mbedtls/include/mbedtls/
@@ -282,3 +291,6 @@ LUAU_SRC := $(LUAU_AST_SRC) $(LUAU_COMPILER_SRC) $(LUAU_VM_SRC)
 
 # Include roots Luau expects (Common is header-only).
 LUAU_INCLUDES := -Ithird_party/luau/Common/include -Ithird_party/luau/Ast/include -Ithird_party/luau/Compiler/include -Ithird_party/luau/VM/include
+
+# Include root LZ4 expects (its headers are used as "lz4.h").
+LZ4_INCLUDES := -Ithird_party/lz4/lib
