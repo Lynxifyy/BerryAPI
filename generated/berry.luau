@@ -320,6 +320,66 @@ export type Hud = {
   tween: (widget: WidgetId, prop: string, to: number, ms: number) -> (),
 }
 
+-- Capability required: hud.
+export type Ui = {
+  -- Opens a UI frame. Call once at the top of a frame hook, before any window. If the previous frame was left open (a script faulted between begin and end), the stale frame is aborted here rather than presented.
+  begin_frame: () -> (),
+  -- Publishes the frame built since `begin_frame` so the render thread can draw and hit-test it. Call once at the end of the frame hook. A no-op when no frame is open.
+  end_frame: () -> (),
+  -- Opens a window at (x, y) with a content viewport of (w, h), returning true when its content should be built. Must be called between `begin_frame` and `end_frame`; outside a frame it returns false. The window's own title bar toggles collapse; dragging it moves the window. Content taller than h scrolls with the wheel.
+  begin_window: (title: string, x: number, y: number, w: number, h: number) -> boolean,
+  -- Closes the window opened by `begin_window`. Must be called even when `begin_window` returned false.
+  end_window: () -> (),
+  -- A push button. The result's `clicked` is true on the frame the press is released inside it.
+  button: (label: string) -> {[string]: any},
+  -- A checkbox. Pass the current value; the result's `toggled` is true on a click and `value` is the new value (1 or 0).
+  checkbox: (label: string, value: boolean) -> {[string]: any},
+  -- A horizontal slider. Pass the current value; a drag returns the new one in `value` with `changed` set. A degenerate range (hi <= lo) leaves the value untouched.
+  slider_float: (label: string, value: number, lo: number, hi: number) -> {[string]: any},
+  -- An integer slider, rounding the drag to whole steps.
+  slider_int: (label: string, value: number, lo: number, hi: number) -> {[string]: any},
+  -- A single-line text field. Pass the current text; typed characters arrive in `text` with `changed` set. Backspace (UTF-8 aware) and Enter are handled; the field stops at 256 bytes.
+  input_text: (label: string, value: string) -> {[string]: any},
+  -- A collapsible section header. Pass the current open state; the returned value is the new one. Indent the children while open.
+  collapsing_header: (label: string, open: boolean) -> boolean,
+  -- Opens a tab bar. Returns false when it could not be opened (too many nested bars), in which case `end_tab_bar` must not be called.
+  begin_tab_bar: (id: string) -> boolean,
+  end_tab_bar: () -> (),
+  -- Opens one tab, returning true when it is the selected one so its content should be built. Every `begin_tab_item` must be paired with `end_tab_item`.
+  begin_tab_item: (label: string) -> boolean,
+  end_tab_item: () -> (),
+  -- Non-interactive text at the current cursor.
+  text: (text: string) -> (),
+  -- Coloured text using a semantic theme role: window_bg, title_bg, title_text, text, muted, accent, frame_bg, frame_hover, frame_active, border, good, warn or bad.
+  text_colored: (role: string, text: string) -> (),
+  -- A 0..1 progress bar with an optional centred overlay.
+  progress_bar: (fraction: number, overlay: string) -> (),
+  -- A horizontal rule across the content width.
+  separator: () -> (),
+  -- A blank row.
+  spacing: () -> (),
+  -- Keeps the next widget on the same line as the previous one.
+  same_line: () -> (),
+  -- Reserves an empty box of (w, h).
+  dummy: (w: number, h: number) -> (),
+  -- Indents subsequent widgets by one level.
+  indent: () -> (),
+  -- Reverses one level of indent.
+  unindent: () -> (),
+  -- A bulleted line.
+  bullet_text: (text: string) -> (),
+  -- Selects the theme: \"dark\" (the default, flat) or \"glass\" (translucent, rounded, iOS-style). An unknown name is refused (fail closed) and the theme is unchanged.
+  set_theme: (name: string) -> boolean,
+  -- The active theme's name.
+  theme: () -> string,
+  -- The layer's counters as {frames, windows, widgets, hovered, clicked}.
+  stats: () -> {[string]: any},
+  -- True while any window is being dragged, so a caller can suppress camera input.
+  any_window_dragging: () -> boolean,
+  -- Drops every window's persistent state (drag offsets, scroll, collapse).
+  reset: () -> (),
+}
+
 -- Capability required: perf.
 export type Perf = {
   -- Frame timing and quality controls.

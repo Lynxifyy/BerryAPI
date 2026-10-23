@@ -137,6 +137,43 @@ ScriptValue Vec3Value(const Vec3& v) {
   return ScriptValue::Tbl(std::move(t));
 }
 
+/// An immediate-mode UI interaction as a script table. Every field is always
+/// present, so a script can read `r.clicked` without a nil check.
+ScriptValue UiResultValue(const UiResult& r) {
+  ScriptTable t;
+  t["hovered"] = ScriptValue::Bool(r.hovered);
+  t["active"] = ScriptValue::Bool(r.active);
+  t["clicked"] = ScriptValue::Bool(r.clicked);
+  t["changed"] = ScriptValue::Bool(r.changed);
+  t["toggled"] = ScriptValue::Bool(r.toggled);
+  t["value"] = ScriptValue::Num((f64)r.value);
+  t["text"] = ScriptValue::Str(r.text);
+  return ScriptValue::Tbl(std::move(t));
+}
+
+/// Maps a semantic colour-role name to its enum. Fail closed: an unknown name
+/// returns false and leaves `out` untouched.
+bool UiColorRoleFromName(const std::string& raw, UiColorRole* out) {
+  const std::string n = Lower(raw);
+  UiColorRole role;
+  if (n == "window_bg") role = UiColorRole::WindowBg;
+  else if (n == "title_bg") role = UiColorRole::TitleBg;
+  else if (n == "title_text") role = UiColorRole::TitleText;
+  else if (n == "text") role = UiColorRole::Text;
+  else if (n == "muted") role = UiColorRole::Muted;
+  else if (n == "accent") role = UiColorRole::Accent;
+  else if (n == "frame_bg") role = UiColorRole::FrameBg;
+  else if (n == "frame_hover") role = UiColorRole::FrameHover;
+  else if (n == "frame_active") role = UiColorRole::FrameActive;
+  else if (n == "border") role = UiColorRole::Border;
+  else if (n == "good") role = UiColorRole::Good;
+  else if (n == "warn") role = UiColorRole::Warn;
+  else if (n == "bad") role = UiColorRole::Bad;
+  else return false;
+  *out = role;
+  return true;
+}
+
 /// A finite number clamped into [lo, hi]; non-finite input yields `fallback`.
 /// Used for coordinates a script feeds to the renderer, so a NaN cannot reach
 /// the draw list.
@@ -278,6 +315,26 @@ void ScriptApi::InitFrameHook() {
             lastFrameMs_ = now;
             services_.pvp->Update(dt, now);
             services_.pvp->Present(*services_.hud, *services_.renderer, screen);
+          }
+        }
+        // The immediate-mode UI presents after the HUD and the PvP overlay, so a
+        // script window sits above the retained widgets. It reads the pointer and
+        // typed text from the input snapshot, hit-tests the frame the worker
+        // built, draws it, and publishes the results the worker reads next frame.
+        if (services_.ui && services_.renderer) {
+          const Vec2 screen = screenSize();
+          if (screen.x > 0 && screen.y > 0) {
+            UiLayer::Input in;
+            if (services_.input) {
+              const InputState& st = services_.input->state();
+              in.pointer = st.pointer;
+              in.mouseDown = st.attack;
+              in.wheel = services_.input->ConsumeWheel();
+              in.typed = services_.input->ConsumeText();
+              in.backspace = services_.input->ConsumeKeyPress("backspace");
+              in.enter = services_.input->ConsumeKeyPress("enter");
+            }
+            services_.ui->Present(*services_.renderer, in);
           }
         }
         // The script-module overlay draws last, on top, when a user turned it
@@ -1824,6 +1881,214 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
       if (prop == "value") services_.hud->TweenValue(id, to, ms);
       else services_.hud->TweenOpacity(id, to, ms);
     });
+    return ScriptValue::Nil();
+  });
+
+  //--- Ui (immediate-mode UI) ----------------------------------------------
+  //
+  // Every call builds one widget and reads back the interaction the render
+  // thread published for it on the previous frame. The result table is the
+  // script's whole view of an interaction:
+  //
+  //   {hovered, active, clicked, changed, toggled, value, text}
+  //
+  // A call with no UI layer bound fails closed: the builder returns an inert
+  // result (all false, value 0, text ""), so a script can run against a host
+  // that has no overlay without crashing or observing a phantom click.
+  //
+  // Frame contract (the ImGui model): a frame hook opens with `ui.begin_frame`,
+  // builds any number of windows with `begin_window`/`end_window`, then calls
+  // `ui.end_frame` to publish. `begin_frame` is also the recovery point: if the
+  // previous hook faulted between begin and end, the half-built frame is
+  // aborted here rather than presented. A window built outside a frame is
+  // refused, so a script that forgets `begin_frame` draws nothing instead of
+  // corrupting the previous frame.
+  install("ui.begin_frame", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.ui) return ScriptValue::Nil();
+    if (uiFrameOpen_) {
+      // A previous hook faulted mid-build; drop the stale frame.
+      services_.ui->AbortFrame();
+      uiFrameOpen_ = false;
+    }
+    services_.ui->BeginFrame();
+    uiFrameOpen_ = true;
+    return ScriptValue::Nil();
+  });
+
+  install("ui.end_frame", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.ui || !uiFrameOpen_) return ScriptValue::Nil();
+    services_.ui->EndFrame();
+    uiFrameOpen_ = false;
+    return ScriptValue::Nil();
+  });
+
+  install("ui.begin_window", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui || !uiFrameOpen_) return ScriptValue::Bool(false);
+    const std::string title = args[0].ToDisplay();
+    const f32 x = (f32)args[1].AsNumber();
+    const f32 y = (f32)args[2].AsNumber();
+    const f32 w = (f32)args[3].AsNumber();
+    const f32 h = (f32)args[4].AsNumber();
+    return ScriptValue::Bool(services_.ui->BeginWindow(title, Vec2(x, y), Vec2(w, h)));
+  });
+
+  install("ui.end_window", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui && uiFrameOpen_) services_.ui->EndWindow();
+    return ScriptValue::Nil();
+  });
+
+  install("ui.button", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return UiResultValue(UiResult{});
+    return UiResultValue(services_.ui->Button(args[0].ToDisplay()));
+  });
+
+  install("ui.checkbox", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return UiResultValue(UiResult{});
+    return UiResultValue(services_.ui->Checkbox(args[0].ToDisplay(), args[1].Truthy()));
+  });
+
+  install("ui.slider_float", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return UiResultValue(UiResult{});
+    return UiResultValue(services_.ui->SliderFloat(
+        args[0].ToDisplay(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber(),
+        (f32)args[3].AsNumber()));
+  });
+
+  install("ui.slider_int", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return UiResultValue(UiResult{});
+    return UiResultValue(services_.ui->SliderInt(
+        args[0].ToDisplay(), (i32)args[1].AsNumber(), (i32)args[2].AsNumber(),
+        (i32)args[3].AsNumber()));
+  });
+
+  install("ui.input_text", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return UiResultValue(UiResult{});
+    return UiResultValue(services_.ui->InputText(args[0].ToDisplay(),
+                                                 args[1].ToDisplay()));
+  });
+
+  install("ui.collapsing_header", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return ScriptValue::Bool(args[1].Truthy());
+    return ScriptValue::Bool(
+        services_.ui->CollapsingHeader(args[0].ToDisplay(), args[1].Truthy()));
+  });
+
+  install("ui.begin_tab_bar", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.ui->BeginTabBar(args[0].ToDisplay()));
+  });
+
+  install("ui.end_tab_bar", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui) services_.ui->EndTabBar();
+    return ScriptValue::Nil();
+  });
+
+  install("ui.begin_tab_item", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.ui->BeginTabItem(args[0].ToDisplay()));
+  });
+
+  install("ui.end_tab_item", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui) services_.ui->EndTabItem();
+    return ScriptValue::Nil();
+  });
+
+  install("ui.text", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (services_.ui) services_.ui->Text(args[0].ToDisplay());
+    return ScriptValue::Nil();
+  });
+
+  install("ui.text_colored", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return ScriptValue::Nil();
+    UiColorRole role;
+    if (!UiColorRoleFromName(args[0].ToDisplay(), &role)) {
+      ctx.RaiseError("ui.text_colored: unknown colour role '" + args[0].ToDisplay() + "'");
+      return ScriptValue::Nil();
+    }
+    services_.ui->TextColored(role, args[1].ToDisplay());
+    return ScriptValue::Nil();
+  });
+
+  install("ui.progress_bar", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (services_.ui) services_.ui->ProgressBar((f32)args[0].AsNumber(), args[1].ToDisplay());
+    return ScriptValue::Nil();
+  });
+
+  install("ui.separator", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui) services_.ui->Separator();
+    return ScriptValue::Nil();
+  });
+
+  install("ui.spacing", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui) services_.ui->Spacing();
+    return ScriptValue::Nil();
+  });
+
+  install("ui.same_line", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui) services_.ui->SameLine();
+    return ScriptValue::Nil();
+  });
+
+  install("ui.dummy", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (services_.ui) services_.ui->Dummy(Vec2((f32)args[0].AsNumber(), (f32)args[1].AsNumber()));
+    return ScriptValue::Nil();
+  });
+
+  install("ui.indent", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui) services_.ui->Indent();
+    return ScriptValue::Nil();
+  });
+
+  install("ui.unindent", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui) services_.ui->Unindent();
+    return ScriptValue::Nil();
+  });
+
+  install("ui.bullet_text", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (services_.ui) services_.ui->BulletText(args[0].ToDisplay());
+    return ScriptValue::Nil();
+  });
+
+  install("ui.set_theme", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return ScriptValue::Bool(false);
+    const std::string name = Lower(args[0].ToDisplay());
+    // Fail closed: an unknown theme name changes nothing.
+    if (name == "dark") { services_.ui->SetTheme(UiTheme::Dark()); return ScriptValue::Bool(true); }
+    if (name == "glass") { services_.ui->SetTheme(UiTheme::Glass()); return ScriptValue::Bool(true); }
+    return ScriptValue::Bool(false);
+  });
+
+  install("ui.theme", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.ui) return ScriptValue::Str("none");
+    // The layer stores the resolved theme, not a name; report the name by
+    // matching the two built-ins on the fields that distinguish them.
+    const UiTheme t = services_.ui->theme();
+    const UiTheme glass = UiTheme::Glass();
+    if (t.windowBg.a == glass.windowBg.a && t.rounding == glass.rounding) {
+      return ScriptValue::Str("glass");
+    }
+    return ScriptValue::Str("dark");
+  });
+
+  install("ui.stats", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.ui) return ScriptValue::Nil();
+    const UiStats s = services_.ui->stats();
+    ScriptTable t;
+    t["frames"] = ScriptValue::Num((f64)s.frames);
+    t["windows"] = ScriptValue::Num((f64)s.windows);
+    t["widgets"] = ScriptValue::Num((f64)s.widgets);
+    t["hovered"] = ScriptValue::Num((f64)s.hovered);
+    t["clicked"] = ScriptValue::Num((f64)s.clicked);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("ui.any_window_dragging", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.ui) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.ui->anyWindowDragging());
+  });
+
+  install("ui.reset", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui) services_.ui->Reset();
     return ScriptValue::Nil();
   });
 

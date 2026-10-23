@@ -193,6 +193,35 @@ inline const BindingSpec* BindingSpecs() {
       {"hud.attach", CapKind::Hud, 1, "Hud"},
       {"hud.set_visible", CapKind::Hud, 2, "Hud"},
       {"hud.tween", CapKind::Hud, 4, "Hud"},
+      {"ui.begin_frame", CapKind::Hud, 0, "Ui"},
+      {"ui.end_frame", CapKind::Hud, 0, "Ui"},
+      {"ui.begin_window", CapKind::Hud, 5, "Ui"},
+      {"ui.end_window", CapKind::Hud, 0, "Ui"},
+      {"ui.button", CapKind::Hud, 1, "Ui"},
+      {"ui.checkbox", CapKind::Hud, 2, "Ui"},
+      {"ui.slider_float", CapKind::Hud, 4, "Ui"},
+      {"ui.slider_int", CapKind::Hud, 4, "Ui"},
+      {"ui.input_text", CapKind::Hud, 2, "Ui"},
+      {"ui.collapsing_header", CapKind::Hud, 2, "Ui"},
+      {"ui.begin_tab_bar", CapKind::Hud, 1, "Ui"},
+      {"ui.end_tab_bar", CapKind::Hud, 0, "Ui"},
+      {"ui.begin_tab_item", CapKind::Hud, 1, "Ui"},
+      {"ui.end_tab_item", CapKind::Hud, 0, "Ui"},
+      {"ui.text", CapKind::Hud, 1, "Ui"},
+      {"ui.text_colored", CapKind::Hud, 2, "Ui"},
+      {"ui.progress_bar", CapKind::Hud, 2, "Ui"},
+      {"ui.separator", CapKind::Hud, 0, "Ui"},
+      {"ui.spacing", CapKind::Hud, 0, "Ui"},
+      {"ui.same_line", CapKind::Hud, 0, "Ui"},
+      {"ui.dummy", CapKind::Hud, 2, "Ui"},
+      {"ui.indent", CapKind::Hud, 0, "Ui"},
+      {"ui.unindent", CapKind::Hud, 0, "Ui"},
+      {"ui.bullet_text", CapKind::Hud, 1, "Ui"},
+      {"ui.set_theme", CapKind::Hud, 1, "Ui"},
+      {"ui.theme", CapKind::Hud, 0, "Ui"},
+      {"ui.stats", CapKind::Hud, 0, "Ui"},
+      {"ui.any_window_dragging", CapKind::Hud, 0, "Ui"},
+      {"ui.reset", CapKind::Hud, 0, "Ui"},
       {"perf.frame_time_ms", CapKind::Perf, 0, "Perf"},
       {"perf.stats", CapKind::Perf, 0, "Perf"},
       {"perf.quality", CapKind::Perf, 0, "Perf"},
@@ -256,7 +285,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 231; }
+inline size_t BindingSpecCount() { return 260; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -477,6 +506,37 @@ inline const char* const kHudNames[] = {
     "hud.set_visible",
     "hud.tween",
 };
+inline const char* const kUiNames[] = {
+    "ui.begin_frame",
+    "ui.end_frame",
+    "ui.begin_window",
+    "ui.end_window",
+    "ui.button",
+    "ui.checkbox",
+    "ui.slider_float",
+    "ui.slider_int",
+    "ui.input_text",
+    "ui.collapsing_header",
+    "ui.begin_tab_bar",
+    "ui.end_tab_bar",
+    "ui.begin_tab_item",
+    "ui.end_tab_item",
+    "ui.text",
+    "ui.text_colored",
+    "ui.progress_bar",
+    "ui.separator",
+    "ui.spacing",
+    "ui.same_line",
+    "ui.dummy",
+    "ui.indent",
+    "ui.unindent",
+    "ui.bullet_text",
+    "ui.set_theme",
+    "ui.theme",
+    "ui.stats",
+    "ui.any_window_dragging",
+    "ui.reset",
+};
 inline const char* const kPerfNames[] = {
     "perf.frame_time_ms",
     "perf.stats",
@@ -568,6 +628,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Ws", kWsNames, 10},
       {"JsonRpc", kJsonRpcNames, 1},
       {"Hud", kHudNames, 5},
+      {"Ui", kUiNames, 29},
       {"Perf", kPerfNames, 11},
       {"Input", kInputNames, 3},
       {"Cosmetic", kCosmeticNames, 9},
@@ -579,7 +640,7 @@ inline const ModuleBindings* ModuleBindingTable() {
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 22; }
+inline size_t ModuleBindingCount() { return 23; }
 
 }  // namespace api
 }  // namespace Berry

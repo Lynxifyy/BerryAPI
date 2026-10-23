@@ -263,6 +263,50 @@ static void TestFrameHookDrawsCosmetics() {
   eng.Detach();
 }
 
+static void TestFrameHookPresentsUi() {
+  Renderer renderer;
+  Berry::Test::CaptureRenderSeam seam;
+  renderer.BindSeam(&seam);
+  CameraState cam;
+  cam.width = 1280;
+  cam.height = 720;
+  cam.valid = true;
+  renderer.SetCamera(cam);
+
+  UiLayer ui;
+  InputObserver input;
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.ui = &ui;
+  services.input = &input;
+  ScriptApi api(services);
+
+  // The worker builds a window with one button.
+  ui.BeginFrame();
+  ui.BeginWindow("W", Vec2(0, 0), Vec2(200, 150));
+  ui.Button("Go");
+  ui.EndWindow();
+  ui.EndFrame();
+
+  renderer.BeginFrame(Vec2(1280, 720));
+  Engine& eng = Engine::Instance();
+  eng.Bootstrap();
+  CHECK(eng.Attach());
+  // The embedder publishes the frame size each frame; the overlay hooks skip a
+  // zero-sized frame, so this must be set before OnFrame.
+  api.PublishFrame(16.0f, Vec2(1280, 720));
+  eng.OnFrame();  // emits berry:frame; the hook presents the UI
+  renderer.EndFrame();
+  eng.Detach();
+
+  // The window background, the button and the caption all reached the seam.
+  CHECK(seam.rects >= 2);
+  CHECK(seam.texts >= 1);
+  // Presenting published the button's result, which the next build can read.
+  const UiStats st = ui.stats();
+  CHECK(st.widgets >= 3);
+}
+
 static void TestQueueIsBoundedAndFailsClosed() {
   RenderCommandQueue q(2);
   int ran = 0;
@@ -1431,6 +1475,253 @@ static void TestCombatStateFailsClosedWithoutService() {
 
 
 
+static void TestUiBindings() {
+  UiLayer ui;
+  Renderer renderer;
+  InputObserver input;
+  ScriptApi::Services services;
+  services.ui = &ui;
+  services.renderer = &renderer;
+  services.input = &input;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> grant = {"hud"};
+
+  // A script's UI calls run inside an explicit frame: begin_frame ... end_frame.
+  CHECK(Call(bindings, "ui.begin_frame", {}, grant, &out) == ScriptStatus::Ok);
+
+  // begin_window opens and returns true for a fresh (expanded) window.
+  CHECK(Call(bindings, "ui.begin_window",
+             {ScriptValue::Str("W"), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(200), ScriptValue::Num(150)},
+             grant, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  // A widget returns a table with every field present.
+  CHECK(Call(bindings, "ui.button", {ScriptValue::Str("Go")}, grant, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(out.AsTable()->count("hovered") == 1);
+  CHECK(out.AsTable()->count("clicked") == 1);
+  CHECK(out.AsTable()->count("value") == 1);
+  CHECK(out.AsTable()->count("text") == 1);
+
+  CHECK(Call(bindings, "ui.end_window", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "ui.end_frame", {}, grant, &out) == ScriptStatus::Ok);
+
+  // The frame the script built is now ready to present.
+  const auto widgets = ui.Widgets();
+  CHECK(!widgets.empty());
+
+  // The present half publishes results, and the next build reads them: simulate
+  // a click on the button by driving the layer's own hit-test.
+  UiWidget button;
+  bool found = false;
+  for (const auto& w : widgets) {
+    if (w.kind == UiKind::Button) { button = w; found = true; }
+  }
+  CHECK(found);
+  const Vec2 centre((button.min.x + button.max.x) * 0.5f,
+                    (button.min.y + button.max.y) * 0.5f);
+  UiLayer::Input down;
+  down.pointer = centre;
+  down.mouseDown = true;
+  ui.Update(down);
+  UiLayer::Input up;
+  up.pointer = centre;
+  ui.Update(up);
+
+  // Rebuild the same frame; the button now reports clicked.
+  ui.BeginFrame();
+  CHECK(ui.BeginWindow("W", Vec2(0, 0), Vec2(200, 150)));
+  const UiResult r = ui.Button("Go");
+  ui.EndWindow();
+  ui.EndFrame();
+  CHECK(r.clicked);
+
+  // set_theme accepts the two known names and refuses anything else.
+  CHECK(Call(bindings, "ui.set_theme", {ScriptValue::Str("glass")}, grant, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(ui.theme().rounding == UiTheme::Glass().rounding);
+  CHECK(Call(bindings, "ui.set_theme", {ScriptValue::Str("nope")}, grant, &out) ==
+        ScriptStatus::Ok);
+  CHECK(!out.Truthy());  // refused, theme unchanged
+  CHECK(ui.theme().rounding == UiTheme::Glass().rounding);
+  CHECK(Call(bindings, "ui.theme", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(out.ToDisplay() == "glass");
+  CHECK(Call(bindings, "ui.set_theme", {ScriptValue::Str("dark")}, grant, &out) ==
+        ScriptStatus::Ok);
+  CHECK(Call(bindings, "ui.theme", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(out.ToDisplay() == "dark");
+
+  // stats and any_window_dragging answer.
+  CHECK(Call(bindings, "ui.stats", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(Call(bindings, "ui.any_window_dragging", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "ui.reset", {}, grant, &out) == ScriptStatus::Ok);
+
+  // text_colored refuses an unknown role rather than silently drawing nothing.
+  CHECK(Call(bindings, "ui.text_colored",
+             {ScriptValue::Str("nonsense"), ScriptValue::Str("hi")}, grant, &out) ==
+        ScriptStatus::Error);
+
+  // Without the hud grant the gate denies before the body runs.
+  CHECK(Call(bindings, "ui.button", {ScriptValue::Str("Go")}, {"render"}, &out) ==
+        ScriptStatus::CapabilityDenied);
+}
+
+static void TestUiBindingsFailClosedWithoutService() {
+  ScriptApi::Services services;   // no ui layer
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> grant = {"hud"};
+  // begin_window reports false and nothing is built; every widget returns an
+  // inert table; the no-op calls still succeed so a script can run unguarded.
+  CHECK(Call(bindings, "ui.begin_window",
+             {ScriptValue::Str("W"), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(100), ScriptValue::Num(100)},
+             grant, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "ui.button", {ScriptValue::Str("Go")}, grant, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(!out.AsTable()->at("clicked").Truthy());
+  CHECK(Call(bindings, "ui.end_window", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "ui.text", {ScriptValue::Str("hi")}, grant, &out) ==
+        ScriptStatus::Ok);
+  CHECK(Call(bindings, "ui.set_theme", {ScriptValue::Str("dark")}, grant, &out) ==
+        ScriptStatus::Ok);
+  CHECK(!out.Truthy());  // no layer -> refused
+  CHECK(Call(bindings, "ui.theme", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(out.ToDisplay() == "none");
+}
+
+static void TestUiThroughLuauScript() {
+  UiLayer ui;
+  Renderer renderer;
+  Berry::Test::CaptureRenderSeam seam;
+  renderer.BindSeam(&seam);
+  CameraState cam;
+  cam.width = 1280;
+  cam.height = 720;
+  cam.valid = true;
+  renderer.SetCamera(cam);
+
+  ScriptApi::Services services;
+  services.ui = &ui;
+  services.renderer = &renderer;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  // A real Luau chunk drives the whole surface through the namespace tables.
+  auto vm = std::unique_ptr<IScriptVm>(CreateLuauVm());
+  ScriptHost host("ui-script", Grant({"hud"}), std::move(vm));
+  host.SetBindings(&bindings);
+
+  const char* src =
+      "local clicks = 0\n"
+      "local M = {}\n"
+      "function M.draw()\n"
+      "  ui.begin_frame()\n"
+      "  local open = ui.begin_window('Panel', 10, 10, 220, 160)\n"
+      "  if open then\n"
+      "    ui.text('hello')\n"
+      "    local r = ui.button('Go')\n"
+      "    if r.clicked then clicks = clicks + 1 end\n"
+      "    ui.separator()\n"
+      "  end\n"
+      "  ui.end_window()\n"
+      "  ui.end_frame()\n"
+      "  return clicks\n"
+      "end\n"
+      "return M\n";
+  ScriptError err;
+  CHECK(host.Load(src, "ui-script", &err));
+
+  std::vector<ScriptValue> ret;
+  CHECK(host.RunHook("draw", {}, &ret) == ScriptStatus::Ok);
+  CHECK(ret.size() == 1 && ret[0].AsNumber() == 0);
+
+  // The frame reached the layer.
+  const auto widgets = ui.Widgets();
+  CHECK(widgets.size() >= 4);  // window bg, text, button, separator
+
+  // The binding layer bracketed the frame: it is closed after the hook.
+  CHECK(!ui.building());
+
+  // Present with a click on the button, then re-run the hook: the script sees
+  // the click through `r.clicked` and bumps its counter.
+  UiWidget button;
+  bool found = false;
+  for (const auto& w : widgets) {
+    if (w.kind == UiKind::Button) { button = w; found = true; }
+  }
+  CHECK(found);
+  const Vec2 centre((button.min.x + button.max.x) * 0.5f,
+                    (button.min.y + button.max.y) * 0.5f);
+  UiLayer::Input down;
+  down.pointer = centre;
+  down.mouseDown = true;
+  ui.Update(down);
+  UiLayer::Input up;
+  up.pointer = centre;
+  ui.Update(up);
+
+  ret.clear();
+  CHECK(host.RunHook("draw", {}, &ret) == ScriptStatus::Ok);
+  CHECK(ret.size() == 1 && ret[0].AsNumber() == 1);
+}
+
+static void TestUiFrameRecoveryAfterFault() {
+  UiLayer ui;
+  ScriptApi::Services services;
+  services.ui = &ui;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> grant = {"hud"};
+
+  // A hook opens a frame, builds a window, then faults before end_frame: the
+  // frame is left open.
+  CHECK(Call(bindings, "ui.begin_frame", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "ui.begin_window",
+             {ScriptValue::Str("W"), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(100), ScriptValue::Num(100)},
+             grant, &out) == ScriptStatus::Ok);
+  CHECK(ui.building());
+
+  // The next hook's begin_frame detects the stale frame, aborts it, and opens a
+  // fresh one; the half-built window from the faulted hook never publishes.
+  CHECK(Call(bindings, "ui.begin_frame", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(ui.building());
+  // Nothing was published, so the ready frame is still empty.
+  CHECK(ui.Widgets().empty());
+
+  // A window outside a frame is refused, so a script that forgets begin_frame
+  // cannot corrupt the published frame.
+  CHECK(Call(bindings, "ui.end_frame", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(!ui.building());
+  CHECK(Call(bindings, "ui.begin_window",
+             {ScriptValue::Str("X"), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(100), ScriptValue::Num(100)},
+             grant, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  // end_frame with no open frame is a harmless no-op.
+  CHECK(Call(bindings, "ui.end_frame", {}, grant, &out) == ScriptStatus::Ok);
+}
+
 static void TestModBindings() {
   ScriptModuleRegistry modules;
   ScriptApi::Services services;
@@ -1742,6 +2033,10 @@ int main() {
   TestPhase2PlayerAndWorldExtras();
   TestCombatStateBindings();
   TestCombatStateFailsClosedWithoutService();
+  TestUiBindings();
+  TestUiBindingsFailClosedWithoutService();
+  TestUiThroughLuauScript();
+  TestUiFrameRecoveryAfterFault();
   TestModBindings();
   TestFsAndAudioBindings();
   TestPvpBindings();
@@ -1752,6 +2047,7 @@ int main() {
   TestQueueIsBoundedAndFailsClosed();
   TestFrameHookDrainsQueue();
   TestFrameHookDrawsCosmetics();
+  TestFrameHookPresentsUi();
   TestPublishedReads();
   TestGovernorAndZoomWrites();
   TestCombatAndInputReads();

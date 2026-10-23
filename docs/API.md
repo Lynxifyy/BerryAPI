@@ -282,6 +282,42 @@ Capability: `hud`.
 | `hud.set_visible(widget: Widget, visible: bool) -> nil` | `hud` | - |
 | `hud.tween(widget: Widget, prop: string, to: number, ms: number) -> nil` | `hud` | - |
 
+## Ui
+
+Capability: `hud`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `ui.begin_frame() -> nil` | `hud` | Opens a UI frame. Call once at the top of a frame hook, before any window. If the previous frame was left open (a script faulted between begin and end), the stale frame is aborted here rather than presented. |
+| `ui.end_frame() -> nil` | `hud` | Publishes the frame built since `begin_frame` so the render thread can draw and hit-test it. Call once at the end of the frame hook. A no-op when no frame is open. |
+| `ui.begin_window(title: string, x: number, y: number, w: number, h: number) -> bool` | `hud` | Opens a window at (x, y) with a content viewport of (w, h), returning true when its content should be built. Must be called between `begin_frame` and `end_frame`; outside a frame it returns false. The window's own title bar toggles collapse; dragging it moves the window. Content taller than h scrolls with the wheel. |
+| `ui.end_window() -> nil` | `hud` | Closes the window opened by `begin_window`. Must be called even when `begin_window` returned false. |
+| `ui.button(label: string) -> Table` | `hud` | A push button. The result's `clicked` is true on the frame the press is released inside it. |
+| `ui.checkbox(label: string, value: bool) -> Table` | `hud` | A checkbox. Pass the current value; the result's `toggled` is true on a click and `value` is the new value (1 or 0). |
+| `ui.slider_float(label: string, value: number, lo: number, hi: number) -> Table` | `hud` | A horizontal slider. Pass the current value; a drag returns the new one in `value` with `changed` set. A degenerate range (hi <= lo) leaves the value untouched. |
+| `ui.slider_int(label: string, value: number, lo: number, hi: number) -> Table` | `hud` | An integer slider, rounding the drag to whole steps. |
+| `ui.input_text(label: string, value: string) -> Table` | `hud` | A single-line text field. Pass the current text; typed characters arrive in `text` with `changed` set. Backspace (UTF-8 aware) and Enter are handled; the field stops at 256 bytes. |
+| `ui.collapsing_header(label: string, open: bool) -> bool` | `hud` | A collapsible section header. Pass the current open state; the returned value is the new one. Indent the children while open. |
+| `ui.begin_tab_bar(id: string) -> bool` | `hud` | Opens a tab bar. Returns false when it could not be opened (too many nested bars), in which case `end_tab_bar` must not be called. |
+| `ui.end_tab_bar() -> nil` | `hud` | - |
+| `ui.begin_tab_item(label: string) -> bool` | `hud` | Opens one tab, returning true when it is the selected one so its content should be built. Every `begin_tab_item` must be paired with `end_tab_item`. |
+| `ui.end_tab_item() -> nil` | `hud` | - |
+| `ui.text(text: string) -> nil` | `hud` | Non-interactive text at the current cursor. |
+| `ui.text_colored(role: string, text: string) -> nil` | `hud` | Coloured text using a semantic theme role: window_bg, title_bg, title_text, text, muted, accent, frame_bg, frame_hover, frame_active, border, good, warn or bad. |
+| `ui.progress_bar(fraction: number, overlay: string) -> nil` | `hud` | A 0..1 progress bar with an optional centred overlay. |
+| `ui.separator() -> nil` | `hud` | A horizontal rule across the content width. |
+| `ui.spacing() -> nil` | `hud` | A blank row. |
+| `ui.same_line() -> nil` | `hud` | Keeps the next widget on the same line as the previous one. |
+| `ui.dummy(w: number, h: number) -> nil` | `hud` | Reserves an empty box of (w, h). |
+| `ui.indent() -> nil` | `hud` | Indents subsequent widgets by one level. |
+| `ui.unindent() -> nil` | `hud` | Reverses one level of indent. |
+| `ui.bullet_text(text: string) -> nil` | `hud` | A bulleted line. |
+| `ui.set_theme(name: string) -> bool` | `hud` | Selects the theme: \"dark\" (the default, flat) or \"glass\" (translucent, rounded, iOS-style). An unknown name is refused (fail closed) and the theme is unchanged. |
+| `ui.theme() -> string` | `hud` | The active theme's name. |
+| `ui.stats() -> Table` | `hud` | The layer's counters as {frames, windows, widgets, hovered, clicked}. |
+| `ui.any_window_dragging() -> bool` | `hud` | True while any window is being dragged, so a caller can suppress camera input. |
+| `ui.reset() -> nil` | `hud` | Drops every window's persistent state (drag offsets, scroll, collapse). |
+
 ## Perf
 
 Capability: `perf`.

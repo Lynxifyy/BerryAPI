@@ -49,6 +49,7 @@
 #include "berry/scriptmod.h"
 #include "berry/session_recorder.h"
 #include "berry/shader.h"
+#include "berry/ui.h"
 #include "berry/services.h"
 #include "berry/url.h"
 #include "berry/ws_client.h"
@@ -172,6 +173,9 @@ class BERRY_API ScriptApi {
     /// projectile prediction, hit accuracy, click budget). Null makes the
     /// `combat_state.*` bindings fail closed.
     CombatStateTracker* combatState = nullptr;
+    /// Immediate-mode UI layer. Null makes the `ui.*` bindings fail closed
+    /// (inert results, no window opens).
+    UiLayer* ui = nullptr;
   };
 
   ScriptApi();
@@ -276,6 +280,13 @@ class BERRY_API ScriptApi {
   /// The wall-clock ms of the last presented frame, for the PvP overlay's
   /// animation delta. Render thread only.
   u64 lastFrameMs_ = 0;
+
+  // Immediate-mode UI frame state. A script's `ui.begin_frame` opens the frame
+  // and `ui.end_frame` publishes it, so the embedder never calls
+  // BeginFrame/EndFrame itself. `uiFrameOpen_` also detects a hook that faulted
+  // between the two, so the next `begin_frame` aborts the stale frame instead of
+  // presenting it. Script-worker-thread only.
+  bool uiFrameOpen_ = false;
 };
 
 }  // namespace Berry
