@@ -361,6 +361,44 @@ static void TestClear() {
   CHECK(std::fabs(cs.maxReach() - 3.0f) < 1e-4f);
 }
 
+// The combat channels are script-facing: they must be exactly the names the IDL
+// declares (api/berry.idl `event combatPredicted(...)` etc.), because a script
+// awaits the literal string and the async layer does no name translation. A
+// probe on the literal only fires if the tracker publishes on it, so this pins
+// the emitted name to the documented one.
+static void TestEventChannelNames() {
+  CHECK(std::string(combat_event::Predicted()) == "combatPredicted");
+  CHECK(std::string(combat_event::Confirmed()) == "combatConfirmed");
+  CHECK(std::string(combat_event::Missed()) == "combatMissed");
+
+  CombatStateTracker cs;
+  const EntityId attacker{1, 0};
+  const EntityId victim{2, 0};
+
+  // Listeners registered on the literal IDL names, not on the accessors.
+  ChannelProbe predicted("combatPredicted");
+  ChannelProbe confirmed("combatConfirmed");
+  ChannelProbe missed("combatMissed");
+
+  cs.PredictHit(attacker, victim, 10);
+  CHECK(predicted.payloads.size() == 1);
+  CHECK(predicted.payloads[0] == "1:2");
+
+  CombatEvent evt;
+  evt.attacker = attacker;
+  evt.victim = victim;
+  evt.finalDamage = 4.0f;
+  evt.tick = 11;
+  CHECK(cs.ConfirmHit(evt, 11));
+  CHECK(confirmed.payloads.size() == 1);
+  CHECK(confirmed.payloads[0] == "1:2");
+
+  cs.PredictHit(attacker, victim, 20);
+  cs.Tick(20 + CombatStateTracker::kPredictionWindowTicks + 1);
+  CHECK(missed.payloads.size() == 1);
+  CHECK(missed.payloads[0] == "1:2");
+}
+
 int main() {
 TestHitboxHistory();
 TestHitboxEntityCapEvictsOldest();
@@ -371,6 +409,7 @@ TestProjectileResolve();
 TestHitPredictionAccuracy();
 TestClickBudget();
 TestClear();
+TestEventChannelNames();
 
   if (g_fail) {
     printf("test_combat_state: %d failure(s)\n", g_fail);

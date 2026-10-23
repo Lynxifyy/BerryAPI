@@ -43,11 +43,16 @@ namespace Berry {
 /// and never receives a pointer into game memory.
 namespace combat_event {
 /// A hit the local client predicted (the swing it believes will land).
-inline const char* Predicted() { return "berry:combat:predicted"; }
+///
+/// These are the script-facing channel names, so they match the IDL `event`
+/// declarations exactly and follow the same bare-camelCase convention as the
+/// world-diff channels (`entityEntered`, `blockChanged`). A script awaits
+/// `Events.once("combatPredicted")`; it never sees the internal bus name.
+inline const char* Predicted() { return "combatPredicted"; }
 /// A predicted hit the engine then confirmed.
-inline const char* Confirmed() { return "berry:combat:confirmed"; }
+inline const char* Confirmed() { return "combatConfirmed"; }
 /// A predicted hit that was never confirmed within the window.
-inline const char* Missed() { return "berry:combat:missed"; }
+inline const char* Missed() { return "combatMissed"; }
 }  // namespace combat_event
 
 /// The outcome of checking one applied hit against the reach limit. `valid` is
