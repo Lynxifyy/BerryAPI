@@ -33,6 +33,7 @@
 #include "berry/audio.h"
 #include "berry/combat.h"
 #include "berry/combat_state.h"
+#include "berry/animator.h"
 #include "berry/cosmetic.h"
 #include "berry/event.h"
 #include "berry/fs.h"
@@ -176,6 +177,12 @@ class BERRY_API ScriptApi {
     /// Immediate-mode UI layer. Null makes the `ui.*` bindings fail closed
     /// (inert results, no window opens).
     UiLayer* ui = nullptr;
+    /// Client-side keyframed animator. Null makes the `animator.*` bindings
+    /// fail closed (no clip is added, playback reports stopped).
+    Animator* animator = nullptr;
+    /// The skeleton seam that applies the animator's pose to the rendered rig.
+    /// Null makes `animator.target`/`set_target` fail closed.
+    AnimatedSkeletonSource* animatorSeam = nullptr;
   };
 
   ScriptApi();
@@ -280,6 +287,9 @@ class BERRY_API ScriptApi {
   /// The wall-clock ms of the last presented frame, for the PvP overlay's
   /// animation delta. Render thread only.
   u64 lastFrameMs_ = 0;
+  /// Frame clock for the animator, kept separate from lastFrameMs_ so a frame
+  /// with no PvP overlay still advances a playing clip at the real delta.
+  u64 lastAnimatorMs_ = 0;
 
   // Immediate-mode UI frame state. A script's `ui.begin_frame` opens the frame
   // and `ui.end_frame` publishes it, so the embedder never calls

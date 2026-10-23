@@ -317,6 +317,20 @@ void ScriptApi::InitFrameHook() {
             services_.pvp->Present(*services_.hud, *services_.renderer, screen);
           }
         }
+        // The animator advances on the frame clock, like the PvP overlay, so a
+        // clip a script plays actually moves the local rig. It drives the pose
+        // the cosmetic renderer resolves through (see AnimatedSkeletonSource);
+        // no clip playing means no advance and no pose change.
+        if (services_.animator) {
+          const u64 now = NowMs();
+          if (lastAnimatorMs_ != 0 && now > lastAnimatorMs_) {
+            // Advance takes seconds; the frame clock is milliseconds.
+            f32 dt = (f32)(now - lastAnimatorMs_) / 1000.0f;
+            if (dt > 0.1f) dt = 0.1f;   // a stall must not fast-forward a clip
+            services_.animator->Advance(dt);
+          }
+          lastAnimatorMs_ = now;
+        }
         // The immediate-mode UI presents after the HUD and the PvP overlay, so a
         // script window sits above the retained widgets. It reads the pointer and
         // typed text from the input snapshot, hit-tests the frame the worker
@@ -2411,6 +2425,209 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     // atomically; the return value is how many packs loaded cleanly.
     const PackLoadReport report = services_.packs->LoadDirectory();
     return ScriptValue::Num((f64)report.packsLoaded);
+  });
+
+  //--- Animator (keyframed local-rig animation; renders on this screen only) --
+  //
+  // Client-side only: a clip moves this client's own rendered bones through the
+  // AnimatedSkeletonSource seam. Nothing is sent and nothing writes game state.
+  // The pose tables are plain {px,py,pz, rx,ry,rz, scale} so the surface needs
+  // no vector type.
+  auto animatorOrFail = [this](ScriptContext& ctx, const char* who) -> Animator* {
+    if (!services_.animator) {
+      ctx.RaiseError(std::string(who) + ": animator unavailable");
+      return nullptr;
+    }
+    return services_.animator;
+  };
+  auto parseBone = [](ScriptContext& ctx, const char* who, const std::string& raw,
+                      Bone* out) -> bool {
+    const Bone b = BoneFromName(Lower(raw));
+    if (b == Bone::None || b == Bone::Count) {
+      ctx.RaiseError(std::string(who) + ": unknown bone '" + raw + "'");
+      return false;
+    }
+    *out = b;
+    return true;
+  };
+  auto poseTable = [](const Animator::BonePose& p, const char* boneName) {
+    ScriptTable t;
+    t["valid"] = ScriptValue::Bool(p.valid);
+    t["bone"] = ScriptValue::Str(boneName);
+    t["px"] = ScriptValue::Num((f64)p.position.x);
+    t["py"] = ScriptValue::Num((f64)p.position.y);
+    t["pz"] = ScriptValue::Num((f64)p.position.z);
+    t["rx"] = ScriptValue::Num((f64)p.rotation.x);
+    t["ry"] = ScriptValue::Num((f64)p.rotation.y);
+    t["rz"] = ScriptValue::Num((f64)p.rotation.z);
+    t["scale"] = ScriptValue::Num((f64)p.scale);
+    return t;
+  };
+
+  install("animator.add_clip", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.add_clip");
+    if (!a) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(a->AddClip(args[0].ToDisplay(), (f32)args[1].AsNumber(),
+                                        args[2].Truthy()));
+  });
+
+  install("animator.add_key", [this, animatorOrFail, parseBone](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.add_key");
+    if (!a) return ScriptValue::Bool(false);
+    Bone bone;
+    if (!parseBone(ctx, "animator.add_key", args[1].ToDisplay(), &bone)) {
+      return ScriptValue::Bool(false);
+    }
+    const Vec3 pos((f32)args[3].AsNumber(), (f32)args[4].AsNumber(), (f32)args[5].AsNumber());
+    const Vec3 rot((f32)args[6].AsNumber(), (f32)args[7].AsNumber(), (f32)args[8].AsNumber());
+    return ScriptValue::Bool(a->AddKey(args[0].ToDisplay(), bone, (f32)args[2].AsNumber(),
+                                       pos, rot, (f32)args[9].AsNumber()));
+  });
+
+  install("animator.remove_clip", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.remove_clip");
+    if (!a) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(a->RemoveClip(args[0].ToDisplay()));
+  });
+
+  install("animator.clear_clip", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.clear_clip");
+    if (!a) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(a->ClearClip(args[0].ToDisplay()));
+  });
+
+  install("animator.clip_count", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.clip_count");
+    if (!a) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)a->clipCount());
+  });
+
+  install("animator.has_clip", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.has_clip");
+    if (!a) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(a->hasClip(args[0].ToDisplay()));
+  });
+
+  install("animator.key_count", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.key_count");
+    if (!a) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)a->keyCount(args[0].ToDisplay()));
+  });
+
+  install("animator.play", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.play");
+    if (!a) return ScriptValue::Bool(false);
+    const std::string name = args[0].ToDisplay();
+    if (!a->Play(name)) {
+      ctx.RaiseError("animator.play: unknown clip '" + name + "'");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(true);
+  });
+
+  install("animator.stop", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.stop");
+    if (a) a->Stop();
+    return ScriptValue::Nil();
+  });
+
+  install("animator.reset", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.reset");
+    if (a) a->Reset();
+    return ScriptValue::Nil();
+  });
+
+  install("animator.playing", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.playing");
+    if (!a) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(a->playing());
+  });
+
+  install("animator.time", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.time");
+    if (!a) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)a->time());
+  });
+
+  install("animator.duration", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.duration");
+    if (!a) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)a->duration());
+  });
+
+  install("animator.current_clip", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.current_clip");
+    if (!a) return ScriptValue::Str("");
+    return ScriptValue::Str(a->currentClip());
+  });
+
+  install("animator.seek", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.seek");
+    if (!a) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(a->Seek((f32)args[0].AsNumber()));
+  });
+
+  install("animator.sample", [this, animatorOrFail, parseBone, poseTable](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.sample");
+    if (!a) return ScriptValue::Nil();
+    Bone bone;
+    if (!parseBone(ctx, "animator.sample", args[0].ToDisplay(), &bone)) {
+      return ScriptValue::Nil();
+    }
+    const Animator::BonePose p = a->Sample(bone, (f32)args[1].AsNumber());
+    return ScriptValue::Tbl(poseTable(p, BoneName(bone)));
+  });
+
+  install("animator.pose", [this, animatorOrFail, poseTable](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.pose");
+    if (!a) return ScriptValue::Nil();
+    const auto pose = a->SamplePose();
+    ScriptTable t;
+    for (size_t i = 0; i < pose.size(); ++i) {
+      t[std::to_string(i)] = ScriptValue::Tbl(poseTable(pose[i].second, BoneName(pose[i].first)));
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("animator.save", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.save");
+    if (!a) return ScriptValue::Str("");
+    return ScriptValue::Str(a->Save());
+  });
+
+  install("animator.load", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.load");
+    if (!a) return ScriptValue::Bool(false);
+    const std::string json = args[0].ToDisplay();
+    if (!a->Load(json)) {
+      ctx.RaiseError("animator.load: invalid animator document");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(true);
+  });
+
+  install("animator.clear", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.clear");
+    if (a) a->Clear();
+    return ScriptValue::Nil();
+  });
+
+  install("animator.target", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.animator || !services_.animatorSeam) { ctx.RaiseError("animator.target: animator unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.animatorSeam->target().raw);
+  });
+
+  install("animator.set_target", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.animator || !services_.animatorSeam) { ctx.RaiseError("animator.set_target: animator unavailable"); return ScriptValue::Nil(); }
+    const f64 raw = args[0].AsNumber();
+    if (!std::isfinite(raw) || raw < 0) {
+      ctx.RaiseError("animator.set_target: entity id must be a non-negative number");
+      return ScriptValue::Nil();
+    }
+    EntityId id;
+    id.raw = (u64)raw;
+    services_.animatorSeam->SetTarget(id);
+    return ScriptValue::Nil();
   });
 
   //--- Intent (what may be done on this server) ----------------------------

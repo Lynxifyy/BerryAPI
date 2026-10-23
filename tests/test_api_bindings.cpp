@@ -22,10 +22,12 @@
 #include "berry/services.h"
 #include "shim_level.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Berry;
@@ -260,6 +262,40 @@ static void TestFrameHookDrawsCosmetics() {
   eng.OnFrame();          // emits berry:frame; the hook draws the cape
   renderer.EndFrame();
   CHECK(seam.rects == 1);
+  eng.Detach();
+}
+
+static void TestFrameHookAdvancesAnimator() {
+  Renderer renderer;
+  Animator animator;
+  Test::ShimSkeleton base;
+  AnimatedSkeletonSource seam(&base, &animator);
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.animator = &animator;
+  services.animatorSeam = &seam;
+  ScriptApi api(services);
+
+  CHECK(animator.AddClip("clip", 10.0f, true));
+  CHECK(animator.AddKey("clip", Bone::Head, 0.0f, Vec3::Zero(), Vec3::Zero(), 1.0f));
+
+  Engine& eng = Engine::Instance();
+  eng.Bootstrap();
+  CHECK(eng.Attach());
+
+  // A frame with nothing playing does not advance.
+  eng.OnFrame();
+  CHECK(animator.time() == 0.0f);
+
+  // While playing, the frame clock advances the clip: the first frame sets the
+  // baseline, the next measures a real delta.
+  CHECK(animator.Play("clip"));
+  eng.OnFrame();
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  eng.OnFrame();
+  CHECK(animator.time() > 0.0f);
+
   eng.Detach();
 }
 
@@ -2012,6 +2048,152 @@ static void TestPvpBindings() {
   CHECK(Call(bareBindings, "pvp.combo", {}, {"hud"}, &out) == ScriptStatus::Error);
 }
 
+static void TestAnimatorBindings() {
+  Renderer renderer;
+  Animator animator;
+  Test::ShimSkeleton base;
+  AnimatedSkeletonSource seam(&base, &animator);
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.animator = &animator;
+  services.animatorSeam = &seam;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"cosmetic"};
+
+  // Author a clip through the bindings.
+  CHECK(Call(bindings, "animator.add_clip",
+             {ScriptValue::Str("wave"), ScriptValue::Num(1.0), ScriptValue::Bool(true)},
+             caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "animator.add_key",
+             {ScriptValue::Str("wave"), ScriptValue::Str("right_arm"), ScriptValue::Num(0.0),
+              ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(1.0)},
+             caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "animator.add_key",
+             {ScriptValue::Str("wave"), ScriptValue::Str("right_arm"), ScriptValue::Num(1.0),
+              ScriptValue::Num(0), ScriptValue::Num(2), ScriptValue::Num(0),
+              ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(1.0)},
+             caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  CHECK(Call(bindings, "animator.clip_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  CHECK(Call(bindings, "animator.has_clip", {ScriptValue::Str("wave")}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "animator.key_count", {ScriptValue::Str("wave")}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 2);
+
+  // Playback.
+  CHECK(Call(bindings, "animator.play", {ScriptValue::Str("wave")}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "animator.playing", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "animator.current_clip", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "wave");
+  CHECK(Call(bindings, "animator.duration", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(std::fabs(out.AsNumber() - 1.0) < 1e-6);
+
+  CHECK(Call(bindings, "animator.seek", {ScriptValue::Num(0.5)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  // sample returns a pose table with the interpolated offset.
+  CHECK(Call(bindings, "animator.sample",
+             {ScriptValue::Str("head"), ScriptValue::Num(0.5)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(out.Field("valid") && !out.Field("valid")->Truthy());   // head has no keys
+
+  CHECK(Call(bindings, "animator.sample",
+             {ScriptValue::Str("right_arm"), ScriptValue::Num(0.5)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(out.Field("valid") && out.Field("valid")->Truthy());
+  CHECK(out.Field("py") && std::fabs(out.Field("py")->AsNumber() - 1.0) < 1e-4);
+
+  // pose lists one entry per keyed bone.
+  CHECK(Call(bindings, "animator.pose", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(out.Field("0") != nullptr);
+
+  // An unknown bone is an error, not a fabricated pose.
+  CHECK(Call(bindings, "animator.sample",
+             {ScriptValue::Str("elbow"), ScriptValue::Num(0.0)}, caps, &out) != ScriptStatus::Ok);
+  // An unknown clip to play is an error.
+  CHECK(Call(bindings, "animator.play", {ScriptValue::Str("nope")}, caps, &out) != ScriptStatus::Ok);
+
+  // target is the seam's, defaulting to every entity.
+  CHECK(Call(bindings, "animator.target", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "animator.set_target", {ScriptValue::Num(42)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(seam.target().raw == 42);
+  CHECK(Call(bindings, "animator.target", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 42);
+
+  // save/load round trip through the bindings.
+  CHECK(Call(bindings, "animator.save", {}, caps, &out) == ScriptStatus::Ok);
+  const std::string doc = out.AsString();
+  CHECK(!doc.empty());
+  CHECK(Call(bindings, "animator.clear", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "animator.clip_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "animator.load", {ScriptValue::Str(doc)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "animator.clip_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  // A malformed document is an error and leaves the clips alone.
+  CHECK(Call(bindings, "animator.load", {ScriptValue::Str("{}")}, caps, &out) != ScriptStatus::Ok);
+  // A document from a version this build does not write is refused too.
+  CHECK(Call(bindings, "animator.load",
+             {ScriptValue::Str(R"({"format":"berry-animator","version":2,"clips":[]})")},
+             caps, &out) != ScriptStatus::Ok);
+  CHECK(Call(bindings, "animator.clip_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+}
+
+static void TestAnimatorFailsClosedWithoutService() {
+  Renderer renderer;
+  ScriptApi::Services services;
+  services.renderer = &renderer;   // no animator
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"cosmetic"};
+  // Every binding raises rather than fabricating animation state, matching the
+  // combat-state convention.
+  CHECK(Call(bindings, "animator.add_clip",
+             {ScriptValue::Str("c"), ScriptValue::Num(1.0), ScriptValue::Bool(true)},
+             caps, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "animator.play", {ScriptValue::Str("c")}, caps, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "animator.playing", {}, caps, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "animator.clip_count", {}, caps, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "animator.sample",
+             {ScriptValue::Str("head"), ScriptValue::Num(0.0)}, caps, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "animator.target", {}, caps, &out) == ScriptStatus::Error);
+
+  // The capability gate still applies: a caller without `cosmetic` is denied.
+  Animator animator;
+  Test::ShimSkeleton base;
+  AnimatedSkeletonSource seam(&base, &animator);
+  ScriptApi::Services svc2;
+  svc2.renderer = &renderer;
+  svc2.animator = &animator;
+  svc2.animatorSeam = &seam;
+  ScriptApi api2(svc2);
+  ScriptBindings b2;
+  api2.InstallBindings(&b2);
+  CHECK(Call(b2, "animator.play", {ScriptValue::Str("c")}, {}, &out) ==
+        ScriptStatus::CapabilityDenied);
+}
+
 static void TestPacketBindings() {
   PacketLog log;
   log.Record(PacketDir::Inbound, 0x2A, 64, 1000, "PlayerAuthInput");
@@ -2137,12 +2319,15 @@ int main() {
   TestModBindings();
   TestFsAndAudioBindings();
   TestPvpBindings();
+  TestAnimatorBindings();
+  TestAnimatorFailsClosedWithoutService();
   TestPacketBindings();
   TestNetworkGetFailsClosed();
   TestDrawCommandsAreQueuedThenApplied();
   TestHudLifecycleAcrossThreads();
   TestQueueIsBoundedAndFailsClosed();
   TestFrameHookDrainsQueue();
+  TestFrameHookAdvancesAnimator();
   TestFrameHookDrawsCosmetics();
   TestFrameHookPresentsUi();
   TestPublishedReads();
