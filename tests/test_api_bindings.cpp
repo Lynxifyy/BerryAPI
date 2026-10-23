@@ -21,6 +21,7 @@
 #include "berry/script.h"
 #include "berry/services.h"
 #include "berry/session_recorder.h"
+#include "berry/voice_transport.h"
 #include "shim_level.h"
 
 #include <chrono>
@@ -2900,6 +2901,188 @@ static void TestCrystalTickHook() {
   EventBus::Instance().Off("crystalAdvice", id);
 }
 
+static void TestVoiceBindings() {
+  VoiceService voice;
+  VoiceTransportConfig tcfg;
+  LanVoiceTransport transport;
+  // The bindings only need a transport bound to Start; the pump's wire path is
+  // covered by test_voice. A loopback transport keeps this test off the network.
+  tcfg.group = "239.66.0.31";
+  tcfg.port = 47941;
+  tcfg.iface = "127.0.0.1";
+  CHECK(transport.Open(tcfg));
+  voice.SetTransport(&transport);
+
+  ScriptApi::Services services;
+  services.voice = &voice;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"voice"};
+
+  //--- config reads and validated writes ---
+  CHECK(Call(bindings, "voice.config", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(Near(out.AsTable()->at("max_range").AsNumber(), 32.0));
+  CHECK(Call(bindings, "voice.set_max_range", {ScriptValue::Num(48)}, caps, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Near((f64)voice.config().maxRange, 48.0));
+  // A bad value is refused and changes nothing.
+  CHECK(Call(bindings, "voice.set_max_range", {ScriptValue::Num(-1)}, caps, &out) ==
+        ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Near((f64)voice.config().maxRange, 48.0));
+  // A fractional count cannot name a speaker count.
+  CHECK(Call(bindings, "voice.set_max_speakers", {ScriptValue::Num(2.5)}, caps, &out) ==
+        ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "voice.set_max_speakers", {ScriptValue::Num(4)}, caps, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  //--- session lifecycle ---
+  CHECK(Call(bindings, "voice.running", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "voice.start", {ScriptValue::Str("me")}, caps, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "voice.running", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "voice.self_id", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "me");
+  // A malformed id is refused.
+  CHECK(Call(bindings, "voice.start", {ScriptValue::Str("")}, caps, &out) ==
+        ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  //--- talk / mute state ---
+  CHECK(Call(bindings, "voice.set_talking", {ScriptValue::Bool(true)}, caps, &out) ==
+        ScriptStatus::Ok);
+  CHECK(Call(bindings, "voice.talking", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "voice.set_muted", {ScriptValue::Bool(true)}, caps, &out) ==
+        ScriptStatus::Ok);
+  CHECK(Call(bindings, "voice.muted", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  //--- position and the speaker reads (the frame hook is what pumps) ---
+  CHECK(Call(bindings, "voice.set_position",
+             {ScriptValue::Num(1), ScriptValue::Num(2), ScriptValue::Num(3)}, caps, &out) ==
+        ScriptStatus::Ok);
+  CHECK(Near((f64)voice.position().x, 1.0));
+
+  //--- speaker reads and stats ---
+  CHECK(Call(bindings, "voice.speaker_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "voice.speaker", {ScriptValue::Num(0)}, caps, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsTable()->find("id") == out.AsTable()->end());
+  CHECK(Call(bindings, "voice.stats", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsTable()->find("frames_sent") != out.AsTable()->end());
+  CHECK(Call(bindings, "voice.transport", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "lan");
+
+  CHECK(Call(bindings, "voice.stop", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "voice.running", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  //--- the capability gate: without the voice grant the call is denied ---
+  CHECK(Call(bindings, "voice.start", {ScriptValue::Str("me")}, {"audio"}, &out) ==
+        ScriptStatus::CapabilityDenied);
+  transport.Close();
+}
+
+static void TestVoiceFailsClosedWithoutService() {
+  ScriptApi::Services services;   // no voice service
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"voice"};
+
+  CHECK(Call(bindings, "voice.running", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "voice.start", {ScriptValue::Str("me")}, caps, &out) ==
+        ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "voice.self_id", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString().empty());
+  // Writes report false; reads report the inert default.
+  CHECK(Call(bindings, "voice.set_max_range", {ScriptValue::Num(8)}, caps, &out) ==
+        ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "voice.talking", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "voice.speaker_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "voice.transport", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString().empty());
+  CHECK(Call(bindings, "voice.stats", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("frames_played").AsNumber() == 0);
+}
+
+static void TestFrameHookPumpsVoice() {
+  std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
+  WorldHandle* world = worldMod->Service<WorldHandle>();
+  auto shim = std::make_shared<Berry::Test::ShimLevel>();
+  EntityId self{1, 1};
+  EntitySnapshot me;
+  me.id = self;
+  me.type = EntityType::Player;
+  me.position = Vec3(10.5f, 64.0f, 10.5f);
+  me.alive = true;
+  shim->AddEntity(self, me);
+  world->SetSeam(shim);
+
+  // A transport double captures the frame the pump sends, so the test sees the
+  // real encode path run from the frame hook.
+  struct Capture : VoiceTransport {
+    std::vector<std::string> sent;
+    bool SendFrame(const std::string& speaker, u32,
+                   const std::vector<u8>&) override {
+      sent.push_back(speaker);
+      return true;
+    }
+    void Poll(const FrameCb&, int) override {}
+    std::string name() const override { return "capture"; }
+  };
+  Capture transport;
+  struct Mic : VoiceCaptureSeam {
+    size_t Capture(i16* out, size_t maxSamples) override {
+      for (size_t i = 0; i < maxSamples; ++i) out[i] = (i16)(i * 13);
+      return maxSamples;
+    }
+  };
+  Mic mic;
+
+  VoiceService voice;
+  voice.SetTransport(&transport);
+  voice.SetCapture(&mic);
+  CHECK(voice.Start("me"));
+  voice.SetTalking(true);
+
+  ScriptApi::Services services;
+  services.world = world;
+  services.voice = &voice;
+  services.localPlayer = self;
+  ScriptApi api(services);
+
+  Engine& eng = Engine::Instance();
+  eng.Bootstrap();
+  CHECK(eng.Attach());
+  // The frame hook is the production caller: it wires the resolver, sets the
+  // position and pumps. Talking + a mic means one frame is sent.
+  eng.OnFrame();
+  CHECK(!transport.sent.empty());
+  CHECK(transport.sent[0] == "me");
+  // The hook read the local player's position from the world for the pump.
+  CHECK(Near((f64)voice.position().x, 10.5));
+  eng.Detach();
+}
+
 int main() {
   TestEveryIdlBindingIsInstalled();
   TestCapabilityGateOnDeclaredBindings();
@@ -2935,6 +3118,9 @@ int main() {
   TestCrystalBindings();
   TestCrystalFailsClosedWithoutService();
   TestCrystalTickHook();
+  TestVoiceBindings();
+  TestVoiceFailsClosedWithoutService();
+  TestFrameHookPumpsVoice();
   TestPublishedReads();
   TestGovernorAndZoomWrites();
   TestCombatAndInputReads();
