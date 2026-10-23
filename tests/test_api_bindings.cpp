@@ -2568,6 +2568,143 @@ static void TestNetworkGetFailsClosed() {
   CHECK(out.IsTable());
 }
 
+static void TestRadialBindings() {
+  Renderer renderer;
+  Berry::Test::CaptureRenderSeam seam;
+  renderer.BindSeam(&seam);
+  RadialMenu radial;
+  InputObserver input;
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.radial = &radial;
+  services.input = &input;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"hud"};
+
+  // Author items through the bindings.
+  CHECK(Call(bindings, "radial.add_item",
+             {ScriptValue::Str("Teleport"), ScriptValue::Bool(true)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "radial.add_item",
+             {ScriptValue::Str("Friends"), ScriptValue::Bool(false)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "radial.count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 2);
+  CHECK(Call(bindings, "radial.item_label", {ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "Teleport");
+  CHECK(Call(bindings, "radial.item_enabled", {ScriptValue::Num(1)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  // A malformed label is refused.
+  CHECK(Call(bindings, "radial.add_item",
+             {ScriptValue::Str(""), ScriptValue::Bool(true)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  // Open and read the state.
+  CHECK(Call(bindings, "radial.open", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "radial.is_open", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "radial.state", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  const ScriptValue* openField = out.Field("open");
+  CHECK(openField && openField->Truthy());
+
+  // The pure geometry binding answers without any service state.
+  CHECK(Call(bindings, "radial.sector_at",
+             {ScriptValue::Num(100), ScriptValue::Num(40), ScriptValue::Num(100),
+              ScriptValue::Num(100), ScriptValue::Num(20), ScriptValue::Num(80),
+              ScriptValue::Num(4)},
+             caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  // Out of range / a bad count fails closed to -1.
+  CHECK(Call(bindings, "radial.sector_at",
+             {ScriptValue::Num(100), ScriptValue::Num(40), ScriptValue::Num(100),
+              ScriptValue::Num(100), ScriptValue::Num(20), ScriptValue::Num(80),
+              ScriptValue::Num(-3)},
+             caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == -1);
+
+  // The capability gate: without the hud grant the call is denied.
+  ScriptHost host("radial-test", Grant({"world"}), nullptr);
+  host.SetBindings(&bindings);
+  CHECK(host.CallBinding("radial.open", {}, &out) == ScriptStatus::CapabilityDenied);
+}
+
+static void TestRadialFailsClosedWithoutService() {
+  ScriptApi::Services services;   // no radial service
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"hud"};
+  // Edits report false, state is inert, and the pure geometry still answers.
+  CHECK(Call(bindings, "radial.add_item",
+             {ScriptValue::Str("x"), ScriptValue::Bool(true)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "radial.open", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "radial.count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "radial.state", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(Call(bindings, "radial.sector_at",
+             {ScriptValue::Num(100), ScriptValue::Num(40), ScriptValue::Num(100),
+              ScriptValue::Num(100), ScriptValue::Num(20), ScriptValue::Num(80),
+              ScriptValue::Num(4)},
+             caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+}
+
+static void TestFrameHookDrawsRadialMenu() {
+  Renderer renderer;
+  Berry::Test::CaptureRenderSeam seam;
+  renderer.BindSeam(&seam);
+  CameraState cam;
+  cam.width = 1280;
+  cam.height = 720;
+  cam.valid = true;
+  renderer.SetCamera(cam);
+
+  RadialMenu radial;
+  InputObserver input;
+  radial.AddItem("One");
+  radial.AddItem("Two");
+  radial.AddItem("Three");
+  CHECK(radial.Open());
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.radial = &radial;
+  services.input = &input;
+  ScriptApi api(services);
+
+  // Open the menu fully first, so the draw is deterministic and does not depend
+  // on the frame hook's wall clock. The hook still runs Update (advancing the
+  // animation) and Draw, which is the production path under test.
+  radial.Update(1.0f, Vec2(1280, 720) * 0.5f, Vec2(1280 * 0.5f, 720 * 0.5f - 100.0f), true);
+  CHECK(radial.state().progress >= 1.0f);
+
+  renderer.BeginFrame(Vec2(1280, 720));
+  Engine& eng = Engine::Instance();
+  eng.Bootstrap();
+  CHECK(eng.Attach());
+  api.PublishFrame(16.0f, Vec2(1280, 720));
+  eng.OnFrame();   // emits berry:frame; the hook advances + draws the menu
+  renderer.EndFrame();
+  eng.Detach();
+
+  CHECK(seam.circles >= 1);    // the centre hub
+  CHECK(seam.lines > 0);       // the sector spokes
+  CHECK(seam.texts == 3);      // one label per item
+}
+
 int main() {
   TestEveryIdlBindingIsInstalled();
   TestCapabilityGateOnDeclaredBindings();
@@ -2597,6 +2734,9 @@ int main() {
   TestReplayCameraFollowsTape();
   TestFrameHookDrawsCosmetics();
   TestFrameHookPresentsUi();
+  TestRadialBindings();
+  TestRadialFailsClosedWithoutService();
+  TestFrameHookDrawsRadialMenu();
   TestPublishedReads();
   TestGovernorAndZoomWrites();
   TestCombatAndInputReads();
