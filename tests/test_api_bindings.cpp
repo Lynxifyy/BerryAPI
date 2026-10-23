@@ -295,6 +295,16 @@ static void TestFrameHookAdvancesAnimator() {
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
   eng.OnFrame();
   CHECK(animator.time() > 0.0f);
+  CHECK(animator.time() < 0.1f);
+
+  // A long stall (a breakpoint, a paused client) is clamped to one step, so it
+  // cannot fast-forward the whole clip in a single frame.
+  const f32 before = animator.time();
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  eng.OnFrame();
+  const f32 step = animator.time() - before;
+  CHECK(step > 0.0f);
+  CHECK(step <= 0.1f + 1e-4f);
 
   eng.Detach();
 }

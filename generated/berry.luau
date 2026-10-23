@@ -463,7 +463,7 @@ export type Animator = {
   current_clip: () -> string,
   -- Jumps to an absolute time within the current clip, clamped/wrapped the same way playback would land there. False when no clip is selected.
   seek: (seconds: number) -> boolean,
-  -- A bone's interpolated pose at an absolute time within the current clip, as {valid, px, py, pz, rx, ry, rz, scale}. `valid` is false when no clip/bone has a key there.
+  -- A bone's interpolated pose at an absolute time within the current clip, as {valid, bone, px, py, pz, rx, ry, rz, scale}. `valid` is false when no clip/bone has a key there.
   sample: (bone: string, time: number) -> {[string]: any},
   -- The whole current pose: one table per bone that has a key in the current clip, at the current time, each {bone, px, py, pz, rx, ry, rz, scale}. Empty when no clip is selected.
   pose: () -> {[string]: any},

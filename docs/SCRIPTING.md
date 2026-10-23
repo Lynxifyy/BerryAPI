@@ -599,6 +599,46 @@ Scripts reach the local loadout through the `cosmetic.*` bindings (see
 world write and no other player affected — and gated on the `cosmetic`
 capability.
 
+### The animator
+
+A worn asset can move on its own. `Animator` (`animator.h`) is a small
+client-side clip player: a clip is a named, duration-bearing list of keyframes,
+each naming a `Bone`, an offset from the bone's rest transform (rotation in
+degrees) and a scale. `Sample` finds the bracketing keys for a bone at a time
+and interpolates position, rotation and scale; a time before the first key or
+past the last clamps to that key, so a one-shot clip holds its final pose rather
+than snapping back to rest. Playback is driven by `Advance(dt)`, which wraps a
+looping clip and stops a one-shot clip at its end; a non-finite or negative
+delta is ignored.
+
+The animator is the *clock*, and it is the render path that consumes the pose.
+`AnimatedSkeletonSource` implements `CosmeticSkeletonSource` by sampling a
+`BonePose` per bone out of an `Animator` and adding the clip's offset to a base
+skeleton's transform (the real engine skeleton on device, a test rig in tests);
+a bone the current clip does not key passes through exactly as the base reported
+it. While a clip is playing the seam reports no pose revision, which disables
+`CosmeticService`'s per-entity resolve cache for that entity — a cached,
+stationary transform must never be reused for a moving rig. When nothing is
+playing it defers to the base seam's revision, so the cache behaves normally.
+Its `target_` is atomic because the script worker sets it while the render
+thread reads it. The wiring is the same seam pattern as everywhere else: the
+embedder points the cosmetic service's skeleton source at the animated seam
+(`CosmeticService::SetSkeletonSource`), so the animator's pose is what the
+render path resolves without the cosmetic code ever knowing about the animator.
+
+Scripts reach it through the `animator.*` bindings, gated on the `cosmetic`
+capability: `add_clip`, `add_key`, `remove_clip`, `clear_clip`, `clip_count`,
+`has_clip`, `key_count`, `play`, `stop`, `reset`, `playing`, `time`, `duration`,
+`current_clip`, `seek`, `sample`, `pose`, `save`, `load`, `clear`, `target` and
+`set_target`. The frame hook advances the animator from the frame delta, the way
+it drives the PvP overlay, so a script that plays a clip sees the rig move the
+same frame — there is no `advance` binding, because the frame clock owns
+playback and a second clock would double-step it. `save` returns the clips as
+one deterministic JSON document and `load` parses one back, atomically: a
+document that is malformed, the wrong format or version, or names an unknown
+bone loads nothing and leaves the existing clips untouched. An empty animator is
+a valid, saveable state.
+
 Assets can also be authored as data. A **model pack** (`pack.h`) is a JSON
 document — `format`, `name`, `assets` — that describes assets (id, slot, bone,
 geometry/texture handles, offset, rotation, scale, tint, trail, tags); the

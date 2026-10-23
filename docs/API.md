@@ -387,7 +387,7 @@ Capability: `cosmetic`.
 | `animator.duration() -> number` | `cosmetic` | The current clip's duration, or 0 when none is selected. |
 | `animator.current_clip() -> string` | `cosmetic` | The current clip's name, or \"\" when none is selected. |
 | `animator.seek(seconds: number) -> bool` | `cosmetic` | Jumps to an absolute time within the current clip, clamped/wrapped the same way playback would land there. False when no clip is selected. |
-| `animator.sample(bone: string, time: number) -> Table` | `cosmetic` | A bone's interpolated pose at an absolute time within the current clip, as {valid, px, py, pz, rx, ry, rz, scale}. `valid` is false when no clip/bone has a key there. |
+| `animator.sample(bone: string, time: number) -> Table` | `cosmetic` | A bone's interpolated pose at an absolute time within the current clip, as {valid, bone, px, py, pz, rx, ry, rz, scale}. `valid` is false when no clip/bone has a key there. |
 | `animator.pose() -> Table` | `cosmetic` | The whole current pose: one table per bone that has a key in the current clip, at the current time, each {bone, px, py, pz, rx, ry, rz, scale}. Empty when no clip is selected. |
 | `animator.save() -> string` | `cosmetic` | The clips as one JSON document (deterministic: same clips, same bytes). |
 | `animator.load(json: string) -> bool` | `cosmetic` | Replaces the clips from a JSON document in the exact format `save` returns, including its version. Rejects the whole document on any error (malformed JSON, the wrong format or version, a duplicate name, an unknown bone, an out-of-range key) and leaves the current clips untouched. Playback is stopped. |

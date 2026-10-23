@@ -104,6 +104,18 @@ make lib             # builds build/libBerryAPI.so
   straight to a discovered peer. There is no chat seam in the library, so an
   in-game-chat signaling fallback belongs to the embedder (wrap the one-virtual
   `Send` seam), not to the transport.
+- `Animator` (`animator.h`) is a client-side keyframed clip player, not a strict
+  module. It owns no clock: `Advance(dtSeconds)` is the whole input, and the
+  `ScriptApi` frame hook is what calls it (the `animator.advance` binding does
+  not exist, because a second clock would double-step a clip). Keys are kept
+  sorted by `(bone, time)`; sampling binary-searches one bone's run and lerps
+  the bracketing keys. `AnimatedSkeletonSource` is the seam that makes it real:
+  it adds the sampled pose to a base `CosmeticSkeletonSource`'s transform, so
+  the cosmetic render path draws the animated rig. While a clip plays it reports
+  no pose revision, which disables the cosmetic resolve cache for that entity.
+  `Save`/`Load` use the versioned `berry-animator` document; `Load` refuses a
+  wrong version, a duplicate name, an unknown bone or an out-of-range key, and
+  parses into a scratch list so a bad document never disturbs the live clips.
 
 ## Conventions
 
