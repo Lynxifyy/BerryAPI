@@ -21,6 +21,7 @@ CORE_SRC := \
   core/modules/replay_camera.cpp \
   core/modules/radial.cpp \
   core/modules/crystal.cpp \
+  core/modules/voice.cpp \
   core/modules/render.cpp \
   core/modules/render_backend.cpp \
   core/modules/pipeline.cpp \
