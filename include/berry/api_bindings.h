@@ -36,6 +36,7 @@
 #include "berry/animator.h"
 #include "berry/replay_camera.h"
 #include "berry/radial.h"
+#include "berry/crystal.h"
 #include "berry/cosmetic.h"
 #include "berry/event.h"
 #include "berry/fs.h"
@@ -194,6 +195,11 @@ class BERRY_API ScriptApi {
     /// Client-side radial (pie) menu. Null makes the `radial.*` bindings fail
     /// closed and the frame hook skip the menu.
     RadialMenu* radial = nullptr;
+    /// Client-side crystal-placement advisor. Null makes the `crystal.*`
+    /// bindings fail closed (an analysis recommends nothing) and the tick hook
+    /// skip the advisory overlay. It needs `world` for the entity list the
+    /// analysis ranks against.
+    CrystalOptimizer* crystal = nullptr;
   };
 
   ScriptApi();
@@ -295,6 +301,12 @@ class BERRY_API ScriptApi {
   EventBus::ListenerId combatListener_ = 0;
   EventBus::ListenerId tickListener_ = 0;
   EventBus::ListenerId combatStateListener_ = 0;
+  /// The crystal advisor's tick pass. Separate from `tickListener_` so arming
+  /// the advisor never disturbs the combat-state feed.
+  EventBus::ListenerId crystalListener_ = 0;
+  /// The last published crystal advice ("x,y,z,score"), so a tick that does not
+  /// change the best spot publishes nothing.
+  std::string lastCrystalAdvice_;
   /// The wall-clock ms of the last presented frame, for the PvP overlay's
   /// animation delta. Render thread only.
   u64 lastFrameMs_ = 0;

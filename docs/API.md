@@ -415,6 +415,7 @@ Events (await with `Events.once`):
 - `combatConfirmed(hit: string)` — A predicted hit the engine then confirmed. Carries \"<attacker>:<victim>\".
 - `combatMissed(hit: string)` — A predicted hit that was never confirmed within the prediction window. Carries \"<attacker>:<victim>\".
 - `radialSelected(label: string)` — The label of the radial-menu item the player committed, fired once on the release that selects it.
+- `crystalAdvice(placement: string)` — The best crystal placement changed while the advisor is armed. Carries \"x,y,z,score\".
 
 ## Intent
 
@@ -543,3 +544,29 @@ Capability: `hud`.
 | `radial.set_open_ms(ms: number) -> bool` | `hud` | Sets the open animation duration. Must be finite and positive; a bad value is refused. |
 | `radial.state() -> Table` | `hud` | The current menu state as {open, hovered, selected, progress, items}. `hovered`/`selected` are -1 when none. |
 | `radial.sector_at(pointer_x: number, pointer_y: number, center_x: number, center_y: number, inner_radius: number, outer_radius: number, count: number) -> number` | `hud` | The sector under a pointer relative to a centre for `count` sectors, or -1 for the dead zone or outside the ring. Pure: it reads no state, so it pins the geometry. |
+
+## Crystal
+
+Capability: `combat`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `crystal.config() -> Table` | `combat` | The current tunables as {place_range, blast_radius, max_damage, min_targets, self_damage_weight, max_self_damage, levels, max_results}. |
+| `crystal.set_range(range: number) -> bool` | `combat` | Sets the placement range in blocks. Must be finite, positive and at most 16; a bad value is refused. |
+| `crystal.set_blast_radius(radius: number) -> bool` | `combat` | Sets the blast radius in blocks. Must be finite, positive and at most 32; a bad value is refused. |
+| `crystal.set_max_damage(damage: number) -> bool` | `combat` | Sets the damage at the epicentre before falloff. Must be finite and non-negative; a bad value is refused. |
+| `crystal.set_min_targets(n: number) -> bool` | `combat` | Sets the minimum number of targets a spot must hit to be recommended. Must be a non-negative integer; a bad value is refused. |
+| `crystal.set_self_damage_weight(weight: number) -> bool` | `combat` | Sets how heavily damage to the placer is weighted against damage to enemies. Must be finite and non-negative; a bad value is refused. |
+| `crystal.set_max_self_damage(damage: number) -> bool` | `combat` | Sets the most damage a recommended spot may deal to the placer. Must be finite and non-negative; a bad value is refused. |
+| `crystal.set_levels(levels: number) -> bool` | `combat` | Sets the number of block levels above and below the placer's feet to consider. Must be an integer in [0, 4]; a bad value is refused. |
+| `crystal.set_max_results(n: number) -> bool` | `combat` | Sets how many recommendations an analysis keeps. Must be an integer in [1, 4096]; a bad value is refused. |
+| `crystal.analyze(x: number, y: number, z: number) -> number` | `combat` | Ranks the candidate placements around a placer at (x, y, z) against the entities the world grid already read, and returns how many were recommended. Fails closed (returns 0) when the world or the advisor is unavailable. The ranking is available through `count` and `placement`. |
+| `crystal.count() -> number` | `combat` | How many recommendations the last analysis produced. |
+| `crystal.best() -> Table` | `combat` | The best recommendation as {ok, x, y, z, targets, total_damage, best_damage, self_damage, score}. `ok` is false when there is none. |
+| `crystal.placement(index: number) -> Table` | `combat` | The recommendation at `index` in the last ranking, same shape as `best`, or an empty table when out of range. |
+| `crystal.estimate(x: number, y: number, z: number, tx: number, ty: number, tz: number) -> number` | `combat` | The estimated damage a blast at (x, y, z) would deal to a target at (tx, ty, tz) under the current tunables. Pure: it reads no world state. |
+| `crystal.stats() -> Table` | `combat` | The advisor's counters as {analyses, candidates, placements, best_score}. |
+| `crystal.reset() -> nil` | `combat` | Forgets the last ranking and its counters. |
+| `crystal.arm() -> bool` | `combat` | Arms the advisor. While armed, the client's tick hook runs one advisory pass per game tick around the local player and fires `crystalAdvice` when the best spot changes. False when it is already armed. |
+| `crystal.disarm() -> nil` | `combat` | Disarms the advisor. A no-op when it is already disarmed. |
+| `crystal.armed() -> bool` | `combat` | True while the advisor runs its advisory pass on the game tick. |

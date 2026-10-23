@@ -357,11 +357,30 @@ inline const BindingSpec* BindingSpecs() {
       {"radial.set_open_ms", CapKind::Hud, 1, "Radial"},
       {"radial.state", CapKind::Hud, 0, "Radial"},
       {"radial.sector_at", CapKind::Hud, 7, "Radial"},
+      {"crystal.config", CapKind::Combat, 0, "Crystal"},
+      {"crystal.set_range", CapKind::Combat, 1, "Crystal"},
+      {"crystal.set_blast_radius", CapKind::Combat, 1, "Crystal"},
+      {"crystal.set_max_damage", CapKind::Combat, 1, "Crystal"},
+      {"crystal.set_min_targets", CapKind::Combat, 1, "Crystal"},
+      {"crystal.set_self_damage_weight", CapKind::Combat, 1, "Crystal"},
+      {"crystal.set_max_self_damage", CapKind::Combat, 1, "Crystal"},
+      {"crystal.set_levels", CapKind::Combat, 1, "Crystal"},
+      {"crystal.set_max_results", CapKind::Combat, 1, "Crystal"},
+      {"crystal.analyze", CapKind::Combat, 3, "Crystal"},
+      {"crystal.count", CapKind::Combat, 0, "Crystal"},
+      {"crystal.best", CapKind::Combat, 0, "Crystal"},
+      {"crystal.placement", CapKind::Combat, 1, "Crystal"},
+      {"crystal.estimate", CapKind::Combat, 6, "Crystal"},
+      {"crystal.stats", CapKind::Combat, 0, "Crystal"},
+      {"crystal.reset", CapKind::Combat, 0, "Crystal"},
+      {"crystal.arm", CapKind::Combat, 0, "Crystal"},
+      {"crystal.disarm", CapKind::Combat, 0, "Crystal"},
+      {"crystal.armed", CapKind::Combat, 0, "Crystal"},
   };
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 336; }
+inline size_t BindingSpecCount() { return 355; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -768,6 +787,27 @@ inline const char* const kRadialNames[] = {
     "radial.state",
     "radial.sector_at",
 };
+inline const char* const kCrystalNames[] = {
+    "crystal.config",
+    "crystal.set_range",
+    "crystal.set_blast_radius",
+    "crystal.set_max_damage",
+    "crystal.set_min_targets",
+    "crystal.set_self_damage_weight",
+    "crystal.set_max_self_damage",
+    "crystal.set_levels",
+    "crystal.set_max_results",
+    "crystal.analyze",
+    "crystal.count",
+    "crystal.best",
+    "crystal.placement",
+    "crystal.estimate",
+    "crystal.stats",
+    "crystal.reset",
+    "crystal.arm",
+    "crystal.disarm",
+    "crystal.armed",
+};
 
 inline const ModuleBindings* ModuleBindingTable() {
   static const ModuleBindings kModules[] = {
@@ -797,11 +837,12 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Record", kRecordNames, 14},
       {"Replay", kReplayNames, 32},
       {"Radial", kRadialNames, 18},
+      {"Crystal", kCrystalNames, 19},
   };
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 26; }
+inline size_t ModuleBindingCount() { return 27; }
 
 }  // namespace api
 }  // namespace Berry
