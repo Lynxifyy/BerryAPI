@@ -70,6 +70,7 @@ CORE_SRC := \
   core/replay/replay_world.cpp \
   core/replay/replay_review.cpp \
   core/replay/replay_server.cpp \
+  core/replay/replay_service.cpp \
   core/script/jsonrpc_client.cpp \
   core/net/rpc.cpp \
   core/script/layout.cpp \
@@ -231,7 +232,13 @@ TEST_SRC := \
   tests/test_replay_camera.cpp \
   tests/test_radial.cpp \
   tests/test_crystal.cpp \
-  tests/test_voice.cpp
+  tests/test_voice.cpp \
+  tests/test_replay_format.cpp \
+  tests/test_replay_capture.cpp \
+  tests/test_replay_world.cpp \
+  tests/test_replay_review.cpp \
+  tests/test_replay_server.cpp \
+  tests/test_replay_service.cpp
 
 # Vendored Luau (MIT). See third_party/luau/PROVENANCE.md for the pinned
 # version and why these units and not the CLI. Compiled with -w because upstream

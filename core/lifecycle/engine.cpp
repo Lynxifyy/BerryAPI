@@ -2,6 +2,7 @@
 #include "berry/event.h"
 #include "berry/services.h"
 #include "berry/session_recorder.h"
+#include "berry/replay_service.h"
 #include "berry/thread.h"
 
 #include <cstring>
@@ -29,7 +30,9 @@ Engine& Engine::Instance() {
   return eng;
 }
 
-Engine::Engine() : recorder_(std::make_unique<SessionRecorder>()) {}
+Engine::Engine()
+    : recorder_(std::make_unique<SessionRecorder>()),
+      replay_(std::make_unique<ReplayService>()) {}
 
 Engine::~Engine() {
   Detach();
@@ -145,6 +148,21 @@ void Engine::OnFrame() {
   if (!attached_.load()) return;
   ThreadModel::Instance().Enter(ThreadRole::Render);
   ThreadModel::Instance().AssertRender();
+  // The replay mod's frame work: pump the loopback playback server and advance
+  // the local review on the frame clock. Both are driven here, so playback and
+  // the review work whether or not a script is loaded. The review's own draw
+  // goes through the Render module's frame hook (it needs the frame's camera and
+  // the renderer), which is the same order every other overlay uses.
+  if (replay_) {
+    replay_->PumpServer();
+    const u64 now = NowMs();
+    if (lastReplayFrameMs_ != 0 && now > lastReplayFrameMs_) {
+      f32 dt = (f32)(now - lastReplayFrameMs_) / 1000.0f;
+      if (dt > 0.1f) dt = 0.1f;   // a stall must not fast-forward a review
+      replay_->AdvanceReview(dt);
+    }
+    lastReplayFrameMs_ = now;
+  }
   // Render module's frame hook gets installed by Berry::Render on Attach.
   // Scripts never run on this thread; only render work + overlay.
   EventBus::Instance().Emit("berry:frame", nullptr, nullptr);

@@ -53,6 +53,7 @@
 #include "berry/script.h"
 #include "berry/scriptmod.h"
 #include "berry/session_recorder.h"
+#include "berry/replay_service.h"
 #include "berry/shader.h"
 #include "berry/ui.h"
 #include "berry/services.h"
@@ -169,6 +170,11 @@ class BERRY_API ScriptApi {
     /// The session recorder (record & replay of the world stream). Null makes
     /// the `record.*` bindings fail closed (start/save report failure).
     SessionRecorder* recorder = nullptr;
+    /// The replay mod: container capture, reconstructed replay, local review
+    /// overlay and loopback playback server, in one owned object. Null makes
+    /// the `replay_mod.*` bindings fail closed (a load reports failure, a
+    /// status reports "unavailable").
+    ReplayService* replay = nullptr;
     /// Egress policy for `network.get`. The harness relaxes it for loopback.
     UrlPolicy networkPolicy;
     /// Script-facing WebSocket pool. Null makes the `ws.*` bindings fail closed
@@ -281,6 +287,10 @@ class BERRY_API ScriptApi {
 
   // Client-side state a script writes and the client reads back.
   std::atomic<f32> zoom_{1.0f};
+
+  // Why the last replay_mod.load failed, for the script to read back.
+  mutable std::mutex replayErrorMutex_;
+  std::string lastReplayError_;
 
   // Published by the render thread, read by the script thread.
   std::atomic<f32> frameMs_{0.0f};

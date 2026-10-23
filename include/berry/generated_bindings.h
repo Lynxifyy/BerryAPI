@@ -398,11 +398,50 @@ inline const BindingSpec* BindingSpecs() {
       {"voice.stats", CapKind::Voice, 0, "Voice"},
       {"voice.reset", CapKind::Voice, 0, "Voice"},
       {"voice.transport", CapKind::Voice, 0, "Voice"},
+      {"replaymod.capture_start", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.capture_stop", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.capturing", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.section_count", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.bytes", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.first_tick", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.last_tick", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.save", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.load", CapKind::World, 1, "ReplayMod"},
+      {"replaymod.loaded", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.unload", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.last_error", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.loaded_sections", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.loaded_first_tick", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.loaded_last_tick", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.world_entity_count", CapKind::World, 1, "ReplayMod"},
+      {"replaymod.world_entity", CapKind::World, 2, "ReplayMod"},
+      {"replaymod.world_block", CapKind::World, 4, "ReplayMod"},
+      {"replaymod.tick_range", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.set_review_active", CapKind::World, 1, "ReplayMod"},
+      {"replaymod.review_active", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.review_play", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.review_pause", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.review_playing", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.review_tick", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.review_seek", CapKind::World, 1, "ReplayMod"},
+      {"replaymod.review_speed", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.set_review_speed", CapKind::World, 1, "ReplayMod"},
+      {"replaymod.review_present", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.server_start", CapKind::World, 2, "ReplayMod"},
+      {"replaymod.server_stop", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.server_running", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.server_port", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.server_client_connected", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.server_packets_sent", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.server_set_paused", CapKind::World, 1, "ReplayMod"},
+      {"replaymod.server_paused", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.server_seek", CapKind::World, 1, "ReplayMod"},
+      {"replaymod.status", CapKind::World, 0, "ReplayMod"},
   };
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 377; }
+inline size_t BindingSpecCount() { return 416; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -854,6 +893,47 @@ inline const char* const kVoiceNames[] = {
     "voice.reset",
     "voice.transport",
 };
+inline const char* const kReplayModNames[] = {
+    "replaymod.capture_start",
+    "replaymod.capture_stop",
+    "replaymod.capturing",
+    "replaymod.section_count",
+    "replaymod.bytes",
+    "replaymod.first_tick",
+    "replaymod.last_tick",
+    "replaymod.save",
+    "replaymod.load",
+    "replaymod.loaded",
+    "replaymod.unload",
+    "replaymod.last_error",
+    "replaymod.loaded_sections",
+    "replaymod.loaded_first_tick",
+    "replaymod.loaded_last_tick",
+    "replaymod.world_entity_count",
+    "replaymod.world_entity",
+    "replaymod.world_block",
+    "replaymod.tick_range",
+    "replaymod.set_review_active",
+    "replaymod.review_active",
+    "replaymod.review_play",
+    "replaymod.review_pause",
+    "replaymod.review_playing",
+    "replaymod.review_tick",
+    "replaymod.review_seek",
+    "replaymod.review_speed",
+    "replaymod.set_review_speed",
+    "replaymod.review_present",
+    "replaymod.server_start",
+    "replaymod.server_stop",
+    "replaymod.server_running",
+    "replaymod.server_port",
+    "replaymod.server_client_connected",
+    "replaymod.server_packets_sent",
+    "replaymod.server_set_paused",
+    "replaymod.server_paused",
+    "replaymod.server_seek",
+    "replaymod.status",
+};
 
 inline const ModuleBindings* ModuleBindingTable() {
   static const ModuleBindings kModules[] = {
@@ -885,11 +965,12 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Radial", kRadialNames, 18},
       {"Crystal", kCrystalNames, 19},
       {"Voice", kVoiceNames, 22},
+      {"ReplayMod", kReplayModNames, 39},
   };
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 28; }
+inline size_t ModuleBindingCount() { return 29; }
 
 }  // namespace api
 }  // namespace Berry

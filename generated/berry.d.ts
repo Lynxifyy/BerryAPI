@@ -735,6 +735,75 @@ export interface Voice {
   transport(): string;
 }
 
+/** Capability required: world. */
+export interface ReplayMod {
+  /** Begins a fresh capture, clearing any previous tape. False when already recording. */
+  capture_start(): boolean;
+  /** Ends the capture and keeps the tape. False when not recording. */
+  capture_stop(): boolean;
+  capturing(): boolean;
+  /** The number of sections on the tape. */
+  section_count(): number;
+  /** The uncompressed payload bytes currently held. */
+  bytes(): number;
+  /** The first and last tick held, or 0 when empty. */
+  first_tick(): number;
+  last_tick(): number;
+  /** The tape as one binary replay document, ready to save. Returns \"\" on a write error. */
+  save(): string;
+  /** Replaces the loaded replay from a binary document. Rejects the whole document on any error (returns false with a reason in `last_error`) and leaves the current replay untouched. */
+  load(data: string): boolean;
+  /** True when a replay is loaded. */
+  loaded(): boolean;
+  unload(): void;
+  /** Why the last `load` failed, or \"\" after a success. */
+  last_error(): string;
+  /** The loaded replay's section count. */
+  loaded_sections(): number;
+  /** The loaded replay's first and last tick, or 0 when none. */
+  loaded_first_tick(): number;
+  loaded_last_tick(): number;
+  /** How many entities the reconstructed world holds at `tick`, or 0 when no replay is loaded. */
+  world_entity_count(tick: number): number;
+  /** The entity at `index` of the reconstructed world at `tick` as {valid, id, type, x, y, z, health, max_health, alive, name}, or an empty table when out of range. */
+  world_entity(tick: number, index: number): Record<string, unknown>;
+  /** The block id at a block coordinate in the reconstructed world at `tick`, or 0 when no replay is loaded. */
+  world_block(tick: number, x: number, y: number, z: number): number;
+  /** The replay's tick range as {first, last}, or zeros when none. */
+  tick_range(): Record<string, unknown>;
+  /** Turns the local review overlay on or off. Off by default. */
+  set_review_active(on: boolean): void;
+  review_active(): boolean;
+  /** Starts the review playback from the loaded replay. False when no replay is loaded. */
+  review_play(): boolean;
+  review_pause(): void;
+  review_playing(): boolean;
+  /** The tick the review is showing. */
+  review_tick(): number;
+  /** Moves the review to a tick. False when no replay is loaded. */
+  review_seek(tick: number): boolean;
+  /** The playback speed multiplier. Must be finite and in (0, 64]; a bad value is refused. */
+  review_speed(): number;
+  set_review_speed(speed: number): boolean;
+  /** Draws the review through the frame's renderer when active; returns how many entities it drew. A no-op (0) when inactive or no replay is loaded. */
+  review_present(): number;
+  /** Binds the loopback playback server to `host:port`. `host` must be a loopback address (\"127.0.0.1\", \"::1\" or \"localhost\"); anything else is refused. A port of 0 asks the OS for a free one, which `server_port` reports. Returns false (with a reason in `last_error`) when the host is not loopback, the socket cannot bind, or the server is already running. */
+  server_start(host: string, port: number): boolean;
+  server_stop(): void;
+  server_running(): boolean;
+  server_port(): number;
+  server_client_connected(): boolean;
+  /** How many packets the server has sent since a client joined. */
+  server_packets_sent(): number;
+  /** Pauses or resumes the server's stream (the client stays connected). */
+  server_set_paused(paused: boolean): void;
+  server_paused(): boolean;
+  /** Restarts the stream for the connected client at the nearest keyframe at or before `tick`. False when no client is connected. */
+  server_seek(tick: number): boolean;
+  /** A one-line status: capture state, sections, bytes, whether a replay is loaded, and whether a client is connected. */
+  status(): string;
+}
+
 /** Coroutine-native async facade (Phase 4). */
 export interface AsyncFacade {
   /** Suspend until `ticks` game ticks have elapsed. */
@@ -773,4 +842,5 @@ declare const Replay: Replay;
 declare const Radial: Radial;
 declare const Crystal: Crystal;
 declare const Voice: Voice;
+declare const ReplayMod: ReplayMod;
 declare const async: AsyncFacade;

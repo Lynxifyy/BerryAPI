@@ -16,6 +16,7 @@
 namespace Berry {
 
 class SessionRecorder;
+class ReplayService;
 
 //----------------------------------------------------------------------------
 // Engine — central BerryAPI instance.
@@ -61,6 +62,12 @@ class BERRY_API Engine {
   /// present; recording is off until `SessionRecorder::Start`.
   SessionRecorder& Recorder() { return *recorder_; }
 
+  /// The replay mod: the container capture, the reconstructed replay, the
+  /// local review overlay and the loopback playback server, in one owned
+  /// object. Always present; capture is off until `ReplayCapture::Start` and
+  /// the server is stopped until `ReplayServer::Start`.
+  ReplayService& Replay() { return *replay_; }
+
   // Tick -------------------------------------------------------------------
   /// Called from the game's RTT simulation tick each frame.
   void OnGameTick(GameTick tick);
@@ -89,10 +96,12 @@ class BERRY_API Engine {
   Scheduler sched_;
   ModuleRegistry modules_;
   std::unique_ptr<SessionRecorder> recorder_;
+  std::unique_ptr<ReplayService> replay_;
   std::atomic<GameTick> currentTick_{0};
   std::atomic<bool> attached_{false};
   EngineConfig cfg_;
   GameTick lastFrameTick_ = 0;
+  u64 lastReplayFrameMs_ = 0;
 };
 
 }  // namespace Berry

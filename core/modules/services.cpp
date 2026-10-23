@@ -3,6 +3,7 @@
 #include "berry/engine.h"
 #include "berry/logger.h"
 #include "berry/session_recorder.h"
+#include "berry/replay_service.h"
 #include "berry/world_query.h"
 
 #include <memory>
@@ -155,10 +156,13 @@ class WorldModule : public BerryModule, public WorldHandle {
       const std::vector<WorldDiffEvent> diff =
           UpdateWorldGrid(grid_, *seam_, (u64)tick);
       if (!diff.empty()) PublishWorldDiffToEvents(diff);
-      // Feed the same tick to the session recorder. Recording is off by
-      // default, in which case CaptureTick is a no-op. It reads the seam and
-      // the diff already computed above, never game memory.
-      if (engine_) engine_->Recorder().CaptureTick((u64)tick, *seam_, diff);
+      // Feed the same tick to the session recorder and the replay capture.
+      // Recording is off by default, in which case each is a no-op. Both read
+      // the seam and the diff already computed above, never game memory.
+      if (engine_) {
+        engine_->Recorder().CaptureTick((u64)tick, *seam_, diff);
+        engine_->Replay().Tick((u64)tick, *seam_, diff);
+      }
     }
   }
 
