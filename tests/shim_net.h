@@ -160,6 +160,39 @@ class TinyHttpServer final : public TinyTcpAcceptor {
     ::send(conn, resp.data(), resp.size(), MSG_NOSIGNAL);
   }
 };
+/// A server that answers with valid HTTP headers and then dribbles the body
+/// one byte at a time, just slower than a client's per-read timeout. It exists
+/// to pin the difference between a per-read timeout (which it defeats: the read
+/// keeps succeeding forever) and a true overall deadline (which it cannot).
+class TinySlowDripServer final : public TinyTcpAcceptor {
+ public:
+  /// How long to wait between single-byte body writes.
+  explicit TinySlowDripServer(int dripMs = 400) : dripMs_(dripMs) {}
+
+ protected:
+  void Handle(int conn) override {
+    // Answer as soon as the request headers arrive; do not wait for an idle
+    // timeout first, or the client's deadline would fire before the server
+    // even starts dripping.
+    std::string req = RecvUntil(conn, "\r\n\r\n", 2000);
+    if (req.empty()) return;
+    const std::string head =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 100000\r\n"   // promises far more than it will send
+        "Connection: close\r\n\r\n";
+    if (::send(conn, head.data(), head.size(), MSG_NOSIGNAL) <= 0) return;
+    // One body byte every dripMs_. A client with only a per-read timeout never
+    // times out; a client with an overall deadline does.
+    for (int i = 0; i < 100000 && running_; ++i) {
+      if (::send(conn, "x", 1, MSG_NOSIGNAL) <= 0) return;
+      std::this_thread::sleep_for(std::chrono::milliseconds(dripMs_));
+    }
+  }
+
+ private:
+  int dripMs_;
+};
 
 class TinyWsServer final : public TinyTcpAcceptor {
  protected:

@@ -9,6 +9,8 @@
 
 namespace Berry {
 
+class TlsSocket;   // berry/tls.h (included by net.cpp); kept out of this header
+
 //----------------------------------------------------------------------------
 // Berry::Network module.
 //
@@ -17,6 +19,34 @@ namespace Berry {
 // worker thread (or the Scheduler); none touch the game render thread.
 //----------------------------------------------------------------------------
 
+//----------------------------------------------------------------------------
+// Absolute deadline.
+//
+// A per-read timeout is not a deadline. A peer that sends one byte just before
+// each timeout expires keeps a read loop alive forever, so a request asked to
+// finish in one second can run for minutes — and with a 4 MiB body cap a
+// hostile server can pin the script worker for hours. An absolute deadline is
+// computed ONCE for the whole operation; every wait is clamped to what is left
+// of it, so the total time is bounded no matter how the peer paces its bytes.
+//----------------------------------------------------------------------------
+struct BERRY_API Deadline {
+  /// Monotonic milliseconds at which the operation must stop. 0 means "no
+  /// deadline" (an internal caller that genuinely waits forever).
+  u64 atMs = 0;
+
+  /// A deadline `ms` from now. A non-positive `ms` yields an already-expired
+  /// deadline, so a bad value fails fast rather than waiting.
+  static Deadline After(int ms);
+  /// A deadline that never expires.
+  static Deadline Never() { return Deadline{}; }
+
+  bool hasDeadline() const { return atMs != 0; }
+  /// True once the deadline has passed. A deadline-less value never expires.
+  bool expired() const;
+  /// Milliseconds left, clamped at 0. -1 when there is no deadline.
+  int remainingMs() const;
+};
+
 class BERRY_API TcpSocket {
  public:
   TcpSocket();
@@ -24,9 +54,23 @@ class BERRY_API TcpSocket {
   void Close();
 
   bool Connect(const char* host, u16 port, int timeoutMs = 5000);
+  /// As `Connect`, but the connect (including every candidate address) is
+  /// bounded by the deadline rather than by a fresh per-address timeout.
+  bool Connect(const char* host, u16 port, const Deadline& deadline);
   ssize_t Send(const void* data, size_t len);
+  /// Sends the whole buffer, bounded by `deadline`. Returns the byte count, -1
+  /// on error, or -2 when the deadline passed before everything was sent. A
+  /// plain `Send` can block indefinitely on a peer that stops reading; this
+  /// cannot, which is what TLS needs when it writes a record.
+  ssize_t SendAll(const void* data, size_t len, const Deadline& deadline);
   ssize_t Recv(void* buf, size_t len, int timeoutMs = 5000);
+  /// As `Recv`, but the wait is clamped to the deadline's remainder, so a peer
+  /// that dribbles bytes cannot extend the operation past its deadline. Returns
+  /// -2 (timeout) as soon as the deadline has passed.
+  ssize_t Recv(void* buf, size_t len, const Deadline& deadline);
   bool WaitReadable(int timeoutMs);
+  /// As `WaitReadable`, clamped to the deadline's remainder.
+  bool WaitReadable(const Deadline& deadline);
   int fd() const { return fd_; }
   const std::string& LastError() const { return err_; }
 
@@ -109,14 +153,26 @@ class BERRY_API HttpRequest {
   HttpRequest& Header(const char* name, const char* value);
   HttpRequest& Body(const std::string& data) { body_ = data; return *this; }
   HttpRequest& JsonBody(const char* json) { body_ = json; Header("Content-Type", "application/json"); return *this; }
+  /// The per-operation timeout. It is now an ABSOLUTE deadline for the whole
+  /// request (connect + send + every read), not a per-read idle timeout, so a
+  /// server that dribbles bytes cannot extend the operation past it.
   HttpRequest& Timeout(int ms) { timeoutMs_ = ms; return *this; }
   /// Caps how many response-body bytes are buffered. A hostile or broken server
   /// that streams without end would otherwise make the caller buffer without
   /// limit; the read stops (and the response is marked truncated) at the cap.
   HttpRequest& MaxBodyBytes(size_t n) { maxBodyBytes_ = n; return *this; }
-  /// True when the URL named a scheme this client cannot serve (https/wss,
-  /// since TLS is not implemented). Do() then refuses instead of downgrading.
+  /// True when the URL named a scheme this client cannot serve. With TLS
+  /// compiled in, `https` is served and this is set only for a genuinely
+  /// unknown/malformed scheme; without TLS it is set for `https` too. Do()
+  /// then refuses instead of downgrading.
   bool badScheme() const { return badScheme_; }
+  /// True when the URL is `https` and this build has TLS. Do() performs a
+  /// verified TLS handshake (chain + hostname against the CA store).
+  bool isTls() const { return tls_; }
+
+  /// The parsed host and effective port, for diagnostics and tests.
+  const std::string& host() const { return host_; }
+  u16 port() const { return port_; }
 
   HttpResponse Do();
 
@@ -124,6 +180,7 @@ class BERRY_API HttpRequest {
   std::string url_, method_ = "GET", body_, host_, path_;
   u16 port_ = 80;
   bool badScheme_ = false;
+  bool tls_ = false;
   /// Default 4 MiB: comfortably larger than any JSON/config response, small
   /// enough that a streaming server cannot exhaust the worker's memory.
   size_t maxBodyBytes_ = 4u * 1024 * 1024;

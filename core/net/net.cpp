@@ -1,4 +1,5 @@
 #include "berry/net.h"
+#include "berry/tls.h"
 #include "berry/logger.h"
 #include "berry/event.h"
 #include "berry/version.h"
@@ -20,6 +21,36 @@
 namespace Berry {
 
 //----------------------------------------------------------------------------
+// Deadline
+//----------------------------------------------------------------------------
+
+Deadline Deadline::After(int ms) {
+  Deadline d;
+  const u64 now = NowMs();
+  if (ms <= 0) {
+    // Already expired: `atMs` must be non-zero so `hasDeadline()` is true and
+    // the first wait returns immediately.
+    d.atMs = now == 0 ? 1 : now;
+  } else {
+    d.atMs = now + (u64)ms;
+  }
+  return d;
+}
+
+bool Deadline::expired() const {
+  if (atMs == 0) return false;
+  return NowMs() >= atMs;
+}
+
+int Deadline::remainingMs() const {
+  if (atMs == 0) return -1;
+  const u64 now = NowMs();
+  if (now >= atMs) return 0;
+  const u64 left = atMs - now;
+  return left > (u64)INT32_MAX ? INT32_MAX : (int)left;
+}
+
+//----------------------------------------------------------------------------
 // TcpSocket
 //----------------------------------------------------------------------------
 
@@ -31,10 +62,11 @@ void TcpSocket::Close() {
 }
 
 bool TcpSocket::Connect(const char* host, u16 port, int timeoutMs) {
+  return Connect(host, port, Deadline::After(timeoutMs));
+}
+
+bool TcpSocket::Connect(const char* host, u16 port, const Deadline& deadline) {
   Close();
-  timeval tv{};
-  tv.tv_sec = timeoutMs / 1000;
-  tv.tv_usec = (timeoutMs % 1000) * 1000;
 
   addrinfo hints{};
   hints.ai_family = AF_UNSPEC;
@@ -50,6 +82,18 @@ bool TcpSocket::Connect(const char* host, u16 port, int timeoutMs) {
 
   int lastErr = 0;
   for (addrinfo* ai = res; ai; ai = ai->ai_next) {
+    // The deadline bounds the WHOLE connect, across every candidate address, so
+    // a host with many A/AAAA records cannot multiply the wait.
+    if (deadline.expired()) { lastErr = ETIMEDOUT; break; }
+    int remaining = deadline.remainingMs();
+    timeval tv{};
+    if (remaining >= 0) {
+      tv.tv_sec = remaining / 1000;
+      tv.tv_usec = (remaining % 1000) * 1000;
+    } else {
+      tv.tv_sec = 5;
+    }
+
     int s = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
     if (s < 0) { lastErr = errno; continue; }
     int flags = ::fcntl(s, F_GETFL, 0);
@@ -94,9 +138,45 @@ ssize_t TcpSocket::Send(const void* data, size_t len) {
   return ::send(fd_, data, len, MSG_NOSIGNAL);
 }
 
+ssize_t TcpSocket::SendAll(const void* data, size_t len, const Deadline& deadline) {
+  if (fd_ < 0) return -1;
+  const char* p = (const char*)data;
+  size_t sent = 0;
+  while (sent < len) {
+    const int remaining = deadline.remainingMs();
+    if (remaining == 0) return sent > 0 ? (ssize_t)sent : -2;
+    fd_set wset;
+    FD_ZERO(&wset);
+    FD_SET(fd_, &wset);
+    timeval tv{};
+    const int waitMs = remaining < 0 ? 5000 : remaining;
+    tv.tv_sec = waitMs / 1000;
+    tv.tv_usec = (waitMs % 1000) * 1000;
+    const int rc = ::select(fd_ + 1, nullptr, &wset, nullptr, &tv);
+    if (rc == 0) return sent > 0 ? (ssize_t)sent : -2;   // deadline / idle
+    if (rc < 0) {
+      if (errno == EINTR) continue;
+      return sent > 0 ? (ssize_t)sent : -1;
+    }
+    const ssize_t n = ::send(fd_, p + sent, len - sent, MSG_NOSIGNAL);
+    if (n < 0) {
+      if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+      return sent > 0 ? (ssize_t)sent : -1;
+    }
+    sent += (size_t)n;
+  }
+  return (ssize_t)sent;
+}
+
 ssize_t TcpSocket::Recv(void* buf, size_t len, int timeoutMs) {
   if (fd_ < 0) return -1;
   if (!WaitReadable(timeoutMs)) return -2;   // timeout
+  return ::recv(fd_, buf, len, 0);
+}
+
+ssize_t TcpSocket::Recv(void* buf, size_t len, const Deadline& deadline) {
+  if (fd_ < 0) return -1;
+  if (!WaitReadable(deadline)) return -2;   // timeout or deadline passed
   return ::recv(fd_, buf, len, 0);
 }
 
@@ -110,6 +190,16 @@ bool TcpSocket::WaitReadable(int timeoutMs) {
   tv.tv_usec = (timeoutMs % 1000) * 1000;
   int rc = ::select(fd_ + 1, &rset, nullptr, nullptr, &tv);
   return rc > 0;
+}
+
+bool TcpSocket::WaitReadable(const Deadline& deadline) {
+  if (fd_ < 0) return false;
+  const int remaining = deadline.remainingMs();
+  if (remaining == 0) return false;   // deadline already passed
+  // With no deadline (-1) fall back to a bounded poll, so a caller can never
+  // block forever through this path either.
+  const int waitMs = remaining < 0 ? 5000 : remaining;
+  return WaitReadable(waitMs);
 }
 
 //----------------------------------------------------------------------------
@@ -258,18 +348,22 @@ const char* HttpResponse::Header(const char* name) const {
 }
 
 HttpRequest::HttpRequest(const char* url) : url_(url) {
-  // parse "http://host:port/path"
+  // parse "http://host:port/path" or "https://host:port/path"
   std::string u = url;
   std::string rest = u;
   if (rest.rfind("http://", 0) == 0) {
     rest = rest.substr(7);
   } else if (rest.rfind("https://", 0) == 0) {
-    // TLS is not implemented. An https request must FAIL CLOSED rather than
-    // open a plaintext socket to port 443: silently downgrading would send the
-    // caller's traffic unencrypted while they asked for TLS. `badScheme_`
-    // makes Do() refuse without touching the network.
-    badScheme_ = true;
     rest = rest.substr(8);
+    if (TlsSocket::Available()) {
+      tls_ = true;
+      port_ = 443;   // the default for https unless the authority overrides it
+    } else {
+      // A build without TLS must FAIL CLOSED on https rather than open a
+      // plaintext socket to port 443: silently downgrading would send the
+      // caller's traffic unencrypted while they asked for TLS.
+      badScheme_ = true;
+    }
   } else {
     badScheme_ = true;
     rest = u;
@@ -294,14 +388,26 @@ HttpRequest& HttpRequest::Header(const char* name, const char* value) {
 HttpResponse HttpRequest::Do() {
   HttpResponse resp;
   if (badScheme_) {
-    // https/wss (or a malformed scheme): refuse without opening a socket. A
-    // silent downgrade would send plaintext where TLS was requested.
+    // https without TLS support, or a malformed scheme: refuse without opening
+    // a socket. A silent downgrade would send plaintext where TLS was asked.
     resp.status = 0;
-    resp.reason = "unsupported scheme (TLS not implemented)";
+    resp.reason = "unsupported scheme (TLS not available)";
     return resp;
   }
+  // One absolute deadline for connect + handshake + send + every read. A
+  // per-read timeout is not a deadline: a server that dribbles one byte just
+  // before each timeout would otherwise keep this loop alive indefinitely.
+  const Deadline deadline = Deadline::After(timeoutMs_);
+
   TcpSocket sock;
-  if (!sock.Connect(host_.c_str(), port_, timeoutMs_)) {
+  TlsSocket tls;
+  if (tls_) {
+    if (!tls.Connect(host_.c_str(), port_, deadline)) {
+      resp.status = 0;
+      resp.reason = "tls connect failed: " + tls.LastError();
+      return resp;
+    }
+  } else if (!sock.Connect(host_.c_str(), port_, deadline)) {
     resp.status = 0;
     resp.reason = "connect error";
     return resp;
@@ -320,7 +426,9 @@ HttpResponse HttpRequest::Do() {
   req += "\r\n";
   req += body_;
 
-  if (sock.Send(req.data(), req.size()) != (ssize_t)req.size()) {
+  const ssize_t sent = tls_ ? tls.Send(req.data(), req.size(), deadline)
+                            : sock.SendAll(req.data(), req.size(), deadline);
+  if (sent != (ssize_t)req.size()) {
     resp.status = 0;
     resp.reason = "send failed";
     return resp;
@@ -332,9 +440,23 @@ HttpResponse HttpRequest::Do() {
   // forever must not be able to make the worker allocate without bound; the
   // read stops at the cap and the response is flagged truncated.
   const size_t cap = maxBodyBytes_ + 64 * 1024;   // headroom for the headers
+  bool timedOut = false;
   for (;;) {
-    ssize_t n = sock.Recv(buf, sizeof buf, timeoutMs_);
-    if (n < 0) break;
+    // The wait is clamped to what is left of the deadline, so the total time
+    // is bounded no matter how the peer paces its bytes.
+    ssize_t n = tls_ ? tls.Recv(buf, sizeof buf, deadline)
+                     : sock.Recv(buf, sizeof buf, deadline);
+    if (n < 0) {
+      if (n == -2) {
+        timedOut = true;
+        if (raw.empty()) {
+          resp.status = 0;
+          resp.reason = "timeout";
+          return resp;
+        }
+      }
+      break;
+    }
     if (n == 0) break;
     if (raw.size() + (size_t)n > cap) {
       raw.append(buf, cap - raw.size());
@@ -378,6 +500,9 @@ HttpResponse HttpRequest::Do() {
     resp.body.resize(maxBodyBytes_);
     resp.truncated = true;
   }
+  // A deadline that fired mid-body is a truncated response, not a complete one;
+  // flag it so a caller does not parse half a document as if it were whole.
+  if (timedOut) resp.truncated = true;
   return resp;
 }
 

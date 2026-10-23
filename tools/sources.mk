@@ -38,6 +38,7 @@ CORE_SRC := \
   core/lifecycle/engine.cpp \
   core/lifecycle/thread.cpp \
   core/net/net.cpp \
+  core/net/tls.cpp \
   core/net/ws_client.cpp \
   core/net/cosmetic_sync.cpp \
   core/net/lan_transport.cpp \
@@ -85,6 +86,92 @@ ED25519_SRC := \
   third_party/ed25519/keypair.c \
   third_party/ed25519/sign.c \
   third_party/ed25519/verify.c
+
+# Vendored mbedTLS (C): the client-side TLS 1.2/1.3 stack behind Berry::TlsSocket.
+# It is compiled with the trimmed third_party/mbedtls/include/mbedtls/
+# mbedtls_config.h, so a unit that is entirely `#if`-ed out is not listed here
+# (see third_party/mbedtls/PROVENANCE.md). Compiled as C99 with the vendored
+# include roots; MBEDTLS_CONFIG_FILE points at the vendored config.
+MBEDTLS_SRC := \
+  third_party/mbedtls/library/aes.c \
+  third_party/mbedtls/library/asn1parse.c \
+  third_party/mbedtls/library/asn1write.c \
+  third_party/mbedtls/library/base64.c \
+  third_party/mbedtls/library/bignum.c \
+  third_party/mbedtls/library/bignum_core.c \
+  third_party/mbedtls/library/bignum_mod.c \
+  third_party/mbedtls/library/bignum_mod_raw.c \
+  third_party/mbedtls/library/block_cipher.c \
+  third_party/mbedtls/library/ccm.c \
+  third_party/mbedtls/library/chacha20.c \
+  third_party/mbedtls/library/chachapoly.c \
+  third_party/mbedtls/library/cipher.c \
+  third_party/mbedtls/library/cipher_wrap.c \
+  third_party/mbedtls/library/cmac.c \
+  third_party/mbedtls/library/constant_time.c \
+  third_party/mbedtls/library/ctr_drbg.c \
+  third_party/mbedtls/library/dhm.c \
+  third_party/mbedtls/library/ecdh.c \
+  third_party/mbedtls/library/ecdsa.c \
+  third_party/mbedtls/library/ecp.c \
+  third_party/mbedtls/library/ecp_curves.c \
+  third_party/mbedtls/library/ecp_curves_new.c \
+  third_party/mbedtls/library/entropy.c \
+  third_party/mbedtls/library/entropy_poll.c \
+  third_party/mbedtls/library/error.c \
+  third_party/mbedtls/library/gcm.c \
+  third_party/mbedtls/library/hkdf.c \
+  third_party/mbedtls/library/hmac_drbg.c \
+  third_party/mbedtls/library/md.c \
+  third_party/mbedtls/library/oid.c \
+  third_party/mbedtls/library/pem.c \
+  third_party/mbedtls/library/pk.c \
+  third_party/mbedtls/library/pk_ecc.c \
+  third_party/mbedtls/library/pk_wrap.c \
+  third_party/mbedtls/library/pkcs5.c \
+  third_party/mbedtls/library/pkparse.c \
+  third_party/mbedtls/library/platform.c \
+  third_party/mbedtls/library/platform_util.c \
+  third_party/mbedtls/library/poly1305.c \
+  third_party/mbedtls/library/psa_crypto.c \
+  third_party/mbedtls/library/psa_crypto_aead.c \
+  third_party/mbedtls/library/psa_crypto_cipher.c \
+  third_party/mbedtls/library/psa_crypto_client.c \
+  third_party/mbedtls/library/psa_crypto_driver_wrappers_no_static.c \
+  third_party/mbedtls/library/psa_crypto_ecp.c \
+  third_party/mbedtls/library/psa_crypto_ffdh.c \
+  third_party/mbedtls/library/psa_crypto_hash.c \
+  third_party/mbedtls/library/psa_crypto_mac.c \
+  third_party/mbedtls/library/psa_crypto_pake.c \
+  third_party/mbedtls/library/psa_crypto_rsa.c \
+  third_party/mbedtls/library/psa_crypto_se.c \
+  third_party/mbedtls/library/psa_crypto_slot_management.c \
+  third_party/mbedtls/library/psa_crypto_storage.c \
+  third_party/mbedtls/library/psa_its_file.c \
+  third_party/mbedtls/library/psa_util.c \
+  third_party/mbedtls/library/rsa.c \
+  third_party/mbedtls/library/rsa_alt_helpers.c \
+  third_party/mbedtls/library/sha1.c \
+  third_party/mbedtls/library/sha256.c \
+  third_party/mbedtls/library/sha512.c \
+  third_party/mbedtls/library/ssl_ciphersuites.c \
+  third_party/mbedtls/library/ssl_client.c \
+  third_party/mbedtls/library/ssl_debug_helpers_generated.c \
+  third_party/mbedtls/library/ssl_msg.c \
+  third_party/mbedtls/library/ssl_tls.c \
+  third_party/mbedtls/library/ssl_tls12_client.c \
+  third_party/mbedtls/library/ssl_tls13_client.c \
+  third_party/mbedtls/library/ssl_tls13_generic.c \
+  third_party/mbedtls/library/ssl_tls13_keys.c \
+  third_party/mbedtls/library/threading.c \
+  third_party/mbedtls/library/version.c \
+  third_party/mbedtls/library/version_features.c \
+  third_party/mbedtls/library/x509.c \
+  third_party/mbedtls/library/x509_crt.c
+
+# Include roots mbedTLS expects. MBEDTLS_CONFIG_FILE names the vendored config
+# explicitly so a system mbedTLS config on the include path cannot leak in.
+MBEDTLS_INCLUDES := -Ithird_party/mbedtls/include -DMBEDTLS_CONFIG_FILE='"mbedtls/mbedtls_config.h"'
 
 TEST_SRC := \
   tests/test_math.cpp \
