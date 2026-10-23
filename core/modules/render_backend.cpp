@@ -36,6 +36,12 @@ namespace {
 struct GlProcs {
   void* (*(eglGetProcAddress))(const char*);
 
+  // EGL surface query, used to report the current surface size each frame.
+  // Resolved from RTLD_DEFAULT alongside the GL entry points.
+  void* (*(eglGetCurrentDisplay))(void);
+  void* (*(eglGetCurrentSurface))(int32_t);
+  int32_t (*(eglQuerySurface))(void*, void*, int32_t, int32_t*);
+
   void (*(glGenBuffers))(int32_t, uint32_t*);
   void (*(glBindBuffer))(uint32_t, uint32_t);
   void (*(glBufferData))(uint32_t, intptr_t, const void*, uint32_t);
@@ -84,6 +90,12 @@ constexpr uint32_t kGlLinkStatus       = 0x8B82;
 constexpr uint32_t kGlVertexShader     = 0x8B31;
 constexpr uint32_t kGlFragmentShader   = 0x8B30;
 
+// EGL enums for SurfaceSize(). EGL_DRAW = 0x3059, EGL_WIDTH = 0x3057,
+// EGL_HEIGHT = 0x3056.
+constexpr int32_t kEglDraw   = 0x3059;
+constexpr int32_t kEglWidth  = 0x3057;
+constexpr int32_t kEglHeight = 0x3056;
+
 const char* g_vertexSrc =
     "attribute vec2 aPos;\n"
     "attribute vec4 aColor;\n"
@@ -126,6 +138,9 @@ class GlesOverlayBackend final : public IRenderBackend {
       Log::Warn("GlesBackend: no eglGetProcAddress (headless?) — overlay off");
       return false;
     }
+    Load("eglGetCurrentDisplay", &gl_.eglGetCurrentDisplay);
+    Load("eglGetCurrentSurface", &gl_.eglGetCurrentSurface);
+    Load("eglQuerySurface", &gl_.eglQuerySurface);
     Load("glGenBuffers",   &gl_.glGenBuffers);
     Load("glBindBuffer",   &gl_.glBindBuffer);
     Load("glBufferData",   &gl_.glBufferData);
@@ -195,6 +210,24 @@ class GlesOverlayBackend final : public IRenderBackend {
   /// compositor upscales the result. Clamped to (0, 1]; 1.0 is native.
   void SetRenderScale(f32 scale) override {
     renderScale_ = (scale > 0.0f && scale <= 1.0f) ? scale : 1.0f;
+  }
+
+  /// Query the current EGL draw surface's size. Returns (0,0) when there is no
+  /// current surface or the EGL entry points are unavailable, so the client
+  /// skips the frame rather than drawing at a bogus scale.
+  Vec2 SurfaceSize() const override {
+    if (!gl_.eglGetCurrentDisplay || !gl_.eglGetCurrentSurface ||
+        !gl_.eglQuerySurface) {
+      return Vec2(0, 0);
+    }
+    void* dpy = gl_.eglGetCurrentDisplay();
+    void* surf = gl_.eglGetCurrentSurface(kEglDraw);
+    if (!dpy || !surf) return Vec2(0, 0);
+    int32_t w = 0, h = 0;
+    if (!gl_.eglQuerySurface(dpy, surf, kEglWidth, &w)) return Vec2(0, 0);
+    if (!gl_.eglQuerySurface(dpy, surf, kEglHeight, &h)) return Vec2(0, 0);
+    if (w <= 0 || h <= 0) return Vec2(0, 0);
+    return Vec2((f32)w, (f32)h);
   }
 
   /// Uploads the frame's coalesced geometry and issues the two draw calls.

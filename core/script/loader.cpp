@@ -317,6 +317,10 @@ ReloadResult LoadedScript::Reload(bool force) {
   return force ? reloader_->ForceReload() : reloader_->Poll();
 }
 
+void LoadedScript::SetBindings(const ScriptBindings* bindings) {
+  if (reloader_) reloader_->SetBindings(bindings);
+}
+
 LoadError LoadedScript::lastVerifyError() const {
   return source_ ? source_->lastError() : LoadError::Ok;
 }
@@ -446,7 +450,7 @@ bool ScriptLoader::Load(const std::string& directory, LoadedScript* out,
   // created through exactly one path.
   auto provider = std::make_shared<LoadedScript::Source>(directory, config_, fs_);
   auto reloader = std::unique_ptr<ScriptReloader>(new ScriptReloader(
-      manifest.name, effective, provider.get(), nullptr));
+      manifest.name, effective, provider.get(), config_.vmFactory));
   ScriptError firstErr;
   if (!reloader->InitialLoad(&firstErr)) {
     return fail(LoadError::HostLoadFailed, ManifestError::Ok, firstErr.message);

@@ -37,6 +37,14 @@ typedef struct BerryConfigC {
   int capture_log;       // 0/1 keep a capture buffer for the log viewer
   int auto_attach_modules;  // 0/1 register + attach the four strict modules
   int enable_render;        // 0/1 allow the render overlay
+  int enable_client;        // 0/1 build the client composition root (services)
+  int dev_mode;             // 0/1 skip manifest signature/source-hash checks
+  // The directory the client loads a script from, or NULL for none. The string
+  // is borrowed for the duration of the call and copied by the client.
+  const char* script_directory;
+  // The local player's runtime entity id, for player/world reads and the voice
+  // proximity check. 0 means unknown (those reads fail closed).
+  uint64_t local_player_id;
 } BerryConfigC;
 
 #ifdef __cplusplus

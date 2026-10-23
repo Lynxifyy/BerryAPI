@@ -17,6 +17,7 @@ namespace Berry {
 
 class SessionRecorder;
 class ReplayService;
+class BerryClient;
 
 //----------------------------------------------------------------------------
 // Engine — central BerryAPI instance.
@@ -35,6 +36,16 @@ struct EngineConfig {
   bool captureLog = false;
   bool autoAttachModules = true;
   bool enableRender = true;
+  /// Build the client composition root (owns the client services + the script
+  /// host). On by default; a pure telemetry injector turns it off.
+  bool enableClient = true;
+  /// Load manifests without signature/source-hash verification. Development
+  /// only; never set on device.
+  bool devMode = false;
+  /// The directory the client loads a script from, or empty for none.
+  std::string scriptDirectory;
+  /// The local player's runtime entity id (0 = unknown).
+  u64 localPlayerId = 0;
 };
 
 class BERRY_API Engine {
@@ -68,6 +79,12 @@ class BERRY_API Engine {
   /// the server is stopped until `ReplayServer::Start`.
   ReplayService& Replay() { return *replay_; }
 
+  /// The client composition root: owns the client services (UI, HUD, overlays,
+  /// registries, script host) and drives them on the tick/frame. Created by
+  /// `Attach` when the config enables it; null otherwise.
+  BerryClient* Client() { return client_.get(); }
+  const BerryClient* Client() const { return client_.get(); }
+
   // Tick -------------------------------------------------------------------
   /// Called from the game's RTT simulation tick each frame.
   void OnGameTick(GameTick tick);
@@ -97,11 +114,16 @@ class BERRY_API Engine {
   ModuleRegistry modules_;
   std::unique_ptr<SessionRecorder> recorder_;
   std::unique_ptr<ReplayService> replay_;
+  /// The client composition root. Declared after the modules it binds, so it is
+  /// destroyed before them (its services hold the world/render handles).
+  std::unique_ptr<BerryClient> client_;
   std::atomic<GameTick> currentTick_{0};
   std::atomic<bool> attached_{false};
   EngineConfig cfg_;
   GameTick lastFrameTick_ = 0;
   u64 lastReplayFrameMs_ = 0;
+  /// Wall-clock of the last presented frame, for the client frame delta.
+  u64 lastFrameMs_ = 0;
 };
 
 }  // namespace Berry

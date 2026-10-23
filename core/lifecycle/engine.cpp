@@ -1,4 +1,5 @@
 #include "berry/engine.h"
+#include "berry/client.h"
 #include "berry/event.h"
 #include "berry/services.h"
 #include "berry/session_recorder.h"
@@ -18,6 +19,7 @@ BerryConfigC DefaultConfigC() {
   cfg.abi_version = BERRY_ABI_VERSION;
   cfg.auto_attach_modules = 1;
   cfg.enable_render = 1;
+  cfg.enable_client = 1;
   return cfg;
 }
 
@@ -84,6 +86,10 @@ bool Engine::Bootstrap(const BerryConfigC& cfg) {
   internal.captureLog = cfg.capture_log != 0;
   internal.autoAttachModules = cfg.auto_attach_modules != 0;
   internal.enableRender = cfg.enable_render != 0;
+  internal.enableClient = cfg.enable_client != 0;
+  internal.devMode = cfg.dev_mode != 0;
+  if (cfg.script_directory) internal.scriptDirectory = cfg.script_directory;
+  internal.localPlayerId = cfg.local_player_id;
   ApplyConfig(internal);
   Log::Info("BerryAPI v%s bootstrapped (abi %u)", BERRY_VERSION_STRING,
             (unsigned)BERRY_ABI_VERSION);
@@ -118,6 +124,24 @@ bool Engine::Attach() {
   if (cfg_.autoAttachModules) {
     Modules().AttachAll(*this);
   }
+  // Build the client composition root: it owns the client services and the
+  // script host. It binds the World/Render/Combat handles the modules just
+  // exposed, so it must be built after AttachAll. A client that fails to attach
+  // is not fatal to the module set, but the failure is reported.
+  if (cfg_.enableClient && !client_) {
+    ClientConfig ccfg;
+    ccfg.scriptDirectory = cfg_.scriptDirectory;
+    ccfg.requireSignature = !cfg_.devMode;
+    ccfg.requireSourceHash = !cfg_.devMode;
+    ccfg.localPlayer.raw = cfg_.localPlayerId;
+    client_ = std::make_unique<BerryClient>();
+    if (!client_->Attach(*this, ccfg)) {
+      Log::Error("BerryClient failed to attach; detaching modules");
+      client_.reset();
+      Modules().DetachAll(*this);
+      return false;
+    }
+  }
   attached_.store(true);
   Log::Info("BerryAPI attached (%zu modules)", Modules().Count());
   return true;
@@ -125,6 +149,12 @@ bool Engine::Attach() {
 
 void Engine::Detach() {
   if (!attached_.load()) return;
+  // Tear the client down first: it owns the script worker and the services that
+  // hold the module handles, so it must stop before the modules do.
+  if (client_) {
+    client_->Detach();
+    client_.reset();
+  }
   Modules().DetachAll(*this);
   attached_.store(false);
   Log::Info("BerryAPI detached");
@@ -141,6 +171,9 @@ void Engine::OnGameTick(GameTick tick) {
   // state settled. The combat-state layer uses it to age hit predictions and
   // record hitbox history; it carries the tick number as the payload.
   EventBus::Instance().Emit("berry:tick", &tick, nullptr);
+  // The client's script tick runs on its own worker (posted, never inline on
+  // this thread), so the game tick never blocks on script code.
+  if (client_) client_->Tick(tick);
   ThreadModel::Instance().Leave();
 }
 
@@ -165,7 +198,23 @@ void Engine::OnFrame() {
   }
   // Render module's frame hook gets installed by Berry::Render on Attach.
   // Scripts never run on this thread; only render work + overlay.
+  // Bracket the client frame around the hook: open the renderer frame and
+  // publish the frame timing first (so a synchronous script read and the
+  // governor see this frame), then emit `berry:frame` so every overlay draws
+  // into that frame, then present. The frame delta is measured here, so the
+  // governor's clock is the real presentation cadence.
+  f32 frameMs = 0.0f;
+  const u64 now = NowMs();
+  if (lastFrameMs_ != 0 && now > lastFrameMs_) {
+    frameMs = (f32)(now - lastFrameMs_);
+    // A long stall (a breakpoint, a paused client) must not be read as a real
+    // frame time by the governor; clamp it to a plausible worst case.
+    if (frameMs > 1000.0f) frameMs = 1000.0f;
+  }
+  lastFrameMs_ = now;
+  if (client_) client_->BeginFrame(frameMs, client_->screenSize());
   EventBus::Instance().Emit("berry:frame", nullptr, nullptr);
+  if (client_) client_->EndFrame();
   ThreadModel::Instance().Leave();
 }
 

@@ -24,6 +24,7 @@
 #include "berry/reload.h"
 #include "berry/script.h"
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -123,6 +124,12 @@ struct BERRY_API ScriptLoaderConfig {
   /// requireSignature: a signed manifest must always bind its code).
   bool requireSourceHash = true;
 
+  /// Produces a fresh VM per revision. Empty means the self-contained reference
+  /// VM, which is right for the host tests; the device host sets `CreateLuauVm`
+  /// so the same loader path builds the real scripting VM. A reload discards a
+  /// failed candidate VM, so this must return a new VM each call.
+  std::function<std::unique_ptr<IScriptVm>()> vmFactory;
+
   /// A development configuration: no signature, no source binding. Never use
   /// on device; scripts load straight from the directory as written.
   static ScriptLoaderConfig DevMode();
@@ -153,6 +160,11 @@ class BERRY_API LoadedScript {
   /// Re-reads and re-verifies the script. A file that no longer verifies is
   /// refused and the previous revision keeps running.
   ReloadResult Reload(bool force = false);
+
+  /// Sets the native bindings the host exposes. A reload applies them to the
+  /// fresh host, so a reloaded revision sees the same surface. The bindings
+  /// must outlive the script.
+  void SetBindings(const ScriptBindings* bindings);
 
   /// Reports why the last reload's re-verification failed, if it did. Empty
   /// when the last read verified.

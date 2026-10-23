@@ -11,6 +11,7 @@
 #                    them rather than compiling empty objects.
 
 CORE_SRC := \
+  core/client/client.cpp \
   core/events/event.cpp \
   core/hooks/sigscan.cpp \
   core/hooks/backend_shim.cpp \
