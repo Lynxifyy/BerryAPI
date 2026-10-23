@@ -41,6 +41,7 @@ CORE_SRC := \
   core/net/cosmetic_sync.cpp \
   core/net/lan_transport.cpp \
   core/net/lan_discovery.cpp \
+  core/net/voice_transport.cpp \
   core/script/crypto.cpp \
   core/script/ed25519.cpp \
   core/script/manifest.cpp \
