@@ -202,6 +202,11 @@ class BERRY_API ReplayCamera {
   /// 0..1 fraction between them. Caller holds `mutex_`. False with no keys.
   bool BracketLocked(f32 tick, size_t* lo, size_t* hi, f32* t) const;
   CameraSample SampleLocked(f32 tick) const;
+  /// Samples `tick` and fills `out`. The single locked build path shared by the
+  /// live camera, the at-a-tick camera and the export step, so their projection
+  /// and dimension handling cannot drift. Caller holds `mutex_`.
+  bool BuildLocked(f32 tick, f32 aspect, f32 width, f32 height,
+                   CameraState* out) const;
 
   mutable std::mutex mutex_;
   std::vector<CameraKey> keys_;   // kept sorted by tick

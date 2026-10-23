@@ -349,11 +349,9 @@ Mat4 CameraViewMatrix(const Vec3& eye, f32 pitch, f32 yaw, f32 roll) {
   return Mat4::LookAt(eye, eye + fwd, up);
 }
 
-bool ReplayCamera::BuildCameraAt(f32 tick, f32 aspect, f32 width, f32 height,
-                                 CameraState* out) const {
-  if (!out) return false;
-  if (!std::isfinite(aspect) || aspect <= 0.0f) return false;
-  const CameraSample s = Sample(tick);
+bool ReplayCamera::BuildLocked(f32 tick, f32 aspect, f32 width, f32 height,
+                               CameraState* out) const {
+  const CameraSample s = SampleLocked(tick);
   if (!s.valid) return false;
   out->view = CameraViewMatrix(s.position, s.pitch, s.yaw, s.roll);
   out->projection = Mat4::Perspective(s.fov, aspect, 0.05f, 1024.0f);
@@ -363,19 +361,20 @@ bool ReplayCamera::BuildCameraAt(f32 tick, f32 aspect, f32 width, f32 height,
   return true;
 }
 
-bool ReplayCamera::BuildCamera(f32 aspect, f32 width, f32 height,
-                               CameraState* out) const {
-  std::lock_guard<std::mutex> lk(mutex_);
+bool ReplayCamera::BuildCameraAt(f32 tick, f32 aspect, f32 width, f32 height,
+                                 CameraState* out) const {
   if (!out) return false;
   if (!std::isfinite(aspect) || aspect <= 0.0f) return false;
-  const CameraSample s = SampleLocked(playhead_);
-  if (!s.valid) return false;
-  out->view = CameraViewMatrix(s.position, s.pitch, s.yaw, s.roll);
-  out->projection = Mat4::Perspective(s.fov, aspect, 0.05f, 1024.0f);
-  out->width = width;
-  out->height = height;
-  out->valid = true;
-  return true;
+  std::lock_guard<std::mutex> lk(mutex_);
+  return BuildLocked(tick, aspect, width, height, out);
+}
+
+bool ReplayCamera::BuildCamera(f32 aspect, f32 width, f32 height,
+                               CameraState* out) const {
+  if (!out) return false;
+  if (!std::isfinite(aspect) || aspect <= 0.0f) return false;
+  std::lock_guard<std::mutex> lk(mutex_);
+  return BuildLocked(playhead_, aspect, width, height, out);
 }
 
 //----------------------------------------------------------------------------
@@ -403,23 +402,31 @@ bool ReplayCamera::ExportBegin(f32 fps, f32 aspect, f32 width, f32 height) {
 
 bool ReplayCamera::ExportStep(CameraState* out) {
   if (!out) return false;
+  f32 tick = 0.0f, aspect = 0.0f, width = 0.0f, height = 0.0f;
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (!exporting_ || keys_.empty()) return false;
+    if (exportTick_ > (f32)keys_.back().tick) {
+      exporting_ = false;
+      return false;
+    }
+    tick = exportTick_;
+    aspect = exportAspect_;
+    width = exportWidth_;
+    height = exportHeight_;
+  }
+  // An export frame is "the camera at an explicit tick", so it goes through the
+  // same entry point an embedder scrubbing the timeline would use: the live and
+  // offline paths cannot disagree on the pose.
+  if (!BuildCameraAt(tick, aspect, width, height, out)) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    exporting_ = false;
+    return false;
+  }
   std::lock_guard<std::mutex> lk(mutex_);
-  if (!exporting_ || keys_.empty()) return false;
-  const f32 last = (f32)keys_.back().tick;
-  if (exportTick_ > last) {
-    exporting_ = false;
-    return false;
-  }
-  const CameraSample s = SampleLocked(exportTick_);
-  if (!s.valid) {
-    exporting_ = false;
-    return false;
-  }
-  out->view = CameraViewMatrix(s.position, s.pitch, s.yaw, s.roll);
-  out->projection = Mat4::Perspective(s.fov, exportAspect_, 0.05f, 1024.0f);
-  out->width = exportWidth_;
-  out->height = exportHeight_;
-  out->valid = true;
+  // A concurrent ExportEnd/Clear could have ended the walk while the lock was
+  // released for the build; do not advance a stopped export.
+  if (!exporting_) return false;
   // Advance one video frame's worth of ticks, whatever the machine's real
   // frame rate is: an export's length is a property of the timeline, not the
   // machine that rendered it.
