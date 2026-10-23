@@ -68,6 +68,8 @@ CORE_SRC := \
   core/replay/replay_format.cpp \
   core/replay/replay_capture.cpp \
   core/replay/replay_world.cpp \
+  core/replay/replay_review.cpp \
+  core/replay/replay_server.cpp \
   core/script/jsonrpc_client.cpp \
   core/net/rpc.cpp \
   core/script/layout.cpp \
