@@ -35,6 +35,9 @@
 #include "berry/combat_state.h"
 #include "berry/animator.h"
 #include "berry/replay_camera.h"
+#include "berry/radial.h"
+#include "berry/crystal.h"
+#include "berry/voice.h"
 #include "berry/cosmetic.h"
 #include "berry/event.h"
 #include "berry/fs.h"
@@ -190,6 +193,19 @@ class BERRY_API ScriptApi {
     /// scripted viewpoint instead of the player's. Null makes the `replay.*`
     /// bindings fail closed.
     ReplayCamera* replayCamera = nullptr;
+    /// Client-side radial (pie) menu. Null makes the `radial.*` bindings fail
+    /// closed and the frame hook skip the menu.
+    RadialMenu* radial = nullptr;
+    /// Client-side crystal-placement advisor. Null makes the `crystal.*`
+    /// bindings fail closed (an analysis recommends nothing) and the tick hook
+    /// skip the advisory overlay. It needs `world` for the entity list the
+    /// analysis ranks against.
+    CrystalOptimizer* crystal = nullptr;
+    /// Client-side proximity voice chat. Null makes the `voice.*` bindings fail
+    /// closed (no session, no frames) and the frame hook skip the voice pump.
+    /// The frame hook wires its proximity resolver to `world`/`localPlayer`, so
+    /// a speaker is only heard when the listener's own world view places them.
+    VoiceService* voice = nullptr;
   };
 
   ScriptApi();
@@ -291,6 +307,12 @@ class BERRY_API ScriptApi {
   EventBus::ListenerId combatListener_ = 0;
   EventBus::ListenerId tickListener_ = 0;
   EventBus::ListenerId combatStateListener_ = 0;
+  /// The crystal advisor's tick pass. Separate from `tickListener_` so arming
+  /// the advisor never disturbs the combat-state feed.
+  EventBus::ListenerId crystalListener_ = 0;
+  /// The last published crystal advice ("x,y,z,score"), so a tick that does not
+  /// change the best spot publishes nothing.
+  std::string lastCrystalAdvice_;
   /// The wall-clock ms of the last presented frame, for the PvP overlay's
   /// animation delta. Render thread only.
   u64 lastFrameMs_ = 0;
@@ -299,6 +321,13 @@ class BERRY_API ScriptApi {
   u64 lastAnimatorMs_ = 0;
   /// Frame clock for replay-camera playback, kept separate for the same reason.
   u64 lastReplayMs_ = 0;
+  /// Frame clock for the radial menu's open/close animation, kept separate for
+  /// the same reason.
+  u64 lastRadialMs_ = 0;
+  /// True once the frame hook has bound the voice proximity resolver. Reset when
+  /// the services are swapped, so a new world gets a fresh resolver rather than
+  /// a closure over the old handle.
+  bool voiceWired_ = false;
 
   // Immediate-mode UI frame state. A script's `ui.begin_frame` opens the frame
   // and `ui.end_frame` publishes it, so the embedder never calls

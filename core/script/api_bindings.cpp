@@ -263,6 +263,60 @@ Vec3 LookDirection(const Vec3& rotationDeg) {
   return Vec3(-std::sin(yaw) * cp, -std::sin(pitch), std::cos(yaw) * cp).Normalized();
 }
 
+/// The block query the crystal advisor tests each candidate spot against: the
+/// same `LevelSeam` the world reads use, so nothing new is read from the engine.
+class SeamWorld final : public CrystalWorld {
+ public:
+  explicit SeamWorld(std::shared_ptr<LevelSeam> seam) : seam_(std::move(seam)) {}
+  u32 BlockAt(const Vec3& p) const override { return seam_ ? seam_->GetBlock(p) : 0; }
+
+ private:
+  std::shared_ptr<LevelSeam> seam_;
+};
+
+/// The entity list a crystal analysis ranks against: every live entity the world
+/// seam already holds. Read-only; nothing new is read from the engine.
+std::vector<EntitySnapshot> LiveEntities(const WorldHandle& world) {
+  std::vector<EntitySnapshot> out;
+  auto seam = world.Seam();
+  if (!seam) return out;
+  for (const EntityId& id : seam->AllEntities()) {
+    EntitySnapshot snap;
+    if (seam->GetEntity(id, &snap) && snap.alive) out.push_back(snap);
+  }
+  return out;
+}
+
+/// Resolves a voice speaker id to a world position from the listener's own view.
+///
+/// A speaker id is opaque to the transport (a peer names itself). The client
+/// maps it to an entity it already knows by, in order: the entity's display
+/// name, then the "<raw>:<runtime>" id spelling. A speaker the listener's world
+/// does not hold resolves to nothing, so the voice service drops the frame —
+/// this is what keeps proximity judged against the listener's own view and
+/// nothing else.
+bool ResolveSpeaker(const WorldHandle& world, const std::string& speakerId,
+                    Vec3* outPos) {
+  auto seam = world.Seam();
+  if (!seam) return false;
+  for (const EntityId& id : seam->AllEntities()) {
+    EntitySnapshot snap;
+    if (!seam->GetEntity(id, &snap) || !snap.alive) continue;
+    if (snap.name == speakerId) {
+      if (outPos) *outPos = snap.position;
+      return true;
+    }
+    const std::string idSpelling =
+        std::to_string((unsigned long long)id.raw) + ":" +
+        std::to_string((unsigned)id.runtime);
+    if (idSpelling == speakerId) {
+      if (outPos) *outPos = snap.position;
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 //----------------------------------------------------------------------------
@@ -388,6 +442,33 @@ void ScriptApi::InitFrameHook() {
             services_.ui->Present(*services_.renderer, in);
           }
         }
+        // The radial menu draws over the UI, centred on the screen. The frame
+        // hook owns its clock and hit-test: it reads the pointer and the select
+        // button (right mouse) from the input snapshot, advances the open/close
+        // animation, resolves the hovered sector, commits on a release, and
+        // draws the open menu. A menu with no items draws nothing.
+        if (services_.radial && services_.renderer) {
+          const Vec2 screen = screenSize();
+          if (screen.x > 0 && screen.y > 0) {
+            const u64 now = NowMs();
+            f32 dt = 0.0f;
+            if (lastRadialMs_ != 0 && now > lastRadialMs_) {
+              dt = (f32)(now - lastRadialMs_) / 1000.0f;
+              if (dt > 0.1f) dt = 0.1f;   // a stall must not fast-forward the menu
+            }
+            lastRadialMs_ = now;
+            Vec2 pointer(screen.x * 0.5f, screen.y * 0.5f);
+            bool held = false;
+            if (services_.input) {
+              const InputState& st = services_.input->state();
+              pointer = st.pointer;
+              held = st.use;
+            }
+            const Vec2 center(screen.x * 0.5f, screen.y * 0.5f);
+            services_.radial->Update(dt, center, pointer, held);
+            services_.radial->Draw(*services_.renderer, center);
+          }
+        }
         // The script-module overlay draws last, on top, when a user turned it
         // on. It reads a snapshot, so a module declared this frame is next
         // frame's line rather than a torn draw.
@@ -396,6 +477,29 @@ void ScriptApi::InitFrameHook() {
           if (screen.x > 0 && screen.y > 0) {
             services_.modules->DrawOverlay(*services_.renderer, screen);
           }
+        }
+        // The voice service pumps once per frame, on this thread. It is the
+        // production caller for the whole voice path: it sets the local
+        // player's position and the proximity resolver (both from the listener's
+        // own world view), then captures/sends while talking and always polls,
+        // decodes, gates by proximity and plays. Nothing here runs when no voice
+        // service is bound or no session is running (Pump is a no-op then).
+        if (services_.voice && services_.world) {
+          if (!voiceWired_) {
+            // Bind the resolver once: it closes over the world handle, which
+            // lives for the session, and reads only the seam the world already
+            // holds. A speaker the listener cannot see resolves to nothing.
+            WorldHandle* world = services_.world;
+            services_.voice->SetProximityResolver(
+                [world](const std::string& id, Vec3* out) {
+                  return world && ResolveSpeaker(*world, id, out);
+                });
+            voiceWired_ = true;
+          }
+          const EntitySnapshot self =
+              services_.world->GetEntity(services_.localPlayer);
+          if (self.alive) services_.voice->SetPosition(self.position);
+          services_.voice->Pump(NowMs(), 0);
         }
         return EventResult::Continue;
       });
@@ -418,11 +522,18 @@ void ScriptApi::RemoveHooks() {
     EventBus::Instance().Off("berry:combat", combatStateListener_);
     combatStateListener_ = 0;
   }
+  if (crystalListener_) {
+    EventBus::Instance().Off("berry:tick", crystalListener_);
+    crystalListener_ = 0;
+  }
 }
 
 void ScriptApi::SetServices(const Services& services) {
   std::lock_guard<std::mutex> lk(mutex_);
   services_ = services;
+  // A new world (or a new voice service) must get a fresh proximity resolver:
+  // the old one closes over the previous world handle.
+  voiceWired_ = false;
 }
 
 bool ScriptApi::Install(const std::string& name,
@@ -3196,6 +3307,468 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Num((f64)services_.replayCamera->exportFps());
   });
 
+  //--- Radial (client-side pie menu) ---------------------------------------
+  //
+  // The script authors the item list and opens/closes the menu; the frame hook
+  // drives the animation and the hit-test on the render thread and publishes a
+  // committed item as `radialSelected`. A call with no menu bound fails closed
+  // (the HUD convention, not an error): the item edits report false, `state` is
+  // an inert table, and `sector_at` still answers, because it is pure geometry
+  // with no service behind it. Failing closed rather than raising lets a script
+  // that expects a menu run unchanged against a host that has none.
+  auto radial = [this]() -> RadialMenu* { return services_.radial; };
+
+  install("radial.add_item", [radial](ScriptContext&, const std::vector<ScriptValue>& args) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(m->AddItem(args[0].ToDisplay(), args[1].Truthy()));
+  });
+
+  install("radial.remove_item", [radial](ScriptContext&, const std::vector<ScriptValue>& args) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Bool(false);
+    const f64 i = args[0].AsNumber();
+    if (!std::isfinite(i) || i < 0.0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(m->RemoveItem((size_t)i));
+  });
+
+  install("radial.clear", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.radial) services_.radial->Clear();
+    return ScriptValue::Nil();
+  });
+
+  install("radial.count", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.radial) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.radial->itemCount());
+  });
+
+  install("radial.item_label", [radial](ScriptContext&, const std::vector<ScriptValue>& args) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Str("");
+    const f64 i = args[0].AsNumber();
+    if (!std::isfinite(i) || i < 0.0) return ScriptValue::Str("");
+    return ScriptValue::Str(m->itemLabel((size_t)i));
+  });
+
+  install("radial.item_enabled", [radial](ScriptContext&, const std::vector<ScriptValue>& args) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Bool(false);
+    const f64 i = args[0].AsNumber();
+    if (!std::isfinite(i) || i < 0.0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(m->itemEnabled((size_t)i));
+  });
+
+  install("radial.set_item_enabled", [radial](ScriptContext&, const std::vector<ScriptValue>& args) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Bool(false);
+    const f64 i = args[0].AsNumber();
+    if (!std::isfinite(i) || i < 0.0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(m->SetItemEnabled((size_t)i, args[1].Truthy()));
+  });
+
+  install("radial.open", [radial](ScriptContext&, const std::vector<ScriptValue>&) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(m->Open());
+  });
+
+  install("radial.close", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.radial) services_.radial->Close();
+    return ScriptValue::Nil();
+  });
+
+  install("radial.is_open", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.radial) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.radial->open());
+  });
+
+  install("radial.radius", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.radial) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.radial->config().radius);
+  });
+
+  install("radial.set_radius", [radial](ScriptContext&, const std::vector<ScriptValue>& args) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(m->SetRadius((f32)args[0].AsNumber()));
+  });
+
+  install("radial.inner_radius", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.radial) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.radial->config().innerRadius);
+  });
+
+  install("radial.set_inner_radius", [radial](ScriptContext&, const std::vector<ScriptValue>& args) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(m->SetInnerRadius((f32)args[0].AsNumber()));
+  });
+
+  install("radial.open_ms", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.radial) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.radial->config().openMs);
+  });
+
+  install("radial.set_open_ms", [radial](ScriptContext&, const std::vector<ScriptValue>& args) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(m->SetOpenMs((f32)args[0].AsNumber()));
+  });
+
+  install("radial.state", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    RadialState s;
+    if (services_.radial) s = services_.radial->state();
+    ScriptTable t;
+    t["open"] = ScriptValue::Bool(s.open);
+    t["hovered"] = ScriptValue::Num((f64)s.hovered);
+    t["selected"] = ScriptValue::Num((f64)s.selected);
+    t["progress"] = ScriptValue::Num((f64)s.progress);
+    t["items"] = ScriptValue::Num((f64)s.items);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("radial.sector_at", [](ScriptContext&, const std::vector<ScriptValue>& args) {
+    const Vec2 pointer((f32)args[0].AsNumber(), (f32)args[1].AsNumber());
+    const Vec2 center((f32)args[2].AsNumber(), (f32)args[3].AsNumber());
+    const f32 inner = (f32)args[4].AsNumber();
+    const f32 outer = (f32)args[5].AsNumber();
+    const f64 count = args[6].AsNumber();
+    if (!std::isfinite(count) || count < 0.0 || count > 64.0) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)RadialMenu::SectorFor(pointer, center, inner, outer, (size_t)count));
+  });
+
+  //--- Crystal (client-side placement advisor) -----------------------------
+  //
+  // The script tunes the advisor and either asks for a one-shot analysis or
+  // arms it to run an advisory pass each game tick (see the tick hook). It is
+  // advisory and read-only: nothing here places a block or sends a packet. A
+  // call with no advisor bound fails closed (an analysis recommends nothing),
+  // and `estimate` still answers, because it is pure arithmetic.
+  auto crystal = [this]() -> CrystalOptimizer* { return services_.crystal; };
+  auto placementTable = [](const CrystalPlacement& p, bool ok) {
+    ScriptTable t;
+    t["ok"] = ScriptValue::Bool(ok);
+    t["x"] = ScriptValue::Num((f64)p.position.x);
+    t["y"] = ScriptValue::Num((f64)p.position.y);
+    t["z"] = ScriptValue::Num((f64)p.position.z);
+    t["targets"] = ScriptValue::Num((f64)p.targetsHit);
+    t["total_damage"] = ScriptValue::Num((f64)p.totalDamage);
+    t["best_damage"] = ScriptValue::Num((f64)p.bestDamage);
+    t["self_damage"] = ScriptValue::Num((f64)p.selfDamage);
+    t["score"] = ScriptValue::Num((f64)p.score);
+    return t;
+  };
+
+  install("crystal.config", [crystal](ScriptContext&, const std::vector<ScriptValue>&) {
+    CrystalConfig c;
+    if (CrystalOptimizer* o = crystal()) c = o->config();
+    ScriptTable t;
+    t["place_range"] = ScriptValue::Num((f64)c.placeRange);
+    t["blast_radius"] = ScriptValue::Num((f64)c.blastRadius);
+    t["max_damage"] = ScriptValue::Num((f64)c.maxDamage);
+    t["min_targets"] = ScriptValue::Num((f64)c.minTargets);
+    t["self_damage_weight"] = ScriptValue::Num((f64)c.selfDamageWeight);
+    t["max_self_damage"] = ScriptValue::Num((f64)c.maxSelfDamage);
+    t["levels"] = ScriptValue::Num((f64)c.levels);
+    t["max_results"] = ScriptValue::Num((f64)c.maxResults);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  // Each setter copies the current config, changes one field, and offers the
+  // whole thing back through SetConfig, so the one validator decides. A refused
+  // value leaves every field unchanged.
+  install("crystal.set_range", [crystal](ScriptContext&, const std::vector<ScriptValue>& args) {
+    CrystalOptimizer* o = crystal();
+    if (!o) return ScriptValue::Bool(false);
+    CrystalConfig c = o->config();
+    c.placeRange = (f32)args[0].AsNumber();
+    return ScriptValue::Bool(o->SetConfig(c));
+  });
+  install("crystal.set_blast_radius", [crystal](ScriptContext&, const std::vector<ScriptValue>& args) {
+    CrystalOptimizer* o = crystal();
+    if (!o) return ScriptValue::Bool(false);
+    CrystalConfig c = o->config();
+    c.blastRadius = (f32)args[0].AsNumber();
+    return ScriptValue::Bool(o->SetConfig(c));
+  });
+  install("crystal.set_max_damage", [crystal](ScriptContext&, const std::vector<ScriptValue>& args) {
+    CrystalOptimizer* o = crystal();
+    if (!o) return ScriptValue::Bool(false);
+    CrystalConfig c = o->config();
+    c.maxDamage = (f32)args[0].AsNumber();
+    return ScriptValue::Bool(o->SetConfig(c));
+  });
+  install("crystal.set_min_targets", [crystal](ScriptContext&, const std::vector<ScriptValue>& args) {
+    CrystalOptimizer* o = crystal();
+    if (!o) return ScriptValue::Bool(false);
+    const f64 n = args[0].AsNumber();
+    // A count must be a whole number; a fractional one cannot name targets.
+    if (!std::isfinite(n) || n < 0.0 || n != std::floor(n)) return ScriptValue::Bool(false);
+    CrystalConfig c = o->config();
+    c.minTargets = (i32)n;
+    return ScriptValue::Bool(o->SetConfig(c));
+  });
+  install("crystal.set_self_damage_weight", [crystal](ScriptContext&, const std::vector<ScriptValue>& args) {
+    CrystalOptimizer* o = crystal();
+    if (!o) return ScriptValue::Bool(false);
+    CrystalConfig c = o->config();
+    c.selfDamageWeight = (f32)args[0].AsNumber();
+    return ScriptValue::Bool(o->SetConfig(c));
+  });
+  install("crystal.set_max_self_damage", [crystal](ScriptContext&, const std::vector<ScriptValue>& args) {
+    CrystalOptimizer* o = crystal();
+    if (!o) return ScriptValue::Bool(false);
+    CrystalConfig c = o->config();
+    c.maxSelfDamage = (f32)args[0].AsNumber();
+    return ScriptValue::Bool(o->SetConfig(c));
+  });
+  install("crystal.set_levels", [crystal](ScriptContext&, const std::vector<ScriptValue>& args) {
+    CrystalOptimizer* o = crystal();
+    if (!o) return ScriptValue::Bool(false);
+    const f64 n = args[0].AsNumber();
+    if (!std::isfinite(n) || n != std::floor(n)) return ScriptValue::Bool(false);
+    CrystalConfig c = o->config();
+    c.levels = (i32)n;
+    return ScriptValue::Bool(o->SetConfig(c));
+  });
+  install("crystal.set_max_results", [crystal](ScriptContext&, const std::vector<ScriptValue>& args) {
+    CrystalOptimizer* o = crystal();
+    if (!o) return ScriptValue::Bool(false);
+    const f64 n = args[0].AsNumber();
+    if (!std::isfinite(n) || n < 1.0 || n != std::floor(n)) return ScriptValue::Bool(false);
+    CrystalConfig c = o->config();
+    c.maxResults = (size_t)n;
+    return ScriptValue::Bool(o->SetConfig(c));
+  });
+
+  install("crystal.analyze", [this, crystal](ScriptContext&, const std::vector<ScriptValue>& args) {
+    CrystalOptimizer* o = crystal();
+    if (!o || !services_.world) return ScriptValue::Num(0);
+    const Vec3 origin((f32)args[0].AsNumber(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber());
+    const std::vector<EntitySnapshot> targets = LiveEntities(*services_.world);
+    // The block query the advisor tests each spot against is the same seam the
+    // world reads use.
+    SeamWorld world(services_.world->Seam());
+    return ScriptValue::Num((f64)o->Analyze(origin, services_.localPlayer, targets,
+                                            world, NowMs()).size());
+  });
+
+  install("crystal.count", [crystal](ScriptContext&, const std::vector<ScriptValue>&) {
+    CrystalOptimizer* o = crystal();
+    return ScriptValue::Num(o ? (f64)o->recommendations().size() : 0.0);
+  });
+
+  install("crystal.best", [crystal, placementTable](ScriptContext&, const std::vector<ScriptValue>&) {
+    CrystalOptimizer* o = crystal();
+    if (!o) return ScriptValue::Tbl(placementTable(CrystalPlacement{}, false));
+    bool ok = false;
+    const CrystalPlacement p = o->best(&ok);
+    return ScriptValue::Tbl(placementTable(p, ok));
+  });
+
+  install("crystal.placement", [crystal, placementTable](ScriptContext&, const std::vector<ScriptValue>& args) {
+    CrystalOptimizer* o = crystal();
+    if (!o) return ScriptValue::Tbl(ScriptTable{});
+    const f64 i = args[0].AsNumber();
+    if (!std::isfinite(i) || i < 0.0) return ScriptValue::Tbl(ScriptTable{});
+    const std::vector<CrystalPlacement> recs = o->recommendations();
+    if ((size_t)i >= recs.size()) return ScriptValue::Tbl(ScriptTable{});
+    return ScriptValue::Tbl(placementTable(recs[(size_t)i], true));
+  });
+
+  install("crystal.estimate", [crystal](ScriptContext&, const std::vector<ScriptValue>& args) {
+    CrystalConfig c;
+    if (CrystalOptimizer* o = crystal()) c = o->config();
+    const Vec3 center((f32)args[0].AsNumber(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber());
+    const Vec3 target((f32)args[3].AsNumber(), (f32)args[4].AsNumber(), (f32)args[5].AsNumber());
+    return ScriptValue::Num((f64)CrystalOptimizer::EstimateDamage(center, target, c));
+  });
+
+  install("crystal.stats", [crystal](ScriptContext&, const std::vector<ScriptValue>&) {
+    CrystalStats s;
+    if (CrystalOptimizer* o = crystal()) s = o->stats();
+    ScriptTable t;
+    t["analyses"] = ScriptValue::Num((f64)s.analyses);
+    t["candidates"] = ScriptValue::Num((f64)s.candidates);
+    t["placements"] = ScriptValue::Num((f64)s.placements);
+    t["best_score"] = ScriptValue::Num((f64)s.bestScore);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("crystal.reset", [crystal](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (CrystalOptimizer* o = crystal()) o->Reset();
+    return ScriptValue::Nil();
+  });
+
+  install("crystal.arm", [crystal](ScriptContext&, const std::vector<ScriptValue>&) {
+    CrystalOptimizer* o = crystal();
+    if (!o) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(o->Arm());
+  });
+
+  install("crystal.disarm", [crystal](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (CrystalOptimizer* o = crystal()) o->Disarm();
+    return ScriptValue::Nil();
+  });
+
+  install("crystal.armed", [crystal](ScriptContext&, const std::vector<ScriptValue>&) {
+    CrystalOptimizer* o = crystal();
+    return ScriptValue::Bool(o ? o->armed() : false);
+  });
+
+  //--- Voice (client-side proximity voice chat) ----------------------------
+  //
+  // A session is explicit: a script starts it, arms push-to-talk and lets the
+  // frame hook pump it. With no service bound every call fails closed (no
+  // session, nothing heard) and `transport` reports an empty name. The pump is
+  // the only place audio moves; it is driven from the frame hook, not a script
+  // call, so a script cannot spin the microphone.
+  auto voice = [this]() -> VoiceService* { return services_.voice; };
+  auto voiceConfigTable = [](const VoiceConfig& c) {
+    ScriptTable t;
+    t["max_range"] = ScriptValue::Num((f64)c.maxRange);
+    t["full_volume_range"] = ScriptValue::Num((f64)c.fullVolumeRange);
+    t["master_volume"] = ScriptValue::Num((f64)c.masterVolume);
+    t["max_speakers"] = ScriptValue::Num((f64)c.maxSpeakers);
+    t["hold_ms"] = ScriptValue::Num((f64)c.holdMs);
+    t["max_frame_bytes"] = ScriptValue::Num((f64)c.maxFrameBytes);
+    t["min_send_interval_ms"] = ScriptValue::Num((f64)c.minSendIntervalMs);
+    return ScriptValue::Tbl(std::move(t));
+  };
+  // Each setter copies the current config, changes one field and offers the
+  // whole thing back through SetConfig, so the one validator decides; a refused
+  // value leaves every field unchanged. With no service it reports false.
+  auto voiceSet = [voice](f64 v,
+                          void (*apply)(VoiceConfig&, f64)) {
+    VoiceService* s = voice();
+    if (!s) return false;
+    VoiceConfig c = s->config();
+    apply(c, v);
+    return s->SetConfig(c);
+  };
+  install("voice.config", [voice, voiceConfigTable](ScriptContext&, const std::vector<ScriptValue>&) {
+    VoiceConfig c;
+    if (VoiceService* s = voice()) c = s->config();
+    return voiceConfigTable(c);
+  });
+
+  install("voice.set_max_range", [voiceSet](ScriptContext&, const std::vector<ScriptValue>& args) {
+    return ScriptValue::Bool(voiceSet(args[0].AsNumber(),
+        [](VoiceConfig& c, f64 v) { c.maxRange = (f32)v; }));
+  });
+  install("voice.set_full_volume_range", [voiceSet](ScriptContext&, const std::vector<ScriptValue>& args) {
+    return ScriptValue::Bool(voiceSet(args[0].AsNumber(),
+        [](VoiceConfig& c, f64 v) { c.fullVolumeRange = (f32)v; }));
+  });
+  install("voice.set_master_volume", [voiceSet](ScriptContext&, const std::vector<ScriptValue>& args) {
+    return ScriptValue::Bool(voiceSet(args[0].AsNumber(),
+        [](VoiceConfig& c, f64 v) { c.masterVolume = (f32)v; }));
+  });
+  install("voice.set_max_speakers", [voiceSet](ScriptContext&, const std::vector<ScriptValue>& args) {
+    const f64 n = args[0].AsNumber();
+    if (n != std::floor(n)) return ScriptValue::Bool(false);   // a count is whole
+    return ScriptValue::Bool(voiceSet(n,
+        [](VoiceConfig& c, f64 v) { c.maxSpeakers = (size_t)v; }));
+  });
+  install("voice.set_hold_ms", [voiceSet](ScriptContext&, const std::vector<ScriptValue>& args) {
+    const f64 n = args[0].AsNumber();
+    if (n != std::floor(n)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(voiceSet(n,
+        [](VoiceConfig& c, f64 v) { c.holdMs = (u64)v; }));
+  });
+  install("voice.set_max_frame_bytes", [voiceSet](ScriptContext&, const std::vector<ScriptValue>& args) {
+    const f64 n = args[0].AsNumber();
+    if (n != std::floor(n)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(voiceSet(n,
+        [](VoiceConfig& c, f64 v) { c.maxFrameBytes = (size_t)v; }));
+  });
+  install("voice.set_min_send_interval_ms", [voiceSet](ScriptContext&, const std::vector<ScriptValue>& args) {
+    const f64 n = args[0].AsNumber();
+    if (n != std::floor(n)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(voiceSet(n,
+        [](VoiceConfig& c, f64 v) { c.minSendIntervalMs = (u64)v; }));
+  });
+
+  install("voice.start", [voice](ScriptContext&, const std::vector<ScriptValue>& args) {
+    VoiceService* s = voice();
+    return ScriptValue::Bool(s ? s->Start(args[0].ToDisplay()) : false);
+  });
+  install("voice.stop", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (VoiceService* s = voice()) s->Stop();
+    return ScriptValue::Nil();
+  });
+  install("voice.running", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    VoiceService* s = voice();
+    return ScriptValue::Bool(s ? s->running() : false);
+  });
+  install("voice.self_id", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    VoiceService* s = voice();
+    return ScriptValue::Str(s ? s->selfId() : std::string());
+  });
+  install("voice.set_talking", [voice](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (VoiceService* s = voice()) s->SetTalking(args[0].Truthy());
+    return ScriptValue::Nil();
+  });
+  install("voice.talking", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    VoiceService* s = voice();
+    return ScriptValue::Bool(s ? s->talking() : false);
+  });
+  install("voice.set_muted", [voice](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (VoiceService* s = voice()) s->SetMuted(args[0].Truthy());
+    return ScriptValue::Nil();
+  });
+  install("voice.muted", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    VoiceService* s = voice();
+    return ScriptValue::Bool(s ? s->muted() : false);
+  });
+  install("voice.set_position", [voice](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (VoiceService* s = voice()) {
+      s->SetPosition(Vec3((f32)args[0].AsNumber(), (f32)args[1].AsNumber(),
+                          (f32)args[2].AsNumber()));
+    }
+    return ScriptValue::Nil();
+  });
+  install("voice.speaker_count", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    VoiceService* s = voice();
+    return ScriptValue::Num(s ? (f64)s->speakers().size() : 0.0);
+  });
+  install("voice.speaker", [voice](ScriptContext&, const std::vector<ScriptValue>& args) {
+    ScriptTable t;
+    VoiceService* s = voice();
+    const f64 idx = args[0].AsNumber();
+    if (!s || idx < 0.0 || idx != std::floor(idx)) return ScriptValue::Tbl(std::move(t));
+    const std::vector<VoiceSpeaker> sp = s->speakers();
+    if ((size_t)idx >= sp.size()) return ScriptValue::Tbl(std::move(t));
+    const VoiceSpeaker& e = sp[(size_t)idx];
+    t["id"] = ScriptValue::Str(e.id);
+    t["level"] = ScriptValue::Num((f64)e.level);
+    t["distance"] = ScriptValue::Num((f64)e.distance);
+    t["last_ms"] = ScriptValue::Num((f64)e.lastMs);
+    return ScriptValue::Tbl(std::move(t));
+  });
+  install("voice.stats", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    VoiceStats st;
+    if (VoiceService* s = voice()) st = s->stats();
+    ScriptTable t;
+    t["frames_captured"] = ScriptValue::Num((f64)st.framesCaptured);
+    t["frames_sent"] = ScriptValue::Num((f64)st.framesSent);
+    t["frames_received"] = ScriptValue::Num((f64)st.framesReceived);
+    t["frames_dropped"] = ScriptValue::Num((f64)st.framesDropped);
+    t["frames_played"] = ScriptValue::Num((f64)st.framesPlayed);
+    t["bytes_sent"] = ScriptValue::Num((f64)st.bytesSent);
+    t["bytes_received"] = ScriptValue::Num((f64)st.bytesReceived);
+    return ScriptValue::Tbl(std::move(t));
+  });
+  install("voice.reset", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (VoiceService* s = voice()) s->Reset();
+    return ScriptValue::Nil();
+  });
+  install("voice.transport", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    VoiceService* s = voice();
+    if (!s || !s->transport()) return ScriptValue::Str(std::string());
+    return ScriptValue::Str(s->transport()->name());
+  });
+
   //--- Fs (sandboxed file store) --------------------------------------------
   //
   // The store validates every path and enforces the size/count caps, so these
@@ -3945,6 +4518,46 @@ void ScriptApi::InitCombatStateHook() {
         }
         // Age pending hit predictions: anything past the window becomes a miss.
         services_.combatState->Tick(tick);
+        return EventResult::Continue;
+      });
+
+  // The crystal advisor, when a script has armed it, runs one advisory pass per
+  // game tick around the local player and publishes the best spot when it
+  // changes. It reads the same entity list and block seam the world reads use
+  // and never places anything; the pass is skipped entirely when disarmed, so an
+  // advisor no script asked for costs nothing.
+  crystalListener_ = EventBus::Instance().On(
+      "berry:tick", [this](const EventContext& e) {
+        if (!services_.crystal || !services_.world) return EventResult::Continue;
+        if (!services_.crystal->armed()) return EventResult::Continue;
+        const GameTick* t = static_cast<const GameTick*>(e.data);
+        if (!t) return EventResult::Continue;
+        // The placer is the local player, whose own state the world already
+        // read; with no local player bound there is no origin to advise around.
+        const EntitySnapshot self = services_.world->GetEntity(services_.localPlayer);
+        if (!self.alive) return EventResult::Continue;
+        const std::vector<EntitySnapshot> targets = LiveEntities(*services_.world);
+        SeamWorld world(services_.world->Seam());
+        const std::vector<CrystalPlacement> recs = services_.crystal->Analyze(
+            self.position, services_.localPlayer, targets, world, (u64)*t);
+        // Publish only a change: a per-tick advisory is useful, a per-tick
+        // stream of the same answer is noise. The payload follows the bus
+        // convention (data points at a const char*).
+        std::string key;
+        if (!recs.empty()) {
+          const CrystalPlacement& p = recs.front();
+          key = std::to_string((int)p.position.x) + "," +
+                std::to_string((int)p.position.y) + "," +
+                std::to_string((int)p.position.z) + "," +
+                std::to_string((int)p.score);
+        }
+        if (key != lastCrystalAdvice_) {
+          lastCrystalAdvice_ = key;
+          if (!key.empty()) {
+            const char* payload = lastCrystalAdvice_.c_str();
+            EventBus::Instance().Emit("crystalAdvice", &payload, nullptr);
+          }
+        }
         return EventResult::Continue;
       });
 

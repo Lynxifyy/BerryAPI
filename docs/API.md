@@ -414,6 +414,8 @@ Events (await with `Events.once`):
 - `combatPredicted(hit: string)` — A hit the local client predicted (the swing it believes will land). Carries \"<attacker>:<victim>\".
 - `combatConfirmed(hit: string)` — A predicted hit the engine then confirmed. Carries \"<attacker>:<victim>\".
 - `combatMissed(hit: string)` — A predicted hit that was never confirmed within the prediction window. Carries \"<attacker>:<victim>\".
+- `radialSelected(label: string)` — The label of the radial-menu item the player committed, fired once on the release that selects it.
+- `crystalAdvice(placement: string)` — The best crystal placement changed while the advisor is armed. Carries \"x,y,z,score\".
 
 ## Intent
 
@@ -517,3 +519,83 @@ Capability: `world`.
 | `replay.exporting() -> bool` | `world` | - |
 | `replay.export_frame() -> number` | `world` | How many frames the current export has yielded. |
 | `replay.export_fps() -> number` | `world` | The export frame rate, or 0 when not exporting. |
+
+## Radial
+
+Capability: `hud`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `radial.add_item(label: string, enabled: bool) -> bool` | `hud` | Appends an item. False when the label is empty, longer than 32 bytes or non-printable, or the menu already holds its maximum of 12 items. |
+| `radial.remove_item(index: number) -> bool` | `hud` | Removes the item at `index`. False when out of range. |
+| `radial.clear() -> nil` | `hud` | Removes every item and closes the menu. |
+| `radial.count() -> number` | `hud` | How many items the menu holds. |
+| `radial.item_label(index: number) -> string` | `hud` | The label at `index`, or an empty string when out of range. |
+| `radial.item_enabled(index: number) -> bool` | `hud` | Whether the item at `index` is enabled; false when out of range. |
+| `radial.set_item_enabled(index: number, enabled: bool) -> bool` | `hud` | Enables or disables an item. False when out of range. |
+| `radial.open() -> bool` | `hud` | Opens the menu. False when it holds no items (an empty menu is not worth showing) or is already open. |
+| `radial.close() -> nil` | `hud` | Closes the menu and clears the hover and selection. |
+| `radial.is_open() -> bool` | `hud` | True while the menu is open. |
+| `radial.radius() -> number` | `hud` | The outer radius in pixels. |
+| `radial.set_radius(radius: number) -> bool` | `hud` | Sets the outer radius. Must be finite and positive and greater than the inner radius; a bad value is refused. |
+| `radial.inner_radius() -> number` | `hud` | The inner (dead-zone) radius in pixels. |
+| `radial.set_inner_radius(radius: number) -> bool` | `hud` | Sets the inner radius. Must be finite, non-negative and less than the outer radius; a bad value is refused. |
+| `radial.open_ms() -> number` | `hud` | The open/close animation duration in milliseconds. |
+| `radial.set_open_ms(ms: number) -> bool` | `hud` | Sets the open animation duration. Must be finite and positive; a bad value is refused. |
+| `radial.state() -> Table` | `hud` | The current menu state as {open, hovered, selected, progress, items}. `hovered`/`selected` are -1 when none. |
+| `radial.sector_at(pointer_x: number, pointer_y: number, center_x: number, center_y: number, inner_radius: number, outer_radius: number, count: number) -> number` | `hud` | The sector under a pointer relative to a centre for `count` sectors, or -1 for the dead zone or outside the ring. Pure: it reads no state, so it pins the geometry. |
+
+## Crystal
+
+Capability: `combat`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `crystal.config() -> Table` | `combat` | The current tunables as {place_range, blast_radius, max_damage, min_targets, self_damage_weight, max_self_damage, levels, max_results}. |
+| `crystal.set_range(range: number) -> bool` | `combat` | Sets the placement range in blocks. Must be finite, positive and at most 16; a bad value is refused. |
+| `crystal.set_blast_radius(radius: number) -> bool` | `combat` | Sets the blast radius in blocks. Must be finite, positive and at most 32; a bad value is refused. |
+| `crystal.set_max_damage(damage: number) -> bool` | `combat` | Sets the damage at the epicentre before falloff. Must be finite and non-negative; a bad value is refused. |
+| `crystal.set_min_targets(n: number) -> bool` | `combat` | Sets the minimum number of targets a spot must hit to be recommended. Must be a non-negative integer; a bad value is refused. |
+| `crystal.set_self_damage_weight(weight: number) -> bool` | `combat` | Sets how heavily damage to the placer is weighted against damage to enemies. Must be finite and non-negative; a bad value is refused. |
+| `crystal.set_max_self_damage(damage: number) -> bool` | `combat` | Sets the most damage a recommended spot may deal to the placer. Must be finite and non-negative; a bad value is refused. |
+| `crystal.set_levels(levels: number) -> bool` | `combat` | Sets the number of block levels above and below the placer's feet to consider. Must be an integer in [0, 4]; a bad value is refused. |
+| `crystal.set_max_results(n: number) -> bool` | `combat` | Sets how many recommendations an analysis keeps. Must be an integer in [1, 4096]; a bad value is refused. |
+| `crystal.analyze(x: number, y: number, z: number) -> number` | `combat` | Ranks the candidate placements around a placer at (x, y, z) against the entities the world grid already read, and returns how many were recommended. Fails closed (returns 0) when the world or the advisor is unavailable. The ranking is available through `count` and `placement`. |
+| `crystal.count() -> number` | `combat` | How many recommendations the last analysis produced. |
+| `crystal.best() -> Table` | `combat` | The best recommendation as {ok, x, y, z, targets, total_damage, best_damage, self_damage, score}. `ok` is false when there is none. |
+| `crystal.placement(index: number) -> Table` | `combat` | The recommendation at `index` in the last ranking, same shape as `best`, or an empty table when out of range. |
+| `crystal.estimate(x: number, y: number, z: number, tx: number, ty: number, tz: number) -> number` | `combat` | The estimated damage a blast at (x, y, z) would deal to a target at (tx, ty, tz) under the current tunables. Pure: it reads no world state. |
+| `crystal.stats() -> Table` | `combat` | The advisor's counters as {analyses, candidates, placements, best_score}. |
+| `crystal.reset() -> nil` | `combat` | Forgets the last ranking and its counters. |
+| `crystal.arm() -> bool` | `combat` | Arms the advisor. While armed, the client's tick hook runs one advisory pass per game tick around the local player and fires `crystalAdvice` when the best spot changes. False when it is already armed. |
+| `crystal.disarm() -> nil` | `combat` | Disarms the advisor. A no-op when it is already disarmed. |
+| `crystal.armed() -> bool` | `combat` | True while the advisor runs its advisory pass on the game tick. |
+
+## Voice
+
+Capability: `voice`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `voice.config() -> Table` | `voice` | The current tunables as {max_range, full_volume_range, master_volume, max_speakers, hold_ms, max_frame_bytes, min_send_interval_ms}. |
+| `voice.set_max_range(range: number) -> bool` | `voice` | Sets how far a speaker is heard, in blocks. Must be finite and in (0, 128]; a bad value is refused. |
+| `voice.set_full_volume_range(range: number) -> bool` | `voice` | Sets the distance within which a speaker plays at full volume. Must be finite and in [0, max_range]; a bad value is refused. |
+| `voice.set_master_volume(volume: number) -> bool` | `voice` | Sets the playback master volume. Must be finite and in [0, 1]; a bad value is refused. |
+| `voice.set_max_speakers(n: number) -> bool` | `voice` | Sets how many speakers are mixed at once. Must be an integer in [1, 32]; a bad value is refused. |
+| `voice.set_hold_ms(ms: number) -> bool` | `voice` | Sets how long a speaker stays listed as talking after its last frame, in ms. Must be a positive integer; a bad value is refused. |
+| `voice.set_max_frame_bytes(n: number) -> bool` | `voice` | Sets the largest inbound frame payload accepted, in bytes. Must be an integer in [1, 2048]; a bad value is refused. |
+| `voice.set_min_send_interval_ms(ms: number) -> bool` | `voice` | Sets the shortest gap between outgoing frames, in ms. Must be a positive integer; a bad value is refused. |
+| `voice.start(self_id: string) -> bool` | `voice` | Starts a session as `self_id`. False when already running, when the id is malformed (empty, over 64 bytes, or carrying a control character), or when no transport is bound (there is nothing to talk over). |
+| `voice.stop() -> nil` | `voice` | Stops the session and forgets the speakers. A no-op when not running. |
+| `voice.running() -> bool` | `voice` | True while a session is running. |
+| `voice.self_id() -> string` | `voice` | The local session id, or \"\" when not running. |
+| `voice.set_talking(talking: bool) -> nil` | `voice` | Sets push-to-talk (or open-mic) state. Only a talking, unmuted session sends; the receive half runs either way. |
+| `voice.talking() -> bool` | `voice` | True while the local client is sending. |
+| `voice.set_muted(muted: bool) -> nil` | `voice` | Sets the microphone mute. A muted session sends nothing. |
+| `voice.muted() -> bool` | `voice` | True while the microphone is muted. |
+| `voice.set_position(x: number, y: number, z: number) -> nil` | `voice` | Sets the local player's position, used to judge the proximity of what the listener hears. |
+| `voice.speaker_count() -> number` | `voice` | How many speakers are currently heard. |
+| `voice.speaker(index: number) -> Table` | `voice` | The speaker at `index` in the activity list (loudest first) as {id, level, distance, last_ms}, or an empty table when out of range. |
+| `voice.stats() -> Table` | `voice` | The session counters as {frames_captured, frames_sent, frames_received, frames_dropped, frames_played, bytes_sent, bytes_received}. |
+| `voice.reset() -> nil` | `voice` | Forgets the speaker state and the counters, keeping the config and the seams. |
+| `voice.transport() -> string` | `voice` | The transport's short name (\"lan\" on device, \"\" when none is bound). |

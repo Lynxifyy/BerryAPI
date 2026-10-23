@@ -131,6 +131,39 @@ make lib             # builds build/libBerryAPI.so
   shows at tick N of the recording — the mode a replay mod wants. Everything is
   bounded (`kMaxKeys`, FOV `[1,179]`, `kMaxSpeed`) and every bad value is
   refused, not clamped.
+- `RadialMenu` (`radial.h`) is a client-side pie menu, not a strict module. It
+  owns no clock: `Update(dt, center, pointer, held)` is the whole input and the
+  `ScriptApi` frame hook is its real caller. Items are labelled and enableable;
+  `SectorFor` resolves a pointer to a sector by angle and radius so the
+  hit-test is pure. It commits on a select release and emits `radialSelected`
+  once per commit (payload is the chosen label). Every bound (`kMaxItems`, label
+  length, radii, open animation) is validated and a bad value is refused.
+- `CrystalOptimizer` (`crystal.h`) is a client-side, read-only placement advisor.
+  It never places a block or sends a packet: it ranks candidate spots around a
+  placer by the blast damage they would deal (a documented linear falloff, an
+  ESTIMATE not the engine's number), reading the same entity list and block seam
+  the world reads use through the `CrystalWorld` seam. The tick hook
+  (`crystalListener_`) runs one advisory pass per tick while a script armed it
+  and publishes `crystalAdvice` only when the best spot changes. Candidate
+  generation is bounded (place range, levels, `kMaxCandidates`) and every tunable
+  is validated by the one `SetConfig`; a refused value changes nothing.
+- `VoiceService` (`voice.h`) is client-side proximity voice chat, not a strict
+  module. It carries the local player's own voice to nearby LAN peers and plays
+  theirs back, and it is local-only by construction: the transport is a private
+  IPv4 multicast group (`LanVoiceTransport` in `voice_transport.h`, one UDP
+  datagram per frame — a voice frame is small, so no fragmentation, unlike
+  `LanCosmeticTransport`), and proximity is judged against the LISTENER's own
+  world view through the `SetProximityResolver` seam — a speaker the listener's
+  world does not hold is dropped, so the module never reveals a player the client
+  was not already sent. It owns no clock: the `ScriptApi` frame hook is its
+  production caller, binding the resolver from `world`/`localPlayer`, setting the
+  position and calling `Pump` once per frame (capture/encode/send while talking;
+  always poll/decode/gate/play). The codec is IMA ADPCM (4:1 over 16-bit PCM).
+  Microphone capture is privacy-sensitive, so the module has its own `voice`
+  capability (distinct from `audio`, which only plays cues). Ids, frame size,
+  the tracked speaker set and every tunable are bounded and validated; a speaker
+  ages out of the activity list (and its decode state with it) after `hold_ms`,
+  and `Reset()` keeps config and seams.
 
 ## Conventions
 

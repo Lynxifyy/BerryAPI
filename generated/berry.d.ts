@@ -605,6 +605,136 @@ export interface Replay {
   export_fps(): number;
 }
 
+/** Capability required: hud. */
+export interface Radial {
+  /** Appends an item. False when the label is empty, longer than 32 bytes or non-printable, or the menu already holds its maximum of 12 items. */
+  add_item(label: string, enabled: boolean): boolean;
+  /** Removes the item at `index`. False when out of range. */
+  remove_item(index: number): boolean;
+  /** Removes every item and closes the menu. */
+  clear(): void;
+  /** How many items the menu holds. */
+  count(): number;
+  /** The label at `index`, or an empty string when out of range. */
+  item_label(index: number): string;
+  /** Whether the item at `index` is enabled; false when out of range. */
+  item_enabled(index: number): boolean;
+  /** Enables or disables an item. False when out of range. */
+  set_item_enabled(index: number, enabled: boolean): boolean;
+  /** Opens the menu. False when it holds no items (an empty menu is not worth showing) or is already open. */
+  open(): boolean;
+  /** Closes the menu and clears the hover and selection. */
+  close(): void;
+  /** True while the menu is open. */
+  is_open(): boolean;
+  /** The outer radius in pixels. */
+  radius(): number;
+  /** Sets the outer radius. Must be finite and positive and greater than the inner radius; a bad value is refused. */
+  set_radius(radius: number): boolean;
+  /** The inner (dead-zone) radius in pixels. */
+  inner_radius(): number;
+  /** Sets the inner radius. Must be finite, non-negative and less than the outer radius; a bad value is refused. */
+  set_inner_radius(radius: number): boolean;
+  /** The open/close animation duration in milliseconds. */
+  open_ms(): number;
+  /** Sets the open animation duration. Must be finite and positive; a bad value is refused. */
+  set_open_ms(ms: number): boolean;
+  /** The current menu state as {open, hovered, selected, progress, items}. `hovered`/`selected` are -1 when none. */
+  state(): Record<string, unknown>;
+  /** The sector under a pointer relative to a centre for `count` sectors, or -1 for the dead zone or outside the ring. Pure: it reads no state, so it pins the geometry. */
+  sector_at(pointer_x: number, pointer_y: number, center_x: number, center_y: number, inner_radius: number, outer_radius: number, count: number): number;
+}
+
+/** Capability required: combat. */
+export interface Crystal {
+  /** The current tunables as {place_range, blast_radius, max_damage, min_targets, self_damage_weight, max_self_damage, levels, max_results}. */
+  config(): Record<string, unknown>;
+  /** Sets the placement range in blocks. Must be finite, positive and at most 16; a bad value is refused. */
+  set_range(range: number): boolean;
+  /** Sets the blast radius in blocks. Must be finite, positive and at most 32; a bad value is refused. */
+  set_blast_radius(radius: number): boolean;
+  /** Sets the damage at the epicentre before falloff. Must be finite and non-negative; a bad value is refused. */
+  set_max_damage(damage: number): boolean;
+  /** Sets the minimum number of targets a spot must hit to be recommended. Must be a non-negative integer; a bad value is refused. */
+  set_min_targets(n: number): boolean;
+  /** Sets how heavily damage to the placer is weighted against damage to enemies. Must be finite and non-negative; a bad value is refused. */
+  set_self_damage_weight(weight: number): boolean;
+  /** Sets the most damage a recommended spot may deal to the placer. Must be finite and non-negative; a bad value is refused. */
+  set_max_self_damage(damage: number): boolean;
+  /** Sets the number of block levels above and below the placer's feet to consider. Must be an integer in [0, 4]; a bad value is refused. */
+  set_levels(levels: number): boolean;
+  /** Sets how many recommendations an analysis keeps. Must be an integer in [1, 4096]; a bad value is refused. */
+  set_max_results(n: number): boolean;
+  /** Ranks the candidate placements around a placer at (x, y, z) against the entities the world grid already read, and returns how many were recommended. Fails closed (returns 0) when the world or the advisor is unavailable. The ranking is available through `count` and `placement`. */
+  analyze(x: number, y: number, z: number): number;
+  /** How many recommendations the last analysis produced. */
+  count(): number;
+  /** The best recommendation as {ok, x, y, z, targets, total_damage, best_damage, self_damage, score}. `ok` is false when there is none. */
+  best(): Record<string, unknown>;
+  /** The recommendation at `index` in the last ranking, same shape as `best`, or an empty table when out of range. */
+  placement(index: number): Record<string, unknown>;
+  /** The estimated damage a blast at (x, y, z) would deal to a target at (tx, ty, tz) under the current tunables. Pure: it reads no world state. */
+  estimate(x: number, y: number, z: number, tx: number, ty: number, tz: number): number;
+  /** The advisor's counters as {analyses, candidates, placements, best_score}. */
+  stats(): Record<string, unknown>;
+  /** Forgets the last ranking and its counters. */
+  reset(): void;
+  /** Arms the advisor. While armed, the client's tick hook runs one advisory pass per game tick around the local player and fires `crystalAdvice` when the best spot changes. False when it is already armed. */
+  arm(): boolean;
+  /** Disarms the advisor. A no-op when it is already disarmed. */
+  disarm(): void;
+  /** True while the advisor runs its advisory pass on the game tick. */
+  armed(): boolean;
+}
+
+/** Capability required: voice. */
+export interface Voice {
+  /** The current tunables as {max_range, full_volume_range, master_volume, max_speakers, hold_ms, max_frame_bytes, min_send_interval_ms}. */
+  config(): Record<string, unknown>;
+  /** Sets how far a speaker is heard, in blocks. Must be finite and in (0, 128]; a bad value is refused. */
+  set_max_range(range: number): boolean;
+  /** Sets the distance within which a speaker plays at full volume. Must be finite and in [0, max_range]; a bad value is refused. */
+  set_full_volume_range(range: number): boolean;
+  /** Sets the playback master volume. Must be finite and in [0, 1]; a bad value is refused. */
+  set_master_volume(volume: number): boolean;
+  /** Sets how many speakers are mixed at once. Must be an integer in [1, 32]; a bad value is refused. */
+  set_max_speakers(n: number): boolean;
+  /** Sets how long a speaker stays listed as talking after its last frame, in ms. Must be a positive integer; a bad value is refused. */
+  set_hold_ms(ms: number): boolean;
+  /** Sets the largest inbound frame payload accepted, in bytes. Must be an integer in [1, 2048]; a bad value is refused. */
+  set_max_frame_bytes(n: number): boolean;
+  /** Sets the shortest gap between outgoing frames, in ms. Must be a positive integer; a bad value is refused. */
+  set_min_send_interval_ms(ms: number): boolean;
+  /** Starts a session as `self_id`. False when already running, when the id is malformed (empty, over 64 bytes, or carrying a control character), or when no transport is bound (there is nothing to talk over). */
+  start(self_id: string): boolean;
+  /** Stops the session and forgets the speakers. A no-op when not running. */
+  stop(): void;
+  /** True while a session is running. */
+  running(): boolean;
+  /** The local session id, or \"\" when not running. */
+  self_id(): string;
+  /** Sets push-to-talk (or open-mic) state. Only a talking, unmuted session sends; the receive half runs either way. */
+  set_talking(talking: boolean): void;
+  /** True while the local client is sending. */
+  talking(): boolean;
+  /** Sets the microphone mute. A muted session sends nothing. */
+  set_muted(muted: boolean): void;
+  /** True while the microphone is muted. */
+  muted(): boolean;
+  /** Sets the local player's position, used to judge the proximity of what the listener hears. */
+  set_position(x: number, y: number, z: number): void;
+  /** How many speakers are currently heard. */
+  speaker_count(): number;
+  /** The speaker at `index` in the activity list (loudest first) as {id, level, distance, last_ms}, or an empty table when out of range. */
+  speaker(index: number): Record<string, unknown>;
+  /** The session counters as {frames_captured, frames_sent, frames_received, frames_dropped, frames_played, bytes_sent, bytes_received}. */
+  stats(): Record<string, unknown>;
+  /** Forgets the speaker state and the counters, keeping the config and the seams. */
+  reset(): void;
+  /** The transport's short name (\"lan\" on device, \"\" when none is bound). */
+  transport(): string;
+}
+
 /** Coroutine-native async facade (Phase 4). */
 export interface AsyncFacade {
   /** Suspend until `ticks` game ticks have elapsed. */
@@ -640,4 +770,7 @@ declare const Shader: Shader;
 declare const Package: Package;
 declare const Record: Record;
 declare const Replay: Replay;
+declare const Radial: Radial;
+declare const Crystal: Crystal;
+declare const Voice: Voice;
 declare const async: AsyncFacade;
