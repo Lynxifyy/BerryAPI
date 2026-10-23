@@ -575,6 +575,10 @@ export type Replay = {
   -- Pauses and rewinds to the first key.
   stop: () -> (),
   playing: () -> boolean,
+  -- True when the playhead follows the replay tape's tick instead of the frame clock. Off by default.
+  follow_tape: () -> boolean,
+  -- When on, the playhead is the replay tape's tick: a key at tick N shows at tick N of the recording, and the camera glides as the tape steps. When off, the playhead advances on the frame clock at `speed`.
+  set_follow_tape: (on: boolean) -> (),
   speed: () -> number,
   -- Sets the playback speed multiplier. Must be finite and in (0, 64]; a bad value is refused.
   set_speed: (speed: number) -> boolean,

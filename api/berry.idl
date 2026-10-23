@@ -614,6 +614,10 @@ module Replay {
   doc "Pauses and rewinds to the first key."
   fn stop() -> nil
   fn playing() -> bool
+  doc "True when the playhead follows the replay tape's tick instead of the frame clock. Off by default."
+  fn follow_tape() -> bool
+  doc "When on, the playhead is the replay tape's tick: a key at tick N shows at tick N of the recording, and the camera glides as the tape steps. When off, the playhead advances on the frame clock at `speed`."
+  fn set_follow_tape(on: bool) -> nil
   fn speed() -> number
   doc "Sets the playback speed multiplier. Must be finite and in (0, 64]; a bad value is refused."
   fn set_speed(speed: number) -> bool

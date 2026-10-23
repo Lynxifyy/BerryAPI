@@ -20,6 +20,7 @@
 #include "berry/render.h"
 #include "berry/script.h"
 #include "berry/services.h"
+#include "berry/session_recorder.h"
 #include "shim_level.h"
 
 #include <chrono>
@@ -480,6 +481,85 @@ static void TestReplayCameraExportThroughFrameHook() {
   CHECK(frames == 42);
   CHECK(cam.exportFrame() == 41);
   CHECK(renderer.camera().valid);
+  eng.Detach();
+}
+
+// Follow-tape mode: with both a camera and a recorder bound, the frame hook
+// seeks the camera's playhead to the replay tape's tick, so a key authored at
+// tick N shows at tick N of the recording. This is the join that makes the
+// camera a path over the tape rather than an independent clock.
+static void TestReplayCameraFollowsTape() {
+  Renderer renderer;
+  Berry::Test::CaptureRenderSeam seam;
+  renderer.BindSeam(&seam);
+  ReplayCamera cam;
+  // Two keys far apart, so which tick the tape is on is unambiguous in the
+  // sampled x. Key 0 at x=0, key 100 at x=100.
+  CHECK(cam.AddKey(CameraKey{0, Vec3(0, 64, 0), 0, 0, 0, 70}));
+  CHECK(cam.AddKey(CameraKey{100, Vec3(100, 64, 0), 0, 0, 0, 70}));
+
+  SessionRecorder rec;
+  Berry::Test::ShimLevel level;
+  CHECK(rec.Start());
+  // A three-frame tape at ticks 0, 50, 100.
+  for (u64 tick : {0ull, 50ull, 100ull}) rec.CaptureTick(tick, level);
+  CHECK(rec.Stop());
+  CHECK(rec.frames() == 3);
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.replayCamera = &cam;
+  services.recorder = &rec;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+  const std::vector<std::string> grants{"world"};
+
+  // Turn on follow-tape through the binding.
+  ScriptValue out;
+  ScriptStatus st = Call(bindings, "replay.set_follow_tape", {ScriptValue::Bool(true)},
+                         grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(cam.followTape());
+  st = Call(bindings, "replay.activate", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  api.PublishFrame(16.0f, Vec2(1280.0f, 720.0f));
+  Engine& eng = Engine::Instance();
+  eng.Bootstrap();
+  CHECK(eng.Attach());
+
+  // Frame the tape at each frame; the camera's playhead must land on the tape's
+  // tick, and the sampled position must be the timeline sampled at that tick
+  // (x=0, 50, 100 for keys at 0 and 100), which is what "a path over the tape"
+  // means.
+  CHECK(rec.ReplayStep());   // tick 0
+  eng.OnFrame();
+  CHECK(Near(cam.playhead(), 0.0));
+  st = Call(bindings, "replay.sample_now", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.IsTable() && Near(out.AsTable()->at("x").AsNumber(), 0.0));
+
+  CHECK(rec.ReplayStep());   // tick 50
+  eng.OnFrame();
+  CHECK(Near(cam.playhead(), 50.0));
+  st = Call(bindings, "replay.sample_now", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.IsTable() && Near(out.AsTable()->at("x").AsNumber(), 50.0));
+
+  CHECK(rec.ReplayStep());   // tick 100
+  eng.OnFrame();
+  CHECK(Near(cam.playhead(), 100.0));
+  st = Call(bindings, "replay.sample_now", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.IsTable() && Near(out.AsTable()->at("x").AsNumber(), 100.0));
+
+  // With the tape at its end, ReplayTick holds the last frame's tick, so the
+  // camera holds the last key rather than jumping to 0.
+  eng.OnFrame();
+  CHECK(Near(cam.playhead(), 100.0));
+
   eng.Detach();
 }
 
@@ -2514,6 +2594,7 @@ int main() {
   TestFrameHookAdvancesAnimator();
   TestReplayCameraBindings();
   TestReplayCameraExportThroughFrameHook();
+  TestReplayCameraFollowsTape();
   TestFrameHookDrawsCosmetics();
   TestFrameHookPresentsUi();
   TestPublishedReads();

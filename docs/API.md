@@ -502,6 +502,8 @@ Capability: `world`.
 | `replay.pause() -> nil` | `world` | - |
 | `replay.stop() -> nil` | `world` | Pauses and rewinds to the first key. |
 | `replay.playing() -> bool` | `world` | - |
+| `replay.follow_tape() -> bool` | `world` | True when the playhead follows the replay tape's tick instead of the frame clock. Off by default. |
+| `replay.set_follow_tape(on: bool) -> nil` | `world` | When on, the playhead is the replay tape's tick: a key at tick N shows at tick N of the recording, and the camera glides as the tape steps. When off, the playhead advances on the frame clock at `speed`. |
 | `replay.speed() -> number` | `world` | - |
 | `replay.set_speed(speed: number) -> bool` | `world` | Sets the playback speed multiplier. Must be finite and in (0, 64]; a bad value is refused. |
 | `replay.playhead() -> number` | `world` | The playhead in ticks (fractional, so it can fall between keys). |

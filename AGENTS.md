@@ -126,8 +126,11 @@ make lib             # builds build/libBerryAPI.so
   eased lerp, never a spline, so aim never overshoots). Keys are unique per
   tick and kept sorted. `ExportBegin`/`ExportStep` walk the timeline at a fixed
   fps so an offline render has a deterministic length; the frame hook steps it
-  instead of wall time. Everything is bounded (`kMaxKeys`, FOV `[1,179]`,
-  `kMaxSpeed`) and every bad value is refused, not clamped.
+  instead of wall time. `SetFollowTape(true)` makes the playhead the tape's own
+  tick (the frame hook seeks to `recorder->ReplayTick()`), so a key at tick N
+  shows at tick N of the recording — the mode a replay mod wants. Everything is
+  bounded (`kMaxKeys`, FOV `[1,179]`, `kMaxSpeed`) and every bad value is
+  refused, not clamped.
 
 ## Conventions
 

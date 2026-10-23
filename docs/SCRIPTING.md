@@ -961,6 +961,14 @@ through the replay pose rather than the player's. Deactivating gives the camera
 back. `SetFovOverride` pins the FOV independent of the keys, which is what a
 zoom or a cinematic pass needs.
 
+A camera path over a recording is only meaningful if its keys line up with the
+recording, so `SetFollowTape(true)` makes the playhead the tape's own tick: the
+frame hook seeks the camera to `recorder->ReplayTick()` each frame instead of
+advancing a clock, and a key at tick N shows at tick N of the replay. Because
+`Seek` samples between keys, the camera glides as the tape steps. Follow-tape
+is the mode a replay mod wants; the free-running clock is for a cinematic over
+live play.
+
 The export path renders offline. `ExportBegin(fps, aspect, w, h)` starts a
 walk from the first key at a fixed rate, and while it runs the frame hook steps
 it with `ExportStep` instead of wall time, so each rendered frame is exactly one
@@ -979,7 +987,7 @@ recorded, and reveals nothing the client was not already sent.
 Scripts reach it through the `replay.*` bindings: `add_key`/`remove_key`/
 `clear`, the `key_count`/`first_tick`/`last_tick`/`duration_ticks`/`has_key`
 reads, `smoothing`/`set_smoothing`, `activate`/`deactivate`, `play`/`pause`/
-`stop`/`playing`, `speed`/`set_speed`, `playhead`/`seek`, `sample`/`sample_now`,
+`stop`/`playing`, `follow_tape`/`set_follow_tape`, `speed`/`set_speed`, `playhead`/`seek`, `sample`/`sample_now`,
 `fov_override`/`set_fov_override`, and `export_begin`/`export_end`/`exporting`/
 `export_frame`/`export_fps`. The whole surface carries the `world` grant.
 

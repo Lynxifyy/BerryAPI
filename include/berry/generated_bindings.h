@@ -324,6 +324,8 @@ inline const BindingSpec* BindingSpecs() {
       {"replay.pause", CapKind::World, 0, "Replay"},
       {"replay.stop", CapKind::World, 0, "Replay"},
       {"replay.playing", CapKind::World, 0, "Replay"},
+      {"replay.follow_tape", CapKind::World, 0, "Replay"},
+      {"replay.set_follow_tape", CapKind::World, 1, "Replay"},
       {"replay.speed", CapKind::World, 0, "Replay"},
       {"replay.set_speed", CapKind::World, 1, "Replay"},
       {"replay.playhead", CapKind::World, 0, "Replay"},
@@ -341,7 +343,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 316; }
+inline size_t BindingSpecCount() { return 318; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -712,6 +714,8 @@ inline const char* const kReplayNames[] = {
     "replay.pause",
     "replay.stop",
     "replay.playing",
+    "replay.follow_tape",
+    "replay.set_follow_tape",
     "replay.speed",
     "replay.set_speed",
     "replay.playhead",
@@ -753,7 +757,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Shader", kShaderNames, 10},
       {"Package", kPackageNames, 6},
       {"Record", kRecordNames, 14},
-      {"Replay", kReplayNames, 30},
+      {"Replay", kReplayNames, 32},
   };
   return kModules;
 }

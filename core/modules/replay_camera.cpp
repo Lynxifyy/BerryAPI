@@ -196,6 +196,16 @@ bool ReplayCamera::playing() const {
   return playing_;
 }
 
+bool ReplayCamera::followTape() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return followTape_;
+}
+
+void ReplayCamera::SetFollowTape(bool on) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  followTape_ = on;
+}
+
 f32 ReplayCamera::speed() const {
   std::lock_guard<std::mutex> lk(mutex_);
   return speed_;

@@ -301,13 +301,22 @@ void ScriptApi::InitFrameHook() {
               services_.renderer->SetCamera(cam);
             }
           } else if (services_.replayCamera->active()) {
-            const u64 now = NowMs();
-            if (lastReplayMs_ != 0 && now > lastReplayMs_) {
-              f32 dt = (f32)(now - lastReplayMs_) / 1000.0f;
-              if (dt > 0.1f) dt = 0.1f;   // a stall must not fast-forward a replay
-              services_.replayCamera->Advance(dt);
+            // In follow-tape mode the camera is a path over the recording, so
+            // its playhead is the tape's tick, not a clock of its own: seek to
+            // wherever the replay is. A tick that lands between keys samples
+            // between them, so the camera glides as the tape steps.
+            if (services_.replayCamera->followTape() && services_.recorder) {
+              const f32 tapeTick = (f32)services_.recorder->ReplayTick();
+              services_.replayCamera->Seek(tapeTick);
+            } else {
+              const u64 now = NowMs();
+              if (lastReplayMs_ != 0 && now > lastReplayMs_) {
+                f32 dt = (f32)(now - lastReplayMs_) / 1000.0f;
+                if (dt > 0.1f) dt = 0.1f;   // a stall must not fast-forward a replay
+                services_.replayCamera->Advance(dt);
+              }
+              lastReplayMs_ = now;
             }
-            lastReplayMs_ = now;
             if (aspect > 0.0f &&
                 services_.replayCamera->BuildCamera(aspect, screen.x, screen.y, &cam)) {
               services_.renderer->SetCamera(cam);
@@ -3096,6 +3105,16 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
   install("replay.playing", [this](ScriptContext&, const std::vector<ScriptValue>&) {
     if (!services_.replayCamera) return ScriptValue::Bool(false);
     return ScriptValue::Bool(services_.replayCamera->playing());
+  });
+
+  install("replay.follow_tape", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replayCamera->followTape());
+  });
+
+  install("replay.set_follow_tape", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (services_.replayCamera) services_.replayCamera->SetFollowTape(args[0].Truthy());
+    return ScriptValue::Nil();
   });
 
   install("replay.speed", [this](ScriptContext&, const std::vector<ScriptValue>&) {

@@ -126,6 +126,14 @@ class BERRY_API ReplayCamera {
   /// `(0, kMaxSpeed]`; a bad value is refused and leaves the speed unchanged.
   bool SetSpeed(f32 speed);
 
+  /// True when the playhead follows the replay tape's own tick instead of the
+  /// frame clock. Off by default. When on, the caller that owns both this
+  /// camera and the recorder (the frame hook) seeks the playhead to the tape's
+  /// current tick each frame, so a key authored at tick N shows at tick N of
+  /// the replay — which is what a camera path over a recording means.
+  bool followTape() const;
+  void SetFollowTape(bool on);
+
   /// The playhead in ticks (fractional, so a sample can fall between keys).
   f32 playhead() const;
   /// Moves the playhead, clamped to `[firstTick, lastTick]`. False when there
@@ -200,6 +208,7 @@ class BERRY_API ReplayCamera {
   CameraSmoothing smoothing_ = CameraSmoothing::Linear;
   bool active_ = false;
   bool playing_ = false;
+  bool followTape_ = false;
   f32 speed_ = 1.0f;
   f32 playhead_ = 0.0f;
   f32 fovOverride_ = 0.0f;
