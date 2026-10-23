@@ -98,7 +98,14 @@ are deliberately **not** added to the strict module set. See
 
 - `Hud` (`hud.h`) — retained-mode widget tree with anchors, flex flow, theming
   and tweens.
-- `InputObserver` (`input.h`) — read-only local input and click-rate tracking.
+- `UiLayer` (`ui.h`) — immediate-mode UI, the imperative counterpart to `Hud`:
+  the script builds the interface every frame and reads each widget's result
+  inline (the ImGui contract, so a click is acted on the frame after the press).
+  The worker half builds and publishes a frame; the render half hit-tests it
+  against the input snapshot, draws it through `Renderer`, and publishes the
+  per-widget results. Scripts reach it as `ui.*` (capability `hud`).
+- `InputObserver` (`input.h`) — read-only local input and click-rate tracking,
+  plus the pointer, wheel and typed text the UI layer consumes.
 - `PvpOverlay` (`pvp.h`) — local-only CPS/keystrokes/combo/armor/ping HUD.
 - `PerformanceGovernor` (`perf.h`) — adaptive FPS governor with thermal
   awareness and a `CullPolicy` for the render hooks' keep/cull decisions.

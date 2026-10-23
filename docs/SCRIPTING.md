@@ -317,6 +317,49 @@ counts what was skipped.
 Read-only observation of the local player's input: WASD, jump, sneak, sprint
 and mouse buttons, plus a rolling clicks-per-second window and held durations.
 This is data a normal client can already see. Unknown key names are rejected.
+It also carries what the UI layer needs: the pointer position, the wheel delta
+and typed text (taken with `ConsumeWheel`/`ConsumeText`), and an edge-triggered
+`ConsumeKeyPress` for keys a UI acts on once per press (backspace, enter).
+
+### Immediate-mode UI (`ui.h`)
+
+The imperative counterpart to the HUD: the script builds the interface every
+frame and reads each widget's result inline, the ImGui way. A frame hook opens
+with `ui.begin_frame`, builds any number of windows, and publishes with
+`ui.end_frame`:
+
+```lua
+function on_frame()
+  ui.begin_frame()
+  if ui.begin_window('Panel', 20, 20, 240, 180) then
+    ui.text('Hello')
+    if ui.button('Go').clicked then run() end
+    local v = ui.slider_float('Speed', 1.0, 0.0, 10.0)
+    speed = v.value
+    if ui.checkbox('Enabled', on).toggled then on = not on end
+    ui.separator()
+  end
+  ui.end_window()
+  ui.end_frame()
+end
+```
+
+Every widget returns a table `{hovered, active, clicked, changed, toggled,
+value, text}` published by the render thread on the previous frame, so a click
+is acted on the frame after the press and a script never reads a result it
+caused in the same frame. The surface is `ui.*` (capability `hud`): windows,
+buttons, checkboxes, float/int sliders, text fields, collapsing headers, tab
+bars/items, text (plain and coloured), progress bars, separators, spacing,
+`same_line`, `dummy`, indent/unindent and bullet lines, plus `set_theme`
+(`dark`/`glass`) and `stats`.
+
+The layer is thread-split. The worker half builds and publishes a frame; the
+render half hit-tests the published frame against the input snapshot, draws it
+through `Renderer` (so it presents through the one `RenderSeam`), and publishes
+the results. `begin_frame` is also the recovery point: if a hook faulted between
+begin and end, the stale frame is aborted there rather than presented, and a
+window built outside a frame is refused. A host with no UI layer fails closed —
+the widgets return inert results and no window opens.
 
 ### PvP overlay (`pvp.h`)
 
