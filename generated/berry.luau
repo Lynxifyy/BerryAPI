@@ -434,6 +434,51 @@ export type Cosmetic = {
   reload_packs: () -> number,
 }
 
+-- Capability required: cosmetic.
+export type Animator = {
+  -- Adds an empty clip. False when the name is empty/too long/already used, the duration is not finite and positive, or the clip cap is reached.
+  add_clip: (name: string, duration: number, looping: boolean) -> boolean,
+  -- Appends a keyframe to a clip. False when the clip is unknown, the bone is unknown, the time is negative or past the duration, the scale is not finite and positive, or the per-clip key cap is reached. `position`/`rotation` are offsets from the bone's rest transform (rotation in degrees).
+  add_key: (clip: string, bone: string, time: number, px: number, py: number, pz: number, rx: number, ry: number, rz: number, scale: number) -> boolean,
+  -- Removes a clip. False when it is unknown.
+  remove_clip: (name: string) -> boolean,
+  -- Removes every key from a clip, keeping the clip. False when unknown.
+  clear_clip: (name: string) -> boolean,
+  clip_count: () -> number,
+  has_clip: (name: string) -> boolean,
+  -- The number of keys in a clip, or 0 when unknown.
+  key_count: (name: string) -> number,
+  -- Starts a clip from time 0. False when the clip is unknown.
+  play: (name: string) -> boolean,
+  -- Stops playback, leaving the current time where it is.
+  stop: () -> (),
+  -- Stops and rewinds to time 0.
+  reset: () -> (),
+  playing: () -> boolean,
+  -- The current play time in seconds.
+  time: () -> number,
+  -- The current clip's duration, or 0 when none is selected.
+  duration: () -> number,
+  -- The current clip's name, or \"\" when none is selected.
+  current_clip: () -> string,
+  -- Jumps to an absolute time within the current clip, clamped/wrapped the same way playback would land there. False when no clip is selected.
+  seek: (seconds: number) -> boolean,
+  -- A bone's interpolated pose at an absolute time within the current clip, as {valid, px, py, pz, rx, ry, rz, scale}. `valid` is false when no clip/bone has a key there.
+  sample: (bone: string, time: number) -> {[string]: any},
+  -- The whole current pose: one table per bone that has a key in the current clip, at the current time, each {bone, px, py, pz, rx, ry, rz, scale}. Empty when no clip is selected.
+  pose: () -> {[string]: any},
+  -- The clips as one JSON document (deterministic: same clips, same bytes).
+  save: () -> string,
+  -- Replaces the clips from a JSON document in the exact format `save` returns, including its version. Rejects the whole document on any error (malformed JSON, the wrong format or version, a duplicate name, an unknown bone, an out-of-range key) and leaves the current clips untouched. Playback is stopped.
+  load: (json: string) -> boolean,
+  -- Drops every clip and stops playback.
+  clear: () -> (),
+  -- The entity the animator drives (0 = every entity the skeleton seam resolves).
+  target: () -> number,
+  -- Sets the entity the animator drives. 0 animates every entity the base skeleton seam resolves.
+  set_target: (entity: number) -> (),
+}
+
 -- Capability required: input.
 export type Intent = {
   -- Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share.

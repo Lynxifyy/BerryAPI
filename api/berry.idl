@@ -449,6 +449,52 @@ module Cosmetic {
   fn reload_packs() -> number
 }
 
+module Animator {
+  capability cosmetic
+  doc "Client-side keyframed animation of the local player's own rendered bones. A script authors clips — one bone's offset/rotation/scale at a time — and plays them; the pose is applied on top of the skeleton the cosmetic renderer resolves through, so a clip actually moves the rendered model. Nothing here is authoritative and nothing is sent: it animates this client's own rig only. Sampling is pure, so a replay reproduces it exactly. An unknown clip or bone fails closed (no pose), and `load` replaces the whole clip set or nothing."
+  doc "Adds an empty clip. False when the name is empty/too long/already used, the duration is not finite and positive, or the clip cap is reached."
+  fn add_clip(name: string, duration: number, looping: bool) -> bool
+  doc "Appends a keyframe to a clip. False when the clip is unknown, the bone is unknown, the time is negative or past the duration, the scale is not finite and positive, or the per-clip key cap is reached. `position`/`rotation` are offsets from the bone's rest transform (rotation in degrees)."
+  fn add_key(clip: string, bone: string, time: number, px: number, py: number, pz: number, rx: number, ry: number, rz: number, scale: number) -> bool
+  doc "Removes a clip. False when it is unknown."
+  fn remove_clip(name: string) -> bool
+  doc "Removes every key from a clip, keeping the clip. False when unknown."
+  fn clear_clip(name: string) -> bool
+  fn clip_count() -> number
+  fn has_clip(name: string) -> bool
+  doc "The number of keys in a clip, or 0 when unknown."
+  fn key_count(name: string) -> number
+  doc "Starts a clip from time 0. False when the clip is unknown."
+  fn play(name: string) -> bool
+  doc "Stops playback, leaving the current time where it is."
+  fn stop() -> nil
+  doc "Stops and rewinds to time 0."
+  fn reset() -> nil
+  fn playing() -> bool
+  doc "The current play time in seconds."
+  fn time() -> number
+  doc "The current clip's duration, or 0 when none is selected."
+  fn duration() -> number
+  doc "The current clip's name, or \"\" when none is selected."
+  fn current_clip() -> string
+  doc "Jumps to an absolute time within the current clip, clamped/wrapped the same way playback would land there. False when no clip is selected."
+  fn seek(seconds: number) -> bool
+  doc "A bone's interpolated pose at an absolute time within the current clip, as {valid, px, py, pz, rx, ry, rz, scale}. `valid` is false when no clip/bone has a key there."
+  fn sample(bone: string, time: number) -> Table
+  doc "The whole current pose: one table per bone that has a key in the current clip, at the current time, each {bone, px, py, pz, rx, ry, rz, scale}. Empty when no clip is selected."
+  fn pose() -> Table
+  doc "The clips as one JSON document (deterministic: same clips, same bytes)."
+  fn save() -> string
+  doc "Replaces the clips from a JSON document in the exact format `save` returns, including its version. Rejects the whole document on any error (malformed JSON, the wrong format or version, a duplicate name, an unknown bone, an out-of-range key) and leaves the current clips untouched. Playback is stopped."
+  fn load(json: string) -> bool
+  doc "Drops every clip and stops playback."
+  fn clear() -> nil
+  doc "The entity the animator drives (0 = every entity the skeleton seam resolves)."
+  fn target() -> number
+  doc "Sets the entity the animator drives. 0 animates every entity the base skeleton seam resolves."
+  fn set_target(entity: number) -> nil
+}
+
 module Events {
   capability events
   doc "Event channels scripts may await with Events.once. The world-diff channels are driven by the reactive world grid: entityEntered and entityLeft carry \"<id>:<type>\", entityUpdated fires when an entity's position, health or state changed between ticks, and blockChanged carries \"x,y,z,block\". A script never polls for these. The lifecycle channels (entityHurt, entityDeath, entitySpawn) are driven by the combat bus and the world diff and carry \"<id>:<detail>\" (entityHurt's detail is the damage, entitySpawn's is the type), so a script can filter by id without a parser."

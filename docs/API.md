@@ -366,6 +366,35 @@ Capability: `cosmetic`.
 | `cosmetic.set_local_only(enabled: bool) -> nil` | `cosmetic` | - |
 | `cosmetic.reload_packs() -> number` | `cosmetic` | Reload local model packs from the pack directory, registering every valid *.pack.json. Returns the number of packs loaded; each pack is applied atomically (all its assets or none). |
 
+## Animator
+
+Capability: `cosmetic`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `animator.add_clip(name: string, duration: number, looping: bool) -> bool` | `cosmetic` | Adds an empty clip. False when the name is empty/too long/already used, the duration is not finite and positive, or the clip cap is reached. |
+| `animator.add_key(clip: string, bone: string, time: number, px: number, py: number, pz: number, rx: number, ry: number, rz: number, scale: number) -> bool` | `cosmetic` | Appends a keyframe to a clip. False when the clip is unknown, the bone is unknown, the time is negative or past the duration, the scale is not finite and positive, or the per-clip key cap is reached. `position`/`rotation` are offsets from the bone's rest transform (rotation in degrees). |
+| `animator.remove_clip(name: string) -> bool` | `cosmetic` | Removes a clip. False when it is unknown. |
+| `animator.clear_clip(name: string) -> bool` | `cosmetic` | Removes every key from a clip, keeping the clip. False when unknown. |
+| `animator.clip_count() -> number` | `cosmetic` | - |
+| `animator.has_clip(name: string) -> bool` | `cosmetic` | - |
+| `animator.key_count(name: string) -> number` | `cosmetic` | The number of keys in a clip, or 0 when unknown. |
+| `animator.play(name: string) -> bool` | `cosmetic` | Starts a clip from time 0. False when the clip is unknown. |
+| `animator.stop() -> nil` | `cosmetic` | Stops playback, leaving the current time where it is. |
+| `animator.reset() -> nil` | `cosmetic` | Stops and rewinds to time 0. |
+| `animator.playing() -> bool` | `cosmetic` | - |
+| `animator.time() -> number` | `cosmetic` | The current play time in seconds. |
+| `animator.duration() -> number` | `cosmetic` | The current clip's duration, or 0 when none is selected. |
+| `animator.current_clip() -> string` | `cosmetic` | The current clip's name, or \"\" when none is selected. |
+| `animator.seek(seconds: number) -> bool` | `cosmetic` | Jumps to an absolute time within the current clip, clamped/wrapped the same way playback would land there. False when no clip is selected. |
+| `animator.sample(bone: string, time: number) -> Table` | `cosmetic` | A bone's interpolated pose at an absolute time within the current clip, as {valid, px, py, pz, rx, ry, rz, scale}. `valid` is false when no clip/bone has a key there. |
+| `animator.pose() -> Table` | `cosmetic` | The whole current pose: one table per bone that has a key in the current clip, at the current time, each {bone, px, py, pz, rx, ry, rz, scale}. Empty when no clip is selected. |
+| `animator.save() -> string` | `cosmetic` | The clips as one JSON document (deterministic: same clips, same bytes). |
+| `animator.load(json: string) -> bool` | `cosmetic` | Replaces the clips from a JSON document in the exact format `save` returns, including its version. Rejects the whole document on any error (malformed JSON, the wrong format or version, a duplicate name, an unknown bone, an out-of-range key) and leaves the current clips untouched. Playback is stopped. |
+| `animator.clear() -> nil` | `cosmetic` | Drops every clip and stops playback. |
+| `animator.target() -> number` | `cosmetic` | The entity the animator drives (0 = every entity the skeleton seam resolves). |
+| `animator.set_target(entity: number) -> nil` | `cosmetic` | Sets the entity the animator drives. 0 animates every entity the base skeleton seam resolves. |
+
 ## Events
 
 Capability: `events`.

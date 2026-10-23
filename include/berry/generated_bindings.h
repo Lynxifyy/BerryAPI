@@ -249,6 +249,28 @@ inline const BindingSpec* BindingSpecs() {
       {"cosmetic.presets", CapKind::Cosmetic, 0, "Cosmetic"},
       {"cosmetic.set_local_only", CapKind::Cosmetic, 1, "Cosmetic"},
       {"cosmetic.reload_packs", CapKind::Cosmetic, 0, "Cosmetic"},
+      {"animator.add_clip", CapKind::Cosmetic, 3, "Animator"},
+      {"animator.add_key", CapKind::Cosmetic, 10, "Animator"},
+      {"animator.remove_clip", CapKind::Cosmetic, 1, "Animator"},
+      {"animator.clear_clip", CapKind::Cosmetic, 1, "Animator"},
+      {"animator.clip_count", CapKind::Cosmetic, 0, "Animator"},
+      {"animator.has_clip", CapKind::Cosmetic, 1, "Animator"},
+      {"animator.key_count", CapKind::Cosmetic, 1, "Animator"},
+      {"animator.play", CapKind::Cosmetic, 1, "Animator"},
+      {"animator.stop", CapKind::Cosmetic, 0, "Animator"},
+      {"animator.reset", CapKind::Cosmetic, 0, "Animator"},
+      {"animator.playing", CapKind::Cosmetic, 0, "Animator"},
+      {"animator.time", CapKind::Cosmetic, 0, "Animator"},
+      {"animator.duration", CapKind::Cosmetic, 0, "Animator"},
+      {"animator.current_clip", CapKind::Cosmetic, 0, "Animator"},
+      {"animator.seek", CapKind::Cosmetic, 1, "Animator"},
+      {"animator.sample", CapKind::Cosmetic, 2, "Animator"},
+      {"animator.pose", CapKind::Cosmetic, 0, "Animator"},
+      {"animator.save", CapKind::Cosmetic, 0, "Animator"},
+      {"animator.load", CapKind::Cosmetic, 1, "Animator"},
+      {"animator.clear", CapKind::Cosmetic, 0, "Animator"},
+      {"animator.target", CapKind::Cosmetic, 0, "Animator"},
+      {"animator.set_target", CapKind::Cosmetic, 1, "Animator"},
       {"intent.allowed", CapKind::Input, 1, "Intent"},
       {"intent.classify", CapKind::Input, 1, "Intent"},
       {"intent.server", CapKind::Input, 0, "Intent"},
@@ -289,7 +311,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 264; }
+inline size_t BindingSpecCount() { return 286; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -574,6 +596,30 @@ inline const char* const kCosmeticNames[] = {
     "cosmetic.set_local_only",
     "cosmetic.reload_packs",
 };
+inline const char* const kAnimatorNames[] = {
+    "animator.add_clip",
+    "animator.add_key",
+    "animator.remove_clip",
+    "animator.clear_clip",
+    "animator.clip_count",
+    "animator.has_clip",
+    "animator.key_count",
+    "animator.play",
+    "animator.stop",
+    "animator.reset",
+    "animator.playing",
+    "animator.time",
+    "animator.duration",
+    "animator.current_clip",
+    "animator.seek",
+    "animator.sample",
+    "animator.pose",
+    "animator.save",
+    "animator.load",
+    "animator.clear",
+    "animator.target",
+    "animator.set_target",
+};
 inline const char* const kIntentNames[] = {
     "intent.allowed",
     "intent.classify",
@@ -640,6 +686,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Perf", kPerfNames, 12},
       {"Input", kInputNames, 3},
       {"Cosmetic", kCosmeticNames, 9},
+      {"Animator", kAnimatorNames, 22},
       {"Intent", kIntentNames, 6},
       {"Shader", kShaderNames, 10},
       {"Package", kPackageNames, 6},
@@ -648,7 +695,7 @@ inline const ModuleBindings* ModuleBindingTable() {
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 23; }
+inline size_t ModuleBindingCount() { return 24; }
 
 }  // namespace api
 }  // namespace Berry
