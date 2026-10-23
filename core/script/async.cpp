@@ -421,7 +421,13 @@ ScriptValue HttpRequestBlocking(ScriptContext& ctx, const std::string& method,
   };
 
   std::string current = url;
+  // One deadline for the whole call, redirect chain included: otherwise N
+  // redirect hops could each spend the full timeout and the caller's "8
+  // seconds" would really be N x 8.
+  const Deadline overall = Deadline::After((int)timeout);
   for (int hop = 0; hop <= kMaxRedirects; ++hop) {
+    const int remaining = overall.remainingMs();
+    if (remaining == 0) return fail("timeout");
     Url parsed;
     std::string parseErr;
     if (!parsed.Parse(current, &parseErr)) return fail("bad url: " + parseErr);
@@ -435,7 +441,7 @@ ScriptValue HttpRequestBlocking(ScriptContext& ctx, const std::string& method,
     }
 
     HttpRequest req(current.c_str());
-    req.Method(method.c_str()).Timeout((int)timeout).MaxBodyBytes(maxBodyBytes);
+    req.Method(method.c_str()).Timeout(remaining).MaxBodyBytes(maxBodyBytes);
     if (!body.empty()) {
       req.Body(body);
       req.Header("Content-Type", "application/json");
@@ -489,7 +495,15 @@ ScriptValue HttpGetBlocking(ScriptContext& ctx, const std::string& url,
   // the egress policy, and its host must be one the script was actually
   // granted. Re-run on every hop below.
   std::string current = url;
+  // One deadline for the whole call, redirect chain included (see the
+  // tuple-style path above).
+  const Deadline overall = Deadline::After((int)timeout);
   for (int hop = 0; hop <= kMaxRedirects; ++hop) {
+    const int remaining = overall.remainingMs();
+    if (remaining == 0) {
+      ctx.RaiseError("http: timeout");
+      return ScriptValue::Nil();
+    }
     Url parsed;
     std::string parseErr;
     if (!parsed.Parse(current, &parseErr)) {
@@ -511,7 +525,7 @@ ScriptValue HttpGetBlocking(ScriptContext& ctx, const std::string& url,
     }
 
     HttpRequest req(current.c_str());
-    req.Method("GET").Timeout((int)timeout);
+    req.Method("GET").Timeout(remaining);
     HttpResponse resp = req.Do();
     if (resp.status == 0) {
       ctx.RaiseError("http request failed: " + current);

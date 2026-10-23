@@ -1,7 +1,10 @@
 #include "berry/net.h"
 #include "berry/ws_client.h"
 #include "berry/url.h"
+#include "berry/event.h"   // NowMs
+#include "berry/tls.h"
 #include "shim_net.h"
+#include "shim_tls.h"
 
 #include <cstdio>
 #include <cstring>
@@ -86,26 +89,35 @@ int main() {
   auto notif = JsonRpc::MakeNotification("tick", "{\"n\":1}");
   CHECK(notif.find("\"method\":\"tick\"") != std::string::npos);
 
-  // --- TLS is not implemented: https/wss must fail closed, not downgrade ---
+  // --- TLS is implemented: https is served, unknown schemes still fail closed ---
   {
-    // An https request must NOT open a plaintext socket to port 443. Do()
-    // refuses and reports it, so a caller who asked for TLS never gets a
-    // silent plaintext connection.
+    // An https request is no longer refused at parse time; the transport is a
+    // verified TLS socket. (A network test with a real certificate is in the
+    // TLS section below; here we only assert the parse behaviour.)
     HttpRequest httpsReq("https://example.com/x");
-    CHECK(httpsReq.badScheme());
-    HttpResponse httpsResp = httpsReq.Do();
-    CHECK(httpsResp.status == 0);
-    CHECK(httpsResp.body.empty());
-    CHECK(httpsResp.reason.find("unsupported scheme") != std::string::npos);
+    CHECK(!httpsReq.badScheme());
+    CHECK(httpsReq.isTls());
+    CHECK(httpsReq.port() == 443);
 
-    // A scheme the client does not know is refused the same way.
+    // An explicit port overrides the scheme default.
+    HttpRequest httpsPort("https://example.com:8443/x");
+    CHECK(httpsPort.isTls());
+    CHECK(httpsPort.port() == 8443);
+
+    // A scheme the client does not know is still refused.
     HttpRequest weirdReq("ftp://example.com/x");
     CHECK(weirdReq.badScheme());
+    HttpResponse weirdResp = weirdReq.Do();
+    CHECK(weirdResp.status == 0);
+    CHECK(weirdResp.body.empty());
+    CHECK(weirdResp.reason.find("unsupported scheme") != std::string::npos);
 
-    // A wss:// websocket is refused before any socket is opened.
+    // A wss:// URL is accepted by the transport (the egress policy is checked
+    // by the script-facing pool, not here); the connect fails only because the
+    // host is not reachable in a test, never by refusing the scheme.
     WebSocket wss;
-    CHECK(!wss.Connect("wss://example.com/ws"));
-    // A malformed ws url is refused too.
+    CHECK(!wss.Connect("wss://example.com/ws", 1000));
+    // A malformed ws url is refused.
     WebSocket bad;
     CHECK(!bad.Connect("http://example.com/ws"));
   }
@@ -129,6 +141,152 @@ int main() {
     }
   }
 
+  // --- Timeout is a deadline, not a per-read idle timeout ---
+  {
+    // The server sends a valid header then one body byte every 200 ms, forever.
+    // With a per-read timeout the read keeps succeeding and the request runs
+    // unboundedly; with an overall deadline the request must return close to
+    // the deadline it was given, however the peer paces its bytes.
+    TinySlowDripServer drip(200);
+    int dripPort = drip.Start(18084);
+    CHECK(dripPort > 0);
+    if (dripPort > 0) {
+      std::string base = "http://127.0.0.1:" + std::to_string(dripPort);
+      HttpRequest req((base + "/drip").c_str());
+      req.Timeout(700);   // a true 700 ms budget for the whole request
+      const u64 t0 = NowMs();
+      HttpResponse resp = req.Do();
+      const u64 elapsed = NowMs() - t0;
+      // It must not run far past its deadline: a per-read timeout would let it
+      // run for minutes (the body promises 100000 bytes at 200 ms each).
+      CHECK(elapsed < 4000);
+      // The deadline fired mid-body: the partial response is flagged, never
+      // presented as a complete document.
+      CHECK(resp.truncated);
+      CHECK(resp.status == 200);
+      CHECK(resp.body.size() < 100000);
+      drip.Stop();
+    }
+  }
+
+  // --- Deadline primitive ---
+  {
+    CHECK(!Deadline::Never().hasDeadline());
+    CHECK(!Deadline::Never().expired());
+    CHECK(Deadline::Never().remainingMs() == -1);
+    Deadline soon = Deadline::After(50);
+    CHECK(soon.hasDeadline());
+    CHECK(!soon.expired());
+    CHECK(soon.remainingMs() > 0 && soon.remainingMs() <= 50);
+    // A non-positive timeout is already expired, so it fails fast.
+    CHECK(Deadline::After(0).expired());
+    CHECK(Deadline::After(-5).expired());
+    CHECK(Deadline::After(0).remainingMs() == 0);
+  }
+
+  // --- TLS: a real handshake, verified, end to end ---
+  {
+    // The client verifies the chain AND the hostname against a trust anchor.
+    // Point the store at the throwaway CA the test server serves, then prove
+    // both the accept path and the reject path.
+    const std::string caPath = "/tmp/berry_test_ca.pem";
+    {
+      FILE* f = fopen(caPath.c_str(), "wb");
+      CHECK(f != nullptr);
+      if (f) { fputs(berry_test::kTestCaPem(), f); fclose(f); }
+    }
+    TlsSocket::SetCaBundlePath(caPath);
+    TlsSocket::ReloadTrustStore();
+    CHECK(TlsSocket::Available());
+    CHECK(TlsSocket::TrustStoreReady());
+
+    berry_test::TinyTlsServer tls;
+    const int tlsPort = tls.Start(0);
+    CHECK(tlsPort > 0);
+    if (tlsPort > 0) {
+      // A verified handshake to the name the certificate is for must succeed.
+      TlsSocket s;
+      Deadline dl = Deadline::After(5000);
+      const bool connected = s.Connect("localhost", (u16)tlsPort, dl);
+      if (!connected) { printf("tls connect error: %s\n", s.LastError().c_str());
+        printf("server error: %s\n", tls.lastError().c_str()); }
+      CHECK(connected);
+      if (connected) {
+        CHECK(s.valid());
+        // TLS 1.2 floor, so the negotiated version is 1.2 or 1.3.
+        const std::string ver = s.ProtocolVersion();
+        CHECK(ver == "TLSv1.3" || ver == "TLSv1.2");
+        CHECK(!s.CipherSuite().empty());
+
+        const std::string req = "GET / HTTP/1.0\r\n\r\n";
+        CHECK(s.Send(req.data(), req.size(), dl) == (ssize_t)req.size());
+        std::string got;
+        char buf[256];
+        for (;;) {
+          const ssize_t n = s.Recv(buf, sizeof buf, dl);
+          if (n <= 0) break;
+          got.append(buf, (size_t)n);
+        }
+        CHECK(got.find("tls-pong") != std::string::npos);
+        CHECK(got.rfind("HTTP/1.1 200", 0) == 0);
+        s.Close();
+      }
+      tls.Stop();
+    }
+
+    // A handshake to a name the certificate is NOT for must fail: hostname
+    // verification is real, not decorative.
+    berry_test::TinyTlsServer wrong;
+    const int wrongPort = wrong.Start(0);
+    CHECK(wrongPort > 0);
+    if (wrongPort > 0) {
+      TlsSocket s2;
+      Deadline dl = Deadline::After(5000);
+      CHECK(!s2.Connect("wrong.example", (u16)wrongPort, dl));
+      CHECK(!s2.valid());
+      CHECK(!s2.LastError().empty());
+      wrong.Stop();
+    }
+
+    // An https:// request through the full HTTP client now works over TLS.
+    {
+      berry_test::TinyTlsServer tls2;
+      const int p = tls2.Start(0);
+      CHECK(p > 0);
+      if (p > 0) {
+        std::string url = "https://localhost:" + std::to_string(p) + "/x";
+        HttpRequest req(url.c_str());
+        CHECK(req.isTls());
+        HttpResponse resp = req.Do();
+        CHECK(resp.status == 200);
+        CHECK(resp.body.find("tls-pong") != std::string::npos);
+        tls2.Stop();
+      }
+    }
+
+    // A trust store that cannot be loaded fails closed: no anchors means no
+    // verified connection, never "trust anything".
+    TlsSocket::SetCaBundlePath("/nonexistent/ca-bundle.pem");
+    TlsSocket::ReloadTrustStore();
+    CHECK(!TlsSocket::TrustStoreReady());
+    {
+      berry_test::TinyTlsServer tls3;
+      const int p = tls3.Start(0);
+      CHECK(p > 0);
+      if (p > 0) {
+        TlsSocket s3;
+        Deadline dl = Deadline::After(3000);
+        CHECK(!s3.Connect("localhost", (u16)p, dl));
+        CHECK(!s3.valid());
+        tls3.Stop();
+      }
+    }
+    // Restore the system store so a later test in this binary is not affected.
+    TlsSocket::SetCaBundlePath("/etc/ssl/certs/ca-certificates.crt");
+    TlsSocket::ReloadTrustStore();
+    remove(caPath.c_str());
+  }
+
   // --- Script-facing WebSocket pool ---
   {
     CapabilitySet wildcard;
@@ -141,9 +299,11 @@ int main() {
     WsClientError err = WsClientError::Ok;
     WsClientPool pool;
 
-    // A wss:// URL fails closed (TLS is not implemented).
+    // A wss:// URL is accepted by the egress policy now (TLS is implemented);
+    // the connect fails because the host is unreachable in a test, not because
+    // the scheme was refused.
     CHECK(pool.Connect("wss://example.com/ws", wildcard, loopback, 1000, &err) == 0);
-    CHECK(err == WsClientError::BadUrl);
+    CHECK(err == WsClientError::ConnectFailed);
     // A non-ws scheme is refused.
     CHECK(pool.Connect("http://example.com/ws", wildcard, loopback, 1000, &err) == 0);
     CHECK(err == WsClientError::BadUrl);
