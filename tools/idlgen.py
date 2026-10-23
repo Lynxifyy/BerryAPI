@@ -64,6 +64,7 @@ CAPABILITY_ENUM = {
     "audio": "CapKind::Audio",
     "cosmetic": "CapKind::Cosmetic",
     "packets": "CapKind::Packets",
+    "voice": "CapKind::Voice",
 }
 
 # Modules whose binding prefix is not simply the lower-cased module name. The

@@ -47,6 +47,7 @@ enum class CapKind : u32 {
   Audio,     // play sounds
   Cosmetic,  // register cosmetics
   Packets,   // read-only packet metadata inspection (headers, never payloads)
+  Voice,     // proximity voice chat: microphone capture and LAN playback
 };
 
 const char* CapKindName(CapKind k);
