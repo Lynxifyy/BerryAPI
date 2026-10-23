@@ -20,12 +20,15 @@
 #include "berry/render.h"
 #include "berry/script.h"
 #include "berry/services.h"
+#include "berry/session_recorder.h"
 #include "shim_level.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Berry;
@@ -33,6 +36,8 @@ using namespace Berry;
 static int g_fail = 0;
 #define CHECK(cond) do { if (!(cond)) { \
   printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); ++g_fail; } } while (0)
+
+static bool Near(f64 a, f64 b, f64 eps = 1e-3) { return std::fabs(a - b) <= eps; }
 
 namespace {
 
@@ -261,6 +266,345 @@ static void TestFrameHookDrawsCosmetics() {
   renderer.EndFrame();
   CHECK(seam.rects == 1);
   eng.Detach();
+}
+
+static void TestFrameHookAdvancesAnimator() {
+  Renderer renderer;
+  Animator animator;
+  Test::ShimSkeleton base;
+  AnimatedSkeletonSource seam(&base, &animator);
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.animator = &animator;
+  services.animatorSeam = &seam;
+  ScriptApi api(services);
+
+  CHECK(animator.AddClip("clip", 10.0f, true));
+  CHECK(animator.AddKey("clip", Bone::Head, 0.0f, Vec3::Zero(), Vec3::Zero(), 1.0f));
+
+  Engine& eng = Engine::Instance();
+  eng.Bootstrap();
+  CHECK(eng.Attach());
+
+  // A frame with nothing playing does not advance.
+  eng.OnFrame();
+  CHECK(animator.time() == 0.0f);
+
+  // While playing, the frame clock advances the clip: the first frame sets the
+  // baseline, the next measures a real delta.
+  CHECK(animator.Play("clip"));
+  eng.OnFrame();
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  eng.OnFrame();
+  CHECK(animator.time() > 0.0f);
+  CHECK(animator.time() < 0.1f);
+
+  // A long stall (a breakpoint, a paused client) is clamped to one step, so it
+  // cannot fast-forward the whole clip in a single frame.
+  const f32 before = animator.time();
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  eng.OnFrame();
+  const f32 step = animator.time() - before;
+  CHECK(step > 0.0f);
+  CHECK(step <= 0.1f + 1e-4f);
+
+  eng.Detach();
+}
+
+// The replay camera bindings: authoring through the real capability gate, and
+// the frame hook actually adopting the pose (the real caller, not just the
+// service). Nothing here writes world state; it only moves the camera.
+static void TestReplayCameraBindings() {
+  Renderer renderer;
+  Berry::Test::CaptureRenderSeam seam;
+  renderer.BindSeam(&seam);
+  ReplayCamera cam;
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.replayCamera = &cam;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  const std::vector<std::string> grants{"world"};
+
+  // Every declared replay binding is callable with the world capability.
+  CHECK(bindings.Has("replay.add_key"));
+  CHECK(bindings.Has("replay.activate"));
+  CHECK(bindings.Has("replay.export_begin"));
+
+  // Authoring through the binding lands in the service.
+  ScriptValue out;
+  ScriptStatus st = Call(bindings, "replay.add_key",
+                         {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(64),
+                          ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+                          ScriptValue::Num(0), ScriptValue::Num(70)},
+                         grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  st = Call(bindings, "replay.add_key",
+            {ScriptValue::Num(40), ScriptValue::Num(10), ScriptValue::Num(64),
+             ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(90),
+             ScriptValue::Num(0), ScriptValue::Num(70)},
+            grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(cam.keyCount() == 2);
+
+  // A duplicate tick is refused by the service, reported as false not an error.
+  st = Call(bindings, "replay.add_key",
+            {ScriptValue::Num(0), ScriptValue::Num(1), ScriptValue::Num(1),
+             ScriptValue::Num(1), ScriptValue::Num(0), ScriptValue::Num(0),
+             ScriptValue::Num(0), ScriptValue::Num(70)},
+            grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  // A negative tick cannot name a frame.
+  st = Call(bindings, "replay.add_key",
+            {ScriptValue::Num(-1), ScriptValue::Num(0), ScriptValue::Num(0),
+             ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+             ScriptValue::Num(0), ScriptValue::Num(70)},
+            grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  // The reads answer from the service.
+  st = Call(bindings, "replay.key_count", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 2);
+  st = Call(bindings, "replay.first_tick", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  st = Call(bindings, "replay.last_tick", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 40);
+  st = Call(bindings, "replay.has_key", {ScriptValue::Num(40)}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  // sample returns a pose table with the fields the docs promise.
+  st = Call(bindings, "replay.sample", {ScriptValue::Num(20)}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  const ScriptTable* t = out.AsTable();
+  CHECK(t && t->at("valid").Truthy());
+  CHECK(t && Near(t->at("x").AsNumber(), 5.0));
+  CHECK(t && Near(t->at("yaw").AsNumber(), 45.0));
+
+  // Smoothing is a name, and a bad one is refused.
+  st = Call(bindings, "replay.set_smoothing", {ScriptValue::Str("smooth")}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  st = Call(bindings, "replay.set_smoothing", {ScriptValue::Str("cubic")}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  // Activating with keys succeeds and turns playback on.
+  st = Call(bindings, "replay.activate", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(cam.active());
+  CHECK(cam.playing());
+
+  // The frame hook now adopts the replay camera: a frame with a published size
+  // sets the renderer's camera from the timeline. Before activation the camera
+  // was invalid; after, it is valid and points where the first key says.
+  api.PublishFrame(16.0f, Vec2(1280.0f, 720.0f));
+  Engine& eng = Engine::Instance();
+  eng.Bootstrap();
+  CHECK(eng.Attach());
+  eng.OnFrame();
+  const CameraState frameCam = renderer.camera();
+  CHECK(frameCam.valid);
+  CHECK(Near(frameCam.width, 1280.0f));
+  CHECK(Near(frameCam.height, 720.0f));
+  eng.Detach();
+
+  // Deactivating hands the camera back (the hook stops writing it).
+  st = Call(bindings, "replay.deactivate", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(!cam.active());
+  CHECK(!cam.playing());
+
+  // With no service bound every binding fails closed rather than crashing.
+  ScriptApi none((ScriptApi::Services{}));
+  ScriptBindings nb;
+  none.InstallBindings(&nb);
+  st = Call(nb, "replay.key_count", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  st = Call(nb, "replay.add_key",
+            {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+             ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+             ScriptValue::Num(0), ScriptValue::Num(70)},
+            grants, &out);
+  CHECK(st == ScriptStatus::Error);   // no camera: raises, like every other module
+  st = Call(nb, "replay.activate", {}, grants, &out);
+  CHECK(st == ScriptStatus::Error);   // raises rather than hijacking the camera
+}
+
+// An export through the frame hook: each frame yields one video frame at the
+// fixed rate, so the number of frames is the timeline's, not the wall clock's.
+static void TestReplayCameraExportThroughFrameHook() {
+  Renderer renderer;
+  Berry::Test::CaptureRenderSeam seam;
+  renderer.BindSeam(&seam);
+  ReplayCamera cam;
+  // 40 ticks is a 2-second timeline at 20 ticks/s.
+  CHECK(cam.AddKey(CameraKey{0, Vec3(0, 64, 0), 0, 0, 0, 70}));
+  CHECK(cam.AddKey(CameraKey{40, Vec3(0, 64, 40), 0, 0, 0, 70}));
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.replayCamera = &cam;
+  ScriptApi api(services);
+
+  api.PublishFrame(16.0f, Vec2(1920.0f, 1080.0f));
+  CHECK(cam.ExportBegin(20.0f, 1920.0f / 1080.0f, 1920.0f, 1080.0f));
+  CHECK(cam.exporting());
+
+  Engine& eng = Engine::Instance();
+  eng.Bootstrap();
+  CHECK(eng.Attach());
+  // 40 ticks at 20 fps export yields 41 video frames (ticks 0..40); the next
+  // frame finds the end, ends the export and yields nothing, so the loop body
+  // runs 42 times and 41 of those set a camera.
+  u64 frames = 0;
+  while (cam.exporting()) {
+    eng.OnFrame();
+    ++frames;
+    CHECK(frames < 1000);   // guard: the loop must terminate
+  }
+  CHECK(frames == 42);
+  CHECK(cam.exportFrame() == 41);
+  CHECK(renderer.camera().valid);
+  eng.Detach();
+}
+
+// Follow-tape mode: with both a camera and a recorder bound, the frame hook
+// seeks the camera's playhead to the replay tape's tick, so a key authored at
+// tick N shows at tick N of the recording. This is the join that makes the
+// camera a path over the tape rather than an independent clock.
+static void TestReplayCameraFollowsTape() {
+  Renderer renderer;
+  Berry::Test::CaptureRenderSeam seam;
+  renderer.BindSeam(&seam);
+  ReplayCamera cam;
+  // Two keys far apart, so which tick the tape is on is unambiguous in the
+  // sampled x. Key 0 at x=0, key 100 at x=100.
+  CHECK(cam.AddKey(CameraKey{0, Vec3(0, 64, 0), 0, 0, 0, 70}));
+  CHECK(cam.AddKey(CameraKey{100, Vec3(100, 64, 0), 0, 0, 0, 70}));
+
+  SessionRecorder rec;
+  Berry::Test::ShimLevel level;
+  CHECK(rec.Start());
+  // A three-frame tape at ticks 0, 50, 100.
+  for (u64 tick : {0ull, 50ull, 100ull}) rec.CaptureTick(tick, level);
+  CHECK(rec.Stop());
+  CHECK(rec.frames() == 3);
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.replayCamera = &cam;
+  services.recorder = &rec;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+  const std::vector<std::string> grants{"world"};
+
+  // Turn on follow-tape through the binding.
+  ScriptValue out;
+  ScriptStatus st = Call(bindings, "replay.set_follow_tape", {ScriptValue::Bool(true)},
+                         grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(cam.followTape());
+  st = Call(bindings, "replay.activate", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  api.PublishFrame(16.0f, Vec2(1280.0f, 720.0f));
+  Engine& eng = Engine::Instance();
+  eng.Bootstrap();
+  CHECK(eng.Attach());
+
+  // Frame the tape at each frame; the camera's playhead must land on the tape's
+  // tick, and the sampled position must be the timeline sampled at that tick
+  // (x=0, 50, 100 for keys at 0 and 100), which is what "a path over the tape"
+  // means.
+  CHECK(rec.ReplayStep());   // tick 0
+  eng.OnFrame();
+  CHECK(Near(cam.playhead(), 0.0));
+  st = Call(bindings, "replay.sample_now", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.IsTable() && Near(out.AsTable()->at("x").AsNumber(), 0.0));
+
+  CHECK(rec.ReplayStep());   // tick 50
+  eng.OnFrame();
+  CHECK(Near(cam.playhead(), 50.0));
+  st = Call(bindings, "replay.sample_now", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.IsTable() && Near(out.AsTable()->at("x").AsNumber(), 50.0));
+
+  CHECK(rec.ReplayStep());   // tick 100
+  eng.OnFrame();
+  CHECK(Near(cam.playhead(), 100.0));
+  st = Call(bindings, "replay.sample_now", {}, grants, &out);
+  CHECK(st == ScriptStatus::Ok);
+  CHECK(out.IsTable() && Near(out.AsTable()->at("x").AsNumber(), 100.0));
+
+  // With the tape at its end, ReplayTick holds the last frame's tick, so the
+  // camera holds the last key rather than jumping to 0.
+  eng.OnFrame();
+  CHECK(Near(cam.playhead(), 100.0));
+
+  eng.Detach();
+}
+
+static void TestFrameHookPresentsUi() {
+  Renderer renderer;
+  Berry::Test::CaptureRenderSeam seam;
+  renderer.BindSeam(&seam);
+  CameraState cam;
+  cam.width = 1280;
+  cam.height = 720;
+  cam.valid = true;
+  renderer.SetCamera(cam);
+
+  UiLayer ui;
+  InputObserver input;
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.ui = &ui;
+  services.input = &input;
+  ScriptApi api(services);
+
+  // The worker builds a window with one button.
+  ui.BeginFrame();
+  ui.BeginWindow("W", Vec2(0, 0), Vec2(200, 150));
+  ui.Button("Go");
+  ui.EndWindow();
+  ui.EndFrame();
+
+  renderer.BeginFrame(Vec2(1280, 720));
+  Engine& eng = Engine::Instance();
+  eng.Bootstrap();
+  CHECK(eng.Attach());
+  // The embedder publishes the frame size each frame; the overlay hooks skip a
+  // zero-sized frame, so this must be set before OnFrame.
+  api.PublishFrame(16.0f, Vec2(1280, 720));
+  eng.OnFrame();  // emits berry:frame; the hook presents the UI
+  renderer.EndFrame();
+  eng.Detach();
+
+  // The window background, the button and the caption all reached the seam.
+  CHECK(seam.rects >= 2);
+  CHECK(seam.texts >= 1);
+  // Presenting published the button's result, which the next build can read.
+  const UiStats st = ui.stats();
+  CHECK(st.widgets >= 3);
 }
 
 static void TestQueueIsBoundedAndFailsClosed() {
@@ -573,6 +917,79 @@ static void TestRenderDrawHelpers() {
   CHECK(seam.lines == 1);
 }
 
+static void TestRenderOcclusionBindings() {
+  Berry::Test::CaptureRenderSeam seam;
+  Renderer renderer;
+  renderer.Attach(&seam);
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  CameraState cam;
+  cam.width = 800;
+  cam.height = 600;
+  cam.view = Mat4::LookAt(Vec3(0, 0, 0), Vec3(0, 0, 1), Vec3(0, 1, 0));
+  cam.projection = Mat4::Perspective(70, 800.0f / 600.0f, 0.1f, 200.0f);
+  cam.valid = true;
+  renderer.SetCamera(cam);
+  renderer.BeginFrame(Vec2(800, 600));
+
+  ScriptValue out;
+  auto box = [](f32 mnx, f32 mny, f32 mnz, f32 mxx, f32 mxy, f32 mxz) {
+    return std::vector<ScriptValue>{ScriptValue::Num(mnx), ScriptValue::Num(mny),
+                                    ScriptValue::Num(mnz), ScriptValue::Num(mxx),
+                                    ScriptValue::Num(mxy), ScriptValue::Num(mxz)};
+  };
+
+  // No occluder yet: nothing is occluded, and cull_box keeps the box (in view).
+  CHECK(Call(bindings, "render.occluded", box(-1, -1, 19, 1, 1, 21),
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "render.cull_box", box(-1, -1, 19, 1, 1, 21),
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());   // frustum keeps it, no occluder hides it
+
+  // Submit a wall, then the box behind it is occluded.
+  CHECK(Call(bindings, "render.add_occluder", box(-3, -3, 9, 3, 3, 11),
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "render.occluded", box(-1, -1, 19, 1, 1, 21),
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  // cull_box now drops it.
+  CHECK(Call(bindings, "render.cull_box", box(-1, -1, 19, 1, 1, 21),
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  // A box in front of the wall is kept.
+  CHECK(Call(bindings, "render.cull_box", box(-1, -1, 3, 1, 1, 5),
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  // A malformed box (min > max) is refused rather than culling on garbage; the
+  // cull path fails open.
+  CHECK(Call(bindings, "render.occluded", box(1, 0, 0, -1, 0, 0),
+             {"render"}, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "render.cull_box", box(1, 0, 0, -1, 0, 0),
+             {"render"}, &out) == ScriptStatus::Error);
+
+  // A fresh frame clears the grid: the box is no longer occluded.
+  renderer.EndFrame();
+  renderer.BeginFrame(Vec2(800, 600));
+  CHECK(Call(bindings, "render.occluded", box(-1, -1, 19, 1, 1, 21),
+             {"render"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  renderer.EndFrame();
+
+  // With no renderer bound the surface fails closed.
+  ScriptApi bare(ScriptApi::Services{});
+  ScriptBindings bareBindings;
+  bare.InstallBindings(&bareBindings);
+  CHECK(Call(bareBindings, "render.occluded", box(0, 0, 0, 1, 1, 1),
+             {"render"}, &out) == ScriptStatus::Error);
+}
+
 static void TestWorldReads() {
   std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
   WorldHandle* world = worldMod->Service<WorldHandle>();
@@ -782,6 +1199,30 @@ static void TestPerfPipelineBindings() {
 
   // A negative distance is refused rather than mapped to a tier.
   CHECK(Call(bindings, "perf.lod_tier", {ScriptValue::Num(-1)},
+             {"perf"}, &out) == ScriptStatus::Error);
+
+  // The tick-rate half of LOD: a near entity ticks every tick, a distant one is
+  // throttled, and the phase spreads a crowd so they do not hitch together.
+  CHECK(Call(bindings, "perf.lod_should_tick",
+             {ScriptValue::Num(1), ScriptValue::Num(1), ScriptValue::Num(0)},
+             {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());   // full: every tick
+  CHECK(Call(bindings, "perf.lod_should_tick",
+             {ScriptValue::Num(1000), ScriptValue::Num(1), ScriptValue::Num(0)},
+             {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());  // culled: never
+  // Two phases at the same reduced distance must differ on the same tick.
+  CHECK(Call(bindings, "perf.lod_should_tick",
+             {ScriptValue::Num(24), ScriptValue::Num(0), ScriptValue::Num(0)},
+             {"perf"}, &out) == ScriptStatus::Ok);
+  const bool p0 = out.Truthy();
+  CHECK(Call(bindings, "perf.lod_should_tick",
+             {ScriptValue::Num(24), ScriptValue::Num(0), ScriptValue::Num(1)},
+             {"perf"}, &out) == ScriptStatus::Ok);
+  CHECK(p0 != out.Truthy());
+  // A bad argument is refused rather than silently treated as 0.
+  CHECK(Call(bindings, "perf.lod_should_tick",
+             {ScriptValue::Num(-1), ScriptValue::Num(0), ScriptValue::Num(0)},
              {"perf"}, &out) == ScriptStatus::Error);
 
   // The perf grant gates the surface.
@@ -1431,6 +1872,253 @@ static void TestCombatStateFailsClosedWithoutService() {
 
 
 
+static void TestUiBindings() {
+  UiLayer ui;
+  Renderer renderer;
+  InputObserver input;
+  ScriptApi::Services services;
+  services.ui = &ui;
+  services.renderer = &renderer;
+  services.input = &input;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> grant = {"hud"};
+
+  // A script's UI calls run inside an explicit frame: begin_frame ... end_frame.
+  CHECK(Call(bindings, "ui.begin_frame", {}, grant, &out) == ScriptStatus::Ok);
+
+  // begin_window opens and returns true for a fresh (expanded) window.
+  CHECK(Call(bindings, "ui.begin_window",
+             {ScriptValue::Str("W"), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(200), ScriptValue::Num(150)},
+             grant, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  // A widget returns a table with every field present.
+  CHECK(Call(bindings, "ui.button", {ScriptValue::Str("Go")}, grant, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(out.AsTable()->count("hovered") == 1);
+  CHECK(out.AsTable()->count("clicked") == 1);
+  CHECK(out.AsTable()->count("value") == 1);
+  CHECK(out.AsTable()->count("text") == 1);
+
+  CHECK(Call(bindings, "ui.end_window", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "ui.end_frame", {}, grant, &out) == ScriptStatus::Ok);
+
+  // The frame the script built is now ready to present.
+  const auto widgets = ui.Widgets();
+  CHECK(!widgets.empty());
+
+  // The present half publishes results, and the next build reads them: simulate
+  // a click on the button by driving the layer's own hit-test.
+  UiWidget button;
+  bool found = false;
+  for (const auto& w : widgets) {
+    if (w.kind == UiKind::Button) { button = w; found = true; }
+  }
+  CHECK(found);
+  const Vec2 centre((button.min.x + button.max.x) * 0.5f,
+                    (button.min.y + button.max.y) * 0.5f);
+  UiLayer::Input down;
+  down.pointer = centre;
+  down.mouseDown = true;
+  ui.Update(down);
+  UiLayer::Input up;
+  up.pointer = centre;
+  ui.Update(up);
+
+  // Rebuild the same frame; the button now reports clicked.
+  ui.BeginFrame();
+  CHECK(ui.BeginWindow("W", Vec2(0, 0), Vec2(200, 150)));
+  const UiResult r = ui.Button("Go");
+  ui.EndWindow();
+  ui.EndFrame();
+  CHECK(r.clicked);
+
+  // set_theme accepts the two known names and refuses anything else.
+  CHECK(Call(bindings, "ui.set_theme", {ScriptValue::Str("glass")}, grant, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(ui.theme().rounding == UiTheme::Glass().rounding);
+  CHECK(Call(bindings, "ui.set_theme", {ScriptValue::Str("nope")}, grant, &out) ==
+        ScriptStatus::Ok);
+  CHECK(!out.Truthy());  // refused, theme unchanged
+  CHECK(ui.theme().rounding == UiTheme::Glass().rounding);
+  CHECK(Call(bindings, "ui.theme", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(out.ToDisplay() == "glass");
+  CHECK(Call(bindings, "ui.set_theme", {ScriptValue::Str("dark")}, grant, &out) ==
+        ScriptStatus::Ok);
+  CHECK(Call(bindings, "ui.theme", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(out.ToDisplay() == "dark");
+
+  // stats and any_window_dragging answer.
+  CHECK(Call(bindings, "ui.stats", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(Call(bindings, "ui.any_window_dragging", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "ui.reset", {}, grant, &out) == ScriptStatus::Ok);
+
+  // text_colored refuses an unknown role rather than silently drawing nothing.
+  CHECK(Call(bindings, "ui.text_colored",
+             {ScriptValue::Str("nonsense"), ScriptValue::Str("hi")}, grant, &out) ==
+        ScriptStatus::Error);
+
+  // Without the hud grant the gate denies before the body runs.
+  CHECK(Call(bindings, "ui.button", {ScriptValue::Str("Go")}, {"render"}, &out) ==
+        ScriptStatus::CapabilityDenied);
+}
+
+static void TestUiBindingsFailClosedWithoutService() {
+  ScriptApi::Services services;   // no ui layer
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> grant = {"hud"};
+  // begin_window reports false and nothing is built; every widget returns an
+  // inert table; the no-op calls still succeed so a script can run unguarded.
+  CHECK(Call(bindings, "ui.begin_window",
+             {ScriptValue::Str("W"), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(100), ScriptValue::Num(100)},
+             grant, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "ui.button", {ScriptValue::Str("Go")}, grant, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(!out.AsTable()->at("clicked").Truthy());
+  CHECK(Call(bindings, "ui.end_window", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "ui.text", {ScriptValue::Str("hi")}, grant, &out) ==
+        ScriptStatus::Ok);
+  CHECK(Call(bindings, "ui.set_theme", {ScriptValue::Str("dark")}, grant, &out) ==
+        ScriptStatus::Ok);
+  CHECK(!out.Truthy());  // no layer -> refused
+  CHECK(Call(bindings, "ui.theme", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(out.ToDisplay() == "none");
+}
+
+static void TestUiThroughLuauScript() {
+  UiLayer ui;
+  Renderer renderer;
+  Berry::Test::CaptureRenderSeam seam;
+  renderer.BindSeam(&seam);
+  CameraState cam;
+  cam.width = 1280;
+  cam.height = 720;
+  cam.valid = true;
+  renderer.SetCamera(cam);
+
+  ScriptApi::Services services;
+  services.ui = &ui;
+  services.renderer = &renderer;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  // A real Luau chunk drives the whole surface through the namespace tables.
+  auto vm = std::unique_ptr<IScriptVm>(CreateLuauVm());
+  ScriptHost host("ui-script", Grant({"hud"}), std::move(vm));
+  host.SetBindings(&bindings);
+
+  const char* src =
+      "local clicks = 0\n"
+      "local M = {}\n"
+      "function M.draw()\n"
+      "  ui.begin_frame()\n"
+      "  local open = ui.begin_window('Panel', 10, 10, 220, 160)\n"
+      "  if open then\n"
+      "    ui.text('hello')\n"
+      "    local r = ui.button('Go')\n"
+      "    if r.clicked then clicks = clicks + 1 end\n"
+      "    ui.separator()\n"
+      "  end\n"
+      "  ui.end_window()\n"
+      "  ui.end_frame()\n"
+      "  return clicks\n"
+      "end\n"
+      "return M\n";
+  ScriptError err;
+  CHECK(host.Load(src, "ui-script", &err));
+
+  std::vector<ScriptValue> ret;
+  CHECK(host.RunHook("draw", {}, &ret) == ScriptStatus::Ok);
+  CHECK(ret.size() == 1 && ret[0].AsNumber() == 0);
+
+  // The frame reached the layer.
+  const auto widgets = ui.Widgets();
+  CHECK(widgets.size() >= 4);  // window bg, text, button, separator
+
+  // The binding layer bracketed the frame: it is closed after the hook.
+  CHECK(!ui.building());
+
+  // Present with a click on the button, then re-run the hook: the script sees
+  // the click through `r.clicked` and bumps its counter.
+  UiWidget button;
+  bool found = false;
+  for (const auto& w : widgets) {
+    if (w.kind == UiKind::Button) { button = w; found = true; }
+  }
+  CHECK(found);
+  const Vec2 centre((button.min.x + button.max.x) * 0.5f,
+                    (button.min.y + button.max.y) * 0.5f);
+  UiLayer::Input down;
+  down.pointer = centre;
+  down.mouseDown = true;
+  ui.Update(down);
+  UiLayer::Input up;
+  up.pointer = centre;
+  ui.Update(up);
+
+  ret.clear();
+  CHECK(host.RunHook("draw", {}, &ret) == ScriptStatus::Ok);
+  CHECK(ret.size() == 1 && ret[0].AsNumber() == 1);
+}
+
+static void TestUiFrameRecoveryAfterFault() {
+  UiLayer ui;
+  ScriptApi::Services services;
+  services.ui = &ui;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> grant = {"hud"};
+
+  // A hook opens a frame, builds a window, then faults before end_frame: the
+  // frame is left open.
+  CHECK(Call(bindings, "ui.begin_frame", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "ui.begin_window",
+             {ScriptValue::Str("W"), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(100), ScriptValue::Num(100)},
+             grant, &out) == ScriptStatus::Ok);
+  CHECK(ui.building());
+
+  // The next hook's begin_frame detects the stale frame, aborts it, and opens a
+  // fresh one; the half-built window from the faulted hook never publishes.
+  CHECK(Call(bindings, "ui.begin_frame", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(ui.building());
+  // Nothing was published, so the ready frame is still empty.
+  CHECK(ui.Widgets().empty());
+
+  // A window outside a frame is refused, so a script that forgets begin_frame
+  // cannot corrupt the published frame.
+  CHECK(Call(bindings, "ui.end_frame", {}, grant, &out) == ScriptStatus::Ok);
+  CHECK(!ui.building());
+  CHECK(Call(bindings, "ui.begin_window",
+             {ScriptValue::Str("X"), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(100), ScriptValue::Num(100)},
+             grant, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  // end_frame with no open frame is a harmless no-op.
+  CHECK(Call(bindings, "ui.end_frame", {}, grant, &out) == ScriptStatus::Ok);
+}
+
 static void TestModBindings() {
   ScriptModuleRegistry modules;
   ScriptApi::Services services;
@@ -1624,6 +2312,152 @@ static void TestPvpBindings() {
   CHECK(Call(bareBindings, "pvp.combo", {}, {"hud"}, &out) == ScriptStatus::Error);
 }
 
+static void TestAnimatorBindings() {
+  Renderer renderer;
+  Animator animator;
+  Test::ShimSkeleton base;
+  AnimatedSkeletonSource seam(&base, &animator);
+
+  ScriptApi::Services services;
+  services.renderer = &renderer;
+  services.animator = &animator;
+  services.animatorSeam = &seam;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"cosmetic"};
+
+  // Author a clip through the bindings.
+  CHECK(Call(bindings, "animator.add_clip",
+             {ScriptValue::Str("wave"), ScriptValue::Num(1.0), ScriptValue::Bool(true)},
+             caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "animator.add_key",
+             {ScriptValue::Str("wave"), ScriptValue::Str("right_arm"), ScriptValue::Num(0.0),
+              ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(1.0)},
+             caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "animator.add_key",
+             {ScriptValue::Str("wave"), ScriptValue::Str("right_arm"), ScriptValue::Num(1.0),
+              ScriptValue::Num(0), ScriptValue::Num(2), ScriptValue::Num(0),
+              ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(1.0)},
+             caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  CHECK(Call(bindings, "animator.clip_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  CHECK(Call(bindings, "animator.has_clip", {ScriptValue::Str("wave")}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "animator.key_count", {ScriptValue::Str("wave")}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 2);
+
+  // Playback.
+  CHECK(Call(bindings, "animator.play", {ScriptValue::Str("wave")}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "animator.playing", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "animator.current_clip", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "wave");
+  CHECK(Call(bindings, "animator.duration", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(std::fabs(out.AsNumber() - 1.0) < 1e-6);
+
+  CHECK(Call(bindings, "animator.seek", {ScriptValue::Num(0.5)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  // sample returns a pose table with the interpolated offset.
+  CHECK(Call(bindings, "animator.sample",
+             {ScriptValue::Str("head"), ScriptValue::Num(0.5)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(out.Field("valid") && !out.Field("valid")->Truthy());   // head has no keys
+
+  CHECK(Call(bindings, "animator.sample",
+             {ScriptValue::Str("right_arm"), ScriptValue::Num(0.5)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(out.Field("valid") && out.Field("valid")->Truthy());
+  CHECK(out.Field("py") && std::fabs(out.Field("py")->AsNumber() - 1.0) < 1e-4);
+
+  // pose lists one entry per keyed bone.
+  CHECK(Call(bindings, "animator.pose", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(out.Field("0") != nullptr);
+
+  // An unknown bone is an error, not a fabricated pose.
+  CHECK(Call(bindings, "animator.sample",
+             {ScriptValue::Str("elbow"), ScriptValue::Num(0.0)}, caps, &out) != ScriptStatus::Ok);
+  // An unknown clip to play is an error.
+  CHECK(Call(bindings, "animator.play", {ScriptValue::Str("nope")}, caps, &out) != ScriptStatus::Ok);
+
+  // target is the seam's, defaulting to every entity.
+  CHECK(Call(bindings, "animator.target", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "animator.set_target", {ScriptValue::Num(42)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(seam.target().raw == 42);
+  CHECK(Call(bindings, "animator.target", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 42);
+
+  // save/load round trip through the bindings.
+  CHECK(Call(bindings, "animator.save", {}, caps, &out) == ScriptStatus::Ok);
+  const std::string doc = out.AsString();
+  CHECK(!doc.empty());
+  CHECK(Call(bindings, "animator.clear", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "animator.clip_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "animator.load", {ScriptValue::Str(doc)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "animator.clip_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  // A malformed document is an error and leaves the clips alone.
+  CHECK(Call(bindings, "animator.load", {ScriptValue::Str("{}")}, caps, &out) != ScriptStatus::Ok);
+  // A document from a version this build does not write is refused too.
+  CHECK(Call(bindings, "animator.load",
+             {ScriptValue::Str(R"({"format":"berry-animator","version":2,"clips":[]})")},
+             caps, &out) != ScriptStatus::Ok);
+  CHECK(Call(bindings, "animator.clip_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+}
+
+static void TestAnimatorFailsClosedWithoutService() {
+  Renderer renderer;
+  ScriptApi::Services services;
+  services.renderer = &renderer;   // no animator
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"cosmetic"};
+  // Every binding raises rather than fabricating animation state, matching the
+  // combat-state convention.
+  CHECK(Call(bindings, "animator.add_clip",
+             {ScriptValue::Str("c"), ScriptValue::Num(1.0), ScriptValue::Bool(true)},
+             caps, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "animator.play", {ScriptValue::Str("c")}, caps, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "animator.playing", {}, caps, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "animator.clip_count", {}, caps, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "animator.sample",
+             {ScriptValue::Str("head"), ScriptValue::Num(0.0)}, caps, &out) == ScriptStatus::Error);
+  CHECK(Call(bindings, "animator.target", {}, caps, &out) == ScriptStatus::Error);
+
+  // The capability gate still applies: a caller without `cosmetic` is denied.
+  Animator animator;
+  Test::ShimSkeleton base;
+  AnimatedSkeletonSource seam(&base, &animator);
+  ScriptApi::Services svc2;
+  svc2.renderer = &renderer;
+  svc2.animator = &animator;
+  svc2.animatorSeam = &seam;
+  ScriptApi api2(svc2);
+  ScriptBindings b2;
+  api2.InstallBindings(&b2);
+  CHECK(Call(b2, "animator.play", {ScriptValue::Str("c")}, {}, &out) ==
+        ScriptStatus::CapabilityDenied);
+}
+
 static void TestPacketBindings() {
   PacketLog log;
   log.Record(PacketDir::Inbound, 0x2A, 64, 1000, "PlayerAuthInput");
@@ -1742,22 +2576,34 @@ int main() {
   TestPhase2PlayerAndWorldExtras();
   TestCombatStateBindings();
   TestCombatStateFailsClosedWithoutService();
+  TestUiBindings();
+  TestUiBindingsFailClosedWithoutService();
+  TestUiThroughLuauScript();
+  TestUiFrameRecoveryAfterFault();
   TestModBindings();
   TestFsAndAudioBindings();
   TestPvpBindings();
+  TestAnimatorBindings();
+  TestAnimatorFailsClosedWithoutService();
   TestPacketBindings();
   TestNetworkGetFailsClosed();
   TestDrawCommandsAreQueuedThenApplied();
   TestHudLifecycleAcrossThreads();
   TestQueueIsBoundedAndFailsClosed();
   TestFrameHookDrainsQueue();
+  TestFrameHookAdvancesAnimator();
+  TestReplayCameraBindings();
+  TestReplayCameraExportThroughFrameHook();
+  TestReplayCameraFollowsTape();
   TestFrameHookDrawsCosmetics();
+  TestFrameHookPresentsUi();
   TestPublishedReads();
   TestGovernorAndZoomWrites();
   TestCombatAndInputReads();
   TestWorldQueryNeedsSeamAndLocalPlayer();
   TestPlayerReadsFailClosedAndResolve();
   TestRenderDrawHelpers();
+  TestRenderOcclusionBindings();
   TestWorldReads();
   TestPerfStatsAndPlatform();
   TestPerfFlameBindings();

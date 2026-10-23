@@ -49,6 +49,11 @@ class BERRY_API IRenderBackend {
   /// physical pixels.
   virtual void PresentBatch(const DrawBatch& batch, const Vec2& screenSize) = 0;
 
+  /// The dynamic-resolution scale to render at: 1.0 native, below 1.0 a
+  /// fraction. Called only when the value changes. The default is a no-op, so a
+  /// backend that cannot rescale is unaffected.
+  virtual void SetRenderScale(f32 scale) { (void)scale; }
+
   virtual bool running() const = 0;
   virtual const char* name() const = 0;
 };

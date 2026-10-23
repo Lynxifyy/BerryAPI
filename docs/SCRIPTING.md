@@ -317,6 +317,49 @@ counts what was skipped.
 Read-only observation of the local player's input: WASD, jump, sneak, sprint
 and mouse buttons, plus a rolling clicks-per-second window and held durations.
 This is data a normal client can already see. Unknown key names are rejected.
+It also carries what the UI layer needs: the pointer position, the wheel delta
+and typed text (taken with `ConsumeWheel`/`ConsumeText`), and an edge-triggered
+`ConsumeKeyPress` for keys a UI acts on once per press (backspace, enter).
+
+### Immediate-mode UI (`ui.h`)
+
+The imperative counterpart to the HUD: the script builds the interface every
+frame and reads each widget's result inline, the ImGui way. A frame hook opens
+with `ui.begin_frame`, builds any number of windows, and publishes with
+`ui.end_frame`:
+
+```lua
+function on_frame()
+  ui.begin_frame()
+  if ui.begin_window('Panel', 20, 20, 240, 180) then
+    ui.text('Hello')
+    if ui.button('Go').clicked then run() end
+    local v = ui.slider_float('Speed', 1.0, 0.0, 10.0)
+    speed = v.value
+    if ui.checkbox('Enabled', on).toggled then on = not on end
+    ui.separator()
+  end
+  ui.end_window()
+  ui.end_frame()
+end
+```
+
+Every widget returns a table `{hovered, active, clicked, changed, toggled,
+value, text}` published by the render thread on the previous frame, so a click
+is acted on the frame after the press and a script never reads a result it
+caused in the same frame. The surface is `ui.*` (capability `hud`): windows,
+buttons, checkboxes, float/int sliders, text fields, collapsing headers, tab
+bars/items, text (plain and coloured), progress bars, separators, spacing,
+`same_line`, `dummy`, indent/unindent and bullet lines, plus `set_theme`
+(`dark`/`glass`) and `stats`.
+
+The layer is thread-split. The worker half builds and publishes a frame; the
+render half hit-tests the published frame against the input snapshot, draws it
+through `Renderer` (so it presents through the one `RenderSeam`), and publishes
+the results. `begin_frame` is also the recovery point: if a hook faulted between
+begin and end, the stale frame is aborted there rather than presented, and a
+window built outside a frame is refused. A host with no UI layer fails closed —
+the widgets return inert results and no window opens.
 
 ### PvP overlay (`pvp.h`)
 
@@ -482,8 +525,10 @@ reused. The cache is bounded and LRU-evicted, and a seam swap clears it.
 Seeing another player's cosmetics needs a channel, and that channel is the
 security boundary. `CosmeticSyncChannel` signs a canonical `(player, loadout)`
 payload (Ed25519 in production, HMAC for local development), frames it with a
-versioned envelope and hands it to a `CosmeticSyncTransport` (a WebSocket on
-device). Receiving fails closed at every step — bad framing, unknown or
+versioned envelope and hands it to a `CosmeticSyncTransport`. On device the
+concrete transport is `LanCosmeticTransport` (`lan_transport.h`): a UDP socket
+bound to a private multicast group. Receiving fails closed at every step — bad
+framing, unknown or
 mismatched algorithm, a signature that does not verify over the exact bytes, or
 a loadout body that does not parse all drop the message with no state change.
 Even a validly signed loadout is applied through
@@ -508,11 +553,91 @@ side effects; the defences live in `Receive`. Limits are set through
 `CosmeticSyncConfig`, and the clock is injectable so the TTL and the limiter are
 deterministic in tests.
 
+The transport is the LAN half of that boundary. `LanCosmeticTransport`
+(`lan_transport.h`) opens one UDP socket, binds a fixed port and joins a private
+IPv4 multicast group, so one send reaches every client on the subnet and no
+central server is needed. A signed envelope is usually far larger than one
+datagram, so the transport frames a message into `mtu - 24`-byte fragments, each
+with a 24-byte big-endian header carrying the message id, fragment index and
+count, total length, the fragment payload size, and a per-instance sender tag.
+The receiver reassembles per `(peer, message id)` and delivers a message only
+when every fragment arrived and the declared length matched; a missing fragment,
+a shape mismatch, or a payload past the declared length drops the whole message,
+never a partial apply. Because the sender states the fragment payload size, a
+receiver with a different MTU still computes the right offsets instead of
+guessing. The sender's tag lets a client skip the copy of its own datagram that
+multicast loops back — the tag is assigned at `Open`, so this holds even before
+the client announces. Reassembly buffers and peers both expire on a TTL, and the
+per-sender partial count and the peer table are bounded, so a peer that sends
+half a message or a flood of distinct ids cannot grow memory without limit.
+
+Peers are found two ways. `Announce(playerId)` multicasts a datagram the peer
+table records, and `LanDiscovery` (`lan_discovery.h`) is a small mDNS responder
+and browser for `_berry._udp.local`: it publishes the local client (PTR/SRV/TXT/A)
+and browses for peers, caching what it hears with a TTL, so a client learns who
+is on the subnet and on what port without a central server. It uses the standard
+mDNS group and port and follows compression pointers when reading (other
+responders compress; it never writes one). `SendTo(host, port, message)` sends
+straight to a discovered peer, bypassing the group. Discovery and the transport
+carry no trust: a peer found or reached this way is still verified by the
+channel before anything it says is applied. A malformed datagram is a dropped
+datagram, never a crash.
+
+Multicast reaches every client on the subnet without a server, which is the
+whole point; a relay is unnecessary when the group works, and a client that
+cannot join the group still has `SendTo` to a known address. An in-game-chat
+signaling fallback — carrying an address or a discovery hint in a chat message —
+is deliberately not implemented here: the library owns no chat seam, so a
+transport cannot read or write chat without the embedder. The seam is one
+virtual `Send`, so an embedder that has a chat hook can wrap it in its own
+`CosmeticSyncTransport` (base64 the envelope into a message) and register it
+with `CosmeticSyncChannel::SetTransport` alongside the LAN one.
+
 Scripts reach the local loadout through the `cosmetic.*` bindings (see
 [API.md](API.md)): `equip`, `unequip`, `equipped`, `list`, `save_preset`,
 `apply_preset`, `presets` and `set_local_only`. All are client-side state — no
 world write and no other player affected — and gated on the `cosmetic`
 capability.
+
+### The animator
+
+A worn asset can move on its own. `Animator` (`animator.h`) is a small
+client-side clip player: a clip is a named, duration-bearing list of keyframes,
+each naming a `Bone`, an offset from the bone's rest transform (rotation in
+degrees) and a scale. `Sample` finds the bracketing keys for a bone at a time
+and interpolates position, rotation and scale; a time before the first key or
+past the last clamps to that key, so a one-shot clip holds its final pose rather
+than snapping back to rest. Playback is driven by `Advance(dt)`, which wraps a
+looping clip and stops a one-shot clip at its end; a non-finite or negative
+delta is ignored.
+
+The animator is the *clock*, and it is the render path that consumes the pose.
+`AnimatedSkeletonSource` implements `CosmeticSkeletonSource` by sampling a
+`BonePose` per bone out of an `Animator` and adding the clip's offset to a base
+skeleton's transform (the real engine skeleton on device, a test rig in tests);
+a bone the current clip does not key passes through exactly as the base reported
+it. While a clip is playing the seam reports no pose revision, which disables
+`CosmeticService`'s per-entity resolve cache for that entity — a cached,
+stationary transform must never be reused for a moving rig. When nothing is
+playing it defers to the base seam's revision, so the cache behaves normally.
+Its `target_` is atomic because the script worker sets it while the render
+thread reads it. The wiring is the same seam pattern as everywhere else: the
+embedder points the cosmetic service's skeleton source at the animated seam
+(`CosmeticService::SetSkeletonSource`), so the animator's pose is what the
+render path resolves without the cosmetic code ever knowing about the animator.
+
+Scripts reach it through the `animator.*` bindings, gated on the `cosmetic`
+capability: `add_clip`, `add_key`, `remove_clip`, `clear_clip`, `clip_count`,
+`has_clip`, `key_count`, `play`, `stop`, `reset`, `playing`, `time`, `duration`,
+`current_clip`, `seek`, `sample`, `pose`, `save`, `load`, `clear`, `target` and
+`set_target`. The frame hook advances the animator from the frame delta, the way
+it drives the PvP overlay, so a script that plays a clip sees the rig move the
+same frame — there is no `advance` binding, because the frame clock owns
+playback and a second clock would double-step it. `save` returns the clips as
+one deterministic JSON document and `load` parses one back, atomically: a
+document that is malformed, the wrong format or version, or names an unknown
+bone loads nothing and leaves the existing clips untouched. An empty animator is
+a valid, saveable state.
 
 Assets can also be authored as data. A **model pack** (`pack.h`) is a JSON
 document — `format`, `name`, `assets` — that describes assets (id, slot, bone,
@@ -805,6 +930,66 @@ Scripts reach it through the `record.*` bindings (`api/berry.idl`): `start`,
 whole surface carries the `world` grant, since it reads the world stream and
 nothing more; `save` returns one JSON document a script can hand to `fs.write`.
 Every binding fails closed when no recorder is bound.
+
+### The replay camera (`replay_camera.h`)
+
+A tape is only worth watching if the viewpoint is scripted. `ReplayCamera`
+(`replay_camera.h`) is the client feature on top of the replay: a keyframed
+camera path over the tape's ticks. A key is where the camera is and how it is
+aimed — position, pitch, yaw, roll and FOV — at a tick:
+
+```
+cam.AddKey(CameraKey{0,  Vec3(10, 65, 10), 0, 0,  0, 70});
+cam.AddKey(CameraKey{60, Vec3(20, 70, 20), -10, 45, 0, 70});
+cam.SetActive(true);   // the frame hook now draws from this timeline
+cam.Play();            // and the playhead advances on the frame clock
+```
+
+Sampling between keys is `Linear` (a straight lerp) or `Smooth` (a
+Catmull-Rom path through the neighbouring keys, so a pan curves instead of
+turning at each key). Angles and FOV always interpolate with a shorter-arc
+eased lerp, never a spline: an aim direction must not swing past its target.
+Before the first key a sample holds the first, past the last it holds the last,
+so a timeline has no gaps.
+
+Like the animator, the camera owns no clock: `Advance(dtSeconds)` is the whole
+time input, so playback is deterministic in a test and a paused client does not
+advance. The frame hook calls it while a timeline is active, then builds the
+frame's `CameraState` from the sample and hands it to the renderer — before any
+overlay draws, so world-to-screen, 3D debug geometry and billboards all project
+through the replay pose rather than the player's. Deactivating gives the camera
+back. `SetFovOverride` pins the FOV independent of the keys, which is what a
+zoom or a cinematic pass needs.
+
+A camera path over a recording is only meaningful if its keys line up with the
+recording, so `SetFollowTape(true)` makes the playhead the tape's own tick: the
+frame hook seeks the camera to `recorder->ReplayTick()` each frame instead of
+advancing a clock, and a key at tick N shows at tick N of the replay. Because
+`Seek` samples between keys, the camera glides as the tape steps. Follow-tape
+is the mode a replay mod wants; the free-running clock is for a cinematic over
+live play.
+
+The export path renders offline. `ExportBegin(fps, aspect, w, h)` starts a
+walk from the first key at a fixed rate, and while it runs the frame hook steps
+it with `ExportStep` instead of wall time, so each rendered frame is exactly one
+video frame regardless of how fast the machine is. A ten-second timeline at
+60 fps is 601 frames on any machine; the export's length is a property of the
+timeline, not the renderer.
+
+It is bounded like everything else — `kMaxKeys`, an FOV range of `[1, 179]`, a
+speed cap — and every bad value is refused rather than clamped: a non-finite
+position, an out-of-range FOV, a second key at an occupied tick, a negative
+tick. Every read fails closed, so a script cannot leave the renderer with a
+camera it cannot trust. It is client-side and read-only with respect to the
+world: it changes where this client looks while replaying what it already
+recorded, and reveals nothing the client was not already sent.
+
+Scripts reach it through the `replay.*` bindings: `add_key`/`remove_key`/
+`clear`, the `key_count`/`first_tick`/`last_tick`/`duration_ticks`/`has_key`
+reads, `smoothing`/`set_smoothing`, `activate`/`deactivate`, `play`/`pause`/
+`stop`/`playing`, `follow_tape`/`set_follow_tape`, `speed`/`set_speed`, `playhead`/`seek`, `sample`/`sample_now`,
+`fov_override`/`set_fov_override`, and `export_begin`/`export_end`/`exporting`/
+`export_frame`/`export_fps`. The whole surface carries the `world` grant.
 
 ## Local RPC & REPL (`rpc.h`)
 

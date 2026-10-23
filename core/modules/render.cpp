@@ -459,7 +459,15 @@ RenderSettings Renderer::renderSettings() const {
 
 f32 Renderer::OnFrameTime(f32 frameMs) {
   std::lock_guard<std::mutex> lk(mutex_);
-  return pipeline_.OnFrameTime(frameMs);
+  const f32 scale = pipeline_.OnFrameTime(frameMs);
+  // Tell the seam only when the scale actually moved, so a backend is not asked
+  // to resize the surface every frame. This is the link that makes dynamic
+  // resolution real: the controller's output reaches the presenter.
+  if (seam_ && scale != lastPushedScale_) {
+    seam_->SetRenderScale(scale);
+    lastPushedScale_ = scale;
+  }
+  return scale;
 }
 
 PipelineStats Renderer::pipelineStats() const {
@@ -477,9 +485,29 @@ LodTier Renderer::LodFor(f32 distance) const {
   return pipeline_.lod().TierFor(distance);
 }
 
+bool Renderer::ShouldTickEntity(f32 distance, u64 tick, u64 phase) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return pipeline_.ShouldTickEntity(distance, tick, phase);
+}
+
 bool Renderer::Visible(const Aabb& box) const {
   std::lock_guard<std::mutex> lk(mutex_);
   return pipeline_.frustum().Intersects(box);
+}
+
+void Renderer::AddOccluder(const Aabb& box) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  pipeline_.occlusion().AddOccluder(box);
+}
+
+bool Renderer::IsOccluded(const Aabb& box) const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return pipeline_.occlusion().IsOccluded(box);
+}
+
+bool Renderer::CullEntity(const Aabb& box) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return pipeline_.CullEntity(box);
 }
 
 bool Renderer::EspBoxForEntity(const EntitySnapshot& ent, const CameraState& cam,

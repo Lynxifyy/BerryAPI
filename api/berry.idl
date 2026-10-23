@@ -146,6 +146,12 @@ module Render {
   fn clip_rect() -> Table
   doc "The camera the renderer last drew with, as {valid, x, y, z, yaw, pitch}. `valid` is false until a camera is bound."
   fn camera() -> Table
+  doc "Submits a world box as an opaque occluder for this frame's software occlusion grid. Submit large near geometry (terrain, walls) front to back; boxes the grid then proves hidden are dropped by `render.occluded`. Purely CPU-side and conservative: it never hides anything it cannot prove is behind a submitted occluder."
+  fn add_occluder(min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number) -> nil
+  doc "True when the world box is entirely behind the occluders submitted this frame with `render.add_occluder`. False with no camera, no occluders, or any doubt, so it never over-culls. Resets every frame."
+  fn occluded(min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number) -> bool
+  doc "The full visibility test: false when the box is outside the camera frustum or hidden behind a submitted occluder. The one call an overlay makes per candidate before queuing its geometry."
+  fn cull_box(min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number) -> bool
 }
 
 module World {
@@ -334,6 +340,67 @@ module Hud {
   fn tween(widget: Widget, prop: string, to: number, ms: number) -> nil
 }
 
+module Ui {
+  capability hud
+  doc "Immediate-mode UI, the imperative counterpart to the retained-mode Hud: the script builds the interface every frame and reads each widget's interaction result inline. A call returns the result the render thread published for that widget on the previous frame, so a click is acted on the frame after the press — the same one-frame lag ImGui has. A frame hook must open with `begin_frame`, build windows with `begin_window`/`end_window`, and publish with `end_frame`; a window built outside a frame is refused. `begin_window` returns false when the window is collapsed, in which case its content must not be built but `end_window` must still be called. Every widget's result is a table {hovered, active, clicked, changed, toggled, value, text}. Fails closed (returns an inert result) when the UI layer is unavailable."
+  doc "Opens a UI frame. Call once at the top of a frame hook, before any window. If the previous frame was left open (a script faulted between begin and end), the stale frame is aborted here rather than presented."
+  fn begin_frame() -> nil
+  doc "Publishes the frame built since `begin_frame` so the render thread can draw and hit-test it. Call once at the end of the frame hook. A no-op when no frame is open."
+  fn end_frame() -> nil
+  doc "Opens a window at (x, y) with a content viewport of (w, h), returning true when its content should be built. Must be called between `begin_frame` and `end_frame`; outside a frame it returns false. The window's own title bar toggles collapse; dragging it moves the window. Content taller than h scrolls with the wheel."
+  fn begin_window(title: string, x: number, y: number, w: number, h: number) -> bool
+  doc "Closes the window opened by `begin_window`. Must be called even when `begin_window` returned false."
+  fn end_window() -> nil
+  doc "A push button. The result's `clicked` is true on the frame the press is released inside it."
+  fn button(label: string) -> Table
+  doc "A checkbox. Pass the current value; the result's `toggled` is true on a click and `value` is the new value (1 or 0)."
+  fn checkbox(label: string, value: bool) -> Table
+  doc "A horizontal slider. Pass the current value; a drag returns the new one in `value` with `changed` set. A degenerate range (hi <= lo) leaves the value untouched."
+  fn slider_float(label: string, value: number, lo: number, hi: number) -> Table
+  doc "An integer slider, rounding the drag to whole steps."
+  fn slider_int(label: string, value: number, lo: number, hi: number) -> Table
+  doc "A single-line text field. Pass the current text; typed characters arrive in `text` with `changed` set. Backspace (UTF-8 aware) and Enter are handled; the field stops at 256 bytes."
+  fn input_text(label: string, value: string) -> Table
+  doc "A collapsible section header. Pass the current open state; the returned value is the new one. Indent the children while open."
+  fn collapsing_header(label: string, open: bool) -> bool
+  doc "Opens a tab bar. Returns false when it could not be opened (too many nested bars), in which case `end_tab_bar` must not be called."
+  fn begin_tab_bar(id: string) -> bool
+  fn end_tab_bar() -> nil
+  doc "Opens one tab, returning true when it is the selected one so its content should be built. Every `begin_tab_item` must be paired with `end_tab_item`."
+  fn begin_tab_item(label: string) -> bool
+  fn end_tab_item() -> nil
+  doc "Non-interactive text at the current cursor."
+  fn text(text: string) -> nil
+  doc "Coloured text using a semantic theme role: window_bg, title_bg, title_text, text, muted, accent, frame_bg, frame_hover, frame_active, border, good, warn or bad."
+  fn text_colored(role: string, text: string) -> nil
+  doc "A 0..1 progress bar with an optional centred overlay."
+  fn progress_bar(fraction: number, overlay: string) -> nil
+  doc "A horizontal rule across the content width."
+  fn separator() -> nil
+  doc "A blank row."
+  fn spacing() -> nil
+  doc "Keeps the next widget on the same line as the previous one."
+  fn same_line() -> nil
+  doc "Reserves an empty box of (w, h)."
+  fn dummy(w: number, h: number) -> nil
+  doc "Indents subsequent widgets by one level."
+  fn indent() -> nil
+  doc "Reverses one level of indent."
+  fn unindent() -> nil
+  doc "A bulleted line."
+  fn bullet_text(text: string) -> nil
+  doc "Selects the theme: \"dark\" (the default, flat) or \"glass\" (translucent, rounded, iOS-style). An unknown name is refused (fail closed) and the theme is unchanged."
+  fn set_theme(name: string) -> bool
+  doc "The active theme's name."
+  fn theme() -> string
+  doc "The layer's counters as {frames, windows, widgets, hovered, clicked}."
+  fn stats() -> Table
+  doc "True while any window is being dragged, so a caller can suppress camera input."
+  fn any_window_dragging() -> bool
+  doc "Drops every window's persistent state (drag offsets, scroll, collapse)."
+  fn reset() -> nil
+}
+
 module Perf {
   capability perf
   doc "Frame timing and quality controls."
@@ -354,6 +421,8 @@ module Perf {
   fn pipeline() -> Table
   doc "The level-of-detail tier an entity `distance` blocks from the camera would be drawn at: \"full\", \"reduced\", \"static\" or \"culled\". Follows the same policy the renderer culls with, so a script can predict whether its overlay will be given geometry."
   fn lod_tier(distance: number) -> string
+  doc "Whether an entity `distance` blocks away should advance its animation/physics on `tick`, keyed by `phase` (pass the entity id so a crowd does not all update on one tick). True every tick at \"full\", one tick in the policy's reduced interval at \"reduced\", never at \"static\"/\"culled\". This is the tick-rate half of LOD: a script that drives a crowd skips a false result to throttle it."
+  fn lod_should_tick(distance: number, tick: number, phase: number) -> bool
 }
 
 module Input {
@@ -378,6 +447,52 @@ module Cosmetic {
   fn set_local_only(enabled: bool) -> nil
   doc "Reload local model packs from the pack directory, registering every valid *.pack.json. Returns the number of packs loaded; each pack is applied atomically (all its assets or none)."
   fn reload_packs() -> number
+}
+
+module Animator {
+  capability cosmetic
+  doc "Client-side keyframed animation of the local player's own rendered bones. A script authors clips — one bone's offset/rotation/scale at a time — and plays them; the pose is applied on top of the skeleton the cosmetic renderer resolves through, so a clip actually moves the rendered model. Nothing here is authoritative and nothing is sent: it animates this client's own rig only. Sampling is pure, so a replay reproduces it exactly. An unknown clip or bone fails closed (no pose), and `load` replaces the whole clip set or nothing."
+  doc "Adds an empty clip. False when the name is empty/too long/already used, the duration is not finite and positive, or the clip cap is reached."
+  fn add_clip(name: string, duration: number, looping: bool) -> bool
+  doc "Appends a keyframe to a clip. False when the clip is unknown, the bone is unknown, the time is negative or past the duration, the scale is not finite and positive, or the per-clip key cap is reached. `position`/`rotation` are offsets from the bone's rest transform (rotation in degrees)."
+  fn add_key(clip: string, bone: string, time: number, px: number, py: number, pz: number, rx: number, ry: number, rz: number, scale: number) -> bool
+  doc "Removes a clip. False when it is unknown."
+  fn remove_clip(name: string) -> bool
+  doc "Removes every key from a clip, keeping the clip. False when unknown."
+  fn clear_clip(name: string) -> bool
+  fn clip_count() -> number
+  fn has_clip(name: string) -> bool
+  doc "The number of keys in a clip, or 0 when unknown."
+  fn key_count(name: string) -> number
+  doc "Starts a clip from time 0. False when the clip is unknown."
+  fn play(name: string) -> bool
+  doc "Stops playback, leaving the current time where it is."
+  fn stop() -> nil
+  doc "Stops and rewinds to time 0."
+  fn reset() -> nil
+  fn playing() -> bool
+  doc "The current play time in seconds."
+  fn time() -> number
+  doc "The current clip's duration, or 0 when none is selected."
+  fn duration() -> number
+  doc "The current clip's name, or \"\" when none is selected."
+  fn current_clip() -> string
+  doc "Jumps to an absolute time within the current clip, clamped/wrapped the same way playback would land there. False when no clip is selected."
+  fn seek(seconds: number) -> bool
+  doc "A bone's interpolated pose at an absolute time within the current clip, as {valid, bone, px, py, pz, rx, ry, rz, scale}. `valid` is false when no clip/bone has a key there."
+  fn sample(bone: string, time: number) -> Table
+  doc "The whole current pose: one table per bone that has a key in the current clip, at the current time, each {bone, px, py, pz, rx, ry, rz, scale}. Empty when no clip is selected."
+  fn pose() -> Table
+  doc "The clips as one JSON document (deterministic: same clips, same bytes)."
+  fn save() -> string
+  doc "Replaces the clips from a JSON document in the exact format `save` returns, including its version. Rejects the whole document on any error (malformed JSON, the wrong format or version, a duplicate name, an unknown bone, an out-of-range key) and leaves the current clips untouched. Playback is stopped."
+  fn load(json: string) -> bool
+  doc "Drops every clip and stops playback."
+  fn clear() -> nil
+  doc "The entity the animator drives (0 = every entity the skeleton seam resolves)."
+  fn target() -> number
+  doc "Sets the entity the animator drives. 0 animates every entity the base skeleton seam resolves."
+  fn set_target(entity: number) -> nil
 }
 
 module Events {
@@ -464,4 +579,67 @@ module Record {
   doc "The current replay frame index, or -1 before the first step."
   fn replay_index() -> number
   fn replay_end() -> bool
+}
+
+module Replay {
+  capability world
+  doc "The replay mod's camera: a keyframed timeline over the recorded tape. A replay is only worth watching if the viewpoint is scripted, so this is the camera path — keys of (position, pitch/yaw/roll, fov) at tape ticks — sampled into the camera the frame draws with while a replay plays. `activate` hands the frame's camera to this timeline; `deactivate` gives it back to the player. Sampling is linear or a Catmull-Rom `smooth` path; angles interpolate along the shorter arc and never overshoot a key. Playback is driven by the frame clock, so a paused client does not advance, and `export_*` walks the timeline at a fixed frame rate for offline rendering. It is client-side and read-only with respect to the world: it changes where this client looks while replaying what it already recorded, and reveals nothing the client was not already sent. Every feed is bounded (key count, FOV range, speed) and every bad value is refused rather than clamped, so a script cannot leave the renderer with a camera it cannot trust."
+  doc "Adds a camera key at a tick. False when the position or angles are not finite, the FOV is outside [1, 179], the key cap is reached, or a key already exists at that tick (remove it first)."
+  fn add_key(tick: number, x: number, y: number, z: number, pitch: number, yaw: number, roll: number, fov: number) -> bool
+  doc "Removes the key at a tick. False when there is none."
+  fn remove_key(tick: number) -> bool
+  doc "Drops every key and stops playback. Keeps whether the timeline is active."
+  fn clear() -> nil
+  fn key_count() -> number
+  fn has_key(tick: number) -> bool
+  doc "The first key's tick, or 0 when there are no keys."
+  fn first_tick() -> number
+  doc "The last key's tick, or 0 when there are no keys."
+  fn last_tick() -> number
+  doc "The span between the first and last key, or 0 with fewer than two keys."
+  fn duration_ticks() -> number
+  doc "The interpolation mode, \"linear\" or \"smooth\"."
+  fn smoothing() -> string
+  doc "Sets the interpolation mode. False when the name is neither \"linear\" nor \"smooth\"."
+  fn set_smoothing(name: string) -> bool
+  doc "True when the frame's camera is driven by this timeline."
+  fn active() -> bool
+  doc "Hands the frame's camera to this timeline (and starts playback). False when there are no keys to play."
+  fn activate() -> bool
+  doc "Gives the camera back to the player and pauses."
+  fn deactivate() -> nil
+  doc "Starts (or resumes) playback from the current playhead. False when there are no keys."
+  fn play() -> bool
+  fn pause() -> nil
+  doc "Pauses and rewinds to the first key."
+  fn stop() -> nil
+  fn playing() -> bool
+  doc "True when the playhead follows the replay tape's tick instead of the frame clock. Off by default."
+  fn follow_tape() -> bool
+  doc "When on, the playhead is the replay tape's tick: a key at tick N shows at tick N of the recording, and the camera glides as the tape steps. When off, the playhead advances on the frame clock at `speed`."
+  fn set_follow_tape(on: bool) -> nil
+  fn speed() -> number
+  doc "Sets the playback speed multiplier. Must be finite and in (0, 64]; a bad value is refused."
+  fn set_speed(speed: number) -> bool
+  doc "The playhead in ticks (fractional, so it can fall between keys)."
+  fn playhead() -> number
+  doc "Moves the playhead, clamped into the key range. False when there are no keys."
+  fn seek(tick: number) -> bool
+  doc "The pose at an absolute tick as {valid, x, y, z, pitch, yaw, roll, fov}. Before the first key it holds the first, past the last it holds the last."
+  fn sample(tick: number) -> Table
+  doc "The pose at the current playhead, same shape as `sample`."
+  fn sample_now() -> Table
+  doc "The FOV override in degrees, or 0 when the keyframed FOV is used."
+  fn fov_override() -> number
+  doc "Pins the FOV, or clears the pin with 0. A non-zero value must be finite and in [1, 179]; a bad value is refused."
+  fn set_fov_override(fov: number) -> bool
+  doc "Begins a fixed-rate export from the first key. False when the rate is not finite and in (0, 240], the viewport is not finite and positive, or there are no keys. While exporting, the client's frame hook yields one video frame per rendered frame at this rate — independent of the machine's real frame rate — so the export's length is a property of the timeline, not the renderer."
+  fn export_begin(fps: number, width: number, height: number) -> bool
+  doc "Ends an export. A no-op when none is running."
+  fn export_end() -> nil
+  fn exporting() -> bool
+  doc "How many frames the current export has yielded."
+  fn export_frame() -> number
+  doc "The export frame rate, or 0 when not exporting."
+  fn export_fps() -> number
 }

@@ -34,6 +34,10 @@ struct BERRY_API InputState {
   bool attack = false;     // left mouse held
   bool use = false;        // right mouse held
   std::array<bool, 3> mouse{};
+  /// Pointer position in physical pixels, as last delivered by the input hook.
+  Vec2 pointer;
+  /// Wheel delta for the current frame, in notches (positive = scroll up).
+  f32 wheel = 0.0f;
 
   /// Number of WASD keys held, 0..4.
   int movementHeld() const {
@@ -41,8 +45,14 @@ struct BERRY_API InputState {
   }
 };
 
-/// Tracks key and mouse state and derives click rate. Thread-confined: the
-/// caller (engine input hook / script worker) owns the instance.
+/// Tracks key and mouse state and derives click rate.
+///
+/// Single-threaded by construction: the owner delivers events (`OnKey`,
+/// `OnPointerMove`, ...) and reads state (`state()`, `ConsumeWheel`, ...) on the
+/// same thread. The engine's input hook runs on the render thread, so that is
+/// where the immediate-mode UI layer reads it from during `berry:frame`; an
+/// embedder that delivers input elsewhere must snapshot into a frame-local
+/// `InputState` rather than share the observer across threads.
 class BERRY_API InputObserver {
  public:
   InputObserver() = default;
@@ -52,8 +62,31 @@ class BERRY_API InputObserver {
   void OnKey(const char* key, bool down);
   void OnMouse(MouseButton button, bool down);
 
+  /// Records a pointer move, in physical pixels.
+  void OnPointerMove(f32 x, f32 y);
+  /// Records a wheel notch (positive = scroll up). Accumulated until a consumer
+  /// takes it with ConsumeWheel().
+  void OnWheel(f32 notches);
+
+  /// Records typed UTF-8 text (one or more bytes). Accumulated until a consumer
+  /// takes it with ConsumeText(). Control bytes are rejected, so a stray newline
+  /// or escape never lands in a text field.
+  void OnTextInput(const char* utf8);
+
   /// Advances the click-rate window. Call once per frame/tick.
   void Tick(u64 nowMs);
+
+  /// Takes the wheel delta accumulated since the last call and zeroes it. A UI
+  /// layer calls this once per frame so a scroll is delivered exactly once.
+  f32 ConsumeWheel();
+
+  /// Takes the typed text accumulated since the last call and clears it.
+  std::string ConsumeText();
+
+  /// Edge-triggered key press: true exactly once per press of `key`, then the
+  /// press is consumed. Used for one-shot keys (backspace, enter) that a UI must
+  /// act on once rather than while held. Held state stays in `state()`.
+  bool ConsumeKeyPress(const char* key);
 
   const InputState& state() const { return state_; }
 
@@ -83,6 +116,11 @@ class BERRY_API InputObserver {
   };
   std::array<Held, 8> held_;
   u64 nowMs_ = 0;
+  std::string typed_;
+  /// Keys pressed since the last ConsumeKeyPress, so a one-shot key is seen
+  /// exactly once. A small fixed set: backspace, enter.
+  std::array<std::string, 8> pressed_;
+  size_t pressedCount_ = 0;
 };
 
 }  // namespace Berry

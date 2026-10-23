@@ -134,6 +134,23 @@ LodTier LodPolicy::TierFor(f32 distance) const {
   return cullBeyondStatic ? LodTier::Culled : LodTier::Static;
 }
 
+bool LodPolicy::ShouldTick(LodTier tier, u64 tick, u64 phase) const {
+  switch (tier) {
+    case LodTier::Full:
+      return true;
+    case LodTier::Reduced: {
+      const u64 interval = reducedTickInterval < 1 ? 1 : (u64)reducedTickInterval;
+      // `tick + phase` so two entities with different ids fall on different
+      // ticks; without the phase a whole crowd would update on the same frame.
+      return ((tick + phase) % interval) == 0;
+    }
+    case LodTier::Static:
+    case LodTier::Culled:
+      return false;
+  }
+  return true;
+}
+
 //----------------------------------------------------------------------------
 // Dynamic resolution
 //----------------------------------------------------------------------------
@@ -305,6 +322,155 @@ DrawCounts BatchBuilder::Count(const std::vector<Line2D>& lines,
 // Pipeline statistics
 //----------------------------------------------------------------------------
 
+//----------------------------------------------------------------------------
+// Occlusion buffer
+//----------------------------------------------------------------------------
+
+namespace {
+
+/// The view-space depth of a world point: the distance in front of the camera
+/// along its forward axis, positive in front. Row 2 of the view matrix is the
+/// negated forward axis, so `view * p` row 2 is `-depth`; negate to get a value
+/// that grows with distance.
+f32 ViewDepth(const Mat4& view, const Vec3& p) {
+  const f32* m = view.m;
+  return -(m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14]);
+}
+
+/// The cell indices a span *touches* (inclusive), for a query: a box is only
+/// culled when every cell it overlaps is filled, so this over-includes at a
+/// boundary rather than under-include.
+void CellSpanTouched(f32 lo, f32 hi, f32 cellSize, i32 cells, i32* out0, i32* out1) {
+  i32 a = (i32)std::floor(lo / cellSize);
+  i32 b = (i32)std::floor(hi / cellSize);
+  if (a < 0) a = 0;
+  if (b < 0) b = 0;
+  if (a > cells - 1) a = cells - 1;
+  if (b > cells - 1) b = cells - 1;
+  *out0 = a;
+  *out1 = b;
+}
+
+/// The cell indices fully inside a span (inclusive). An empty range (out1 <
+/// out0) means the span covers no whole cell, so the occluder contributes
+/// nothing — the safe direction.
+void CellSpanInterior(f32 lo, f32 hi, f32 cellSize, i32 cells, i32* out0, i32* out1) {
+  i32 a = (i32)std::ceil(lo / cellSize);
+  i32 b = (i32)std::floor(hi / cellSize) - 1;
+  if (a < 0) a = 0;
+  if (b > cells - 1) b = cells - 1;
+  *out0 = a;
+  *out1 = b;
+}
+
+}  // namespace
+
+void OcclusionBuffer::BeginFrame(const CameraState& camera) {
+  cam_ = camera;
+  valid_ = camera.valid;
+  if (cellsX_ < 1) cellsX_ = kDefaultCellsX;
+  if (cellsY_ < 1) cellsY_ = kDefaultCellsY;
+  depth_.assign((size_t)cellsX_ * (size_t)cellsY_, -1.0f);
+}
+
+void OcclusionBuffer::Reset() {
+  cam_ = CameraState{};
+  valid_ = false;
+  depth_.clear();
+}
+
+bool OcclusionBuffer::ProjectBox(const Aabb& box, Vec2* mn, Vec2* mx,
+                                 f32* nearDepth, f32* farDepth) const {
+  if (!valid_ || !mn || !mx || !nearDepth || !farDepth) return false;
+
+  const Vec3 corners[8] = {
+      Vec3(box.min.x, box.min.y, box.min.z), Vec3(box.max.x, box.min.y, box.min.z),
+      Vec3(box.min.x, box.max.y, box.min.z), Vec3(box.max.x, box.max.y, box.min.z),
+      Vec3(box.min.x, box.min.y, box.max.z), Vec3(box.max.x, box.min.y, box.max.z),
+      Vec3(box.min.x, box.max.y, box.max.z), Vec3(box.max.x, box.max.y, box.max.z),
+  };
+
+  f32 dNear = 0.0f, dFar = 0.0f;
+  Vec2 lo(1e30f, 1e30f), hi(-1e30f, -1e30f);
+  bool first = true;
+  for (const Vec3& c : corners) {
+    const f32 d = ViewDepth(cam_.view, c);
+    if (d <= 0.0001f) return false;   // a corner behind/at the eye: not safe
+    if (first) { dNear = dFar = d; first = false; }
+    else { dNear = std::min(dNear, d); dFar = std::max(dFar, d); }
+
+    Vec2 s;
+    if (!cam_.WorldToScreen(c, &s)) return false;   // outside the view: not safe
+    lo.x = std::min(lo.x, s.x);
+    lo.y = std::min(lo.y, s.y);
+    hi.x = std::max(hi.x, s.x);
+    hi.y = std::max(hi.y, s.y);
+  }
+  *mn = lo;
+  *mx = hi;
+  *nearDepth = dNear;
+  *farDepth = dFar;
+  return true;
+}
+
+void OcclusionBuffer::AddOccluder(const Aabb& box) {
+  Vec2 mn, mx;
+  f32 nearD = 0.0f, farD = 0.0f;
+  if (!ProjectBox(box, &mn, &mx, &nearD, &farD)) return;
+  if (cam_.width <= 0.0f || cam_.height <= 0.0f) return;
+
+  // Only cells the box covers *completely* become opaque, so an occluder that
+  // merely clips a cell edge cannot hide something in front of it.
+  const f32 cellW = cam_.width / (f32)cellsX_;
+  const f32 cellH = cam_.height / (f32)cellsY_;
+  i32 x0 = 0, x1 = -1, y0 = 0, y1 = -1;
+  CellSpanInterior(mn.x, mx.x, cellW, cellsX_, &x0, &x1);
+  CellSpanInterior(mn.y, mx.y, cellH, cellsY_, &y0, &y1);
+  if (x1 < x0 || y1 < y0) return;   // covers no whole cell
+
+  for (i32 y = y0; y <= y1; ++y) {
+    for (i32 x = x0; x <= x1; ++x) {
+      f32& cell = depth_[(size_t)y * (size_t)cellsX_ + (size_t)x];
+      // Store the *nearest* depth: an occluder only ever makes a cell shallower,
+      // never deeper, so a later farther occluder cannot un-occlude a cell.
+      if (cell < 0.0f || nearD < cell) cell = nearD;
+    }
+  }
+}
+
+bool OcclusionBuffer::IsOccluded(const Aabb& box) const {
+  if (!valid_ || cam_.width <= 0.0f || cam_.height <= 0.0f) return false;
+
+  Vec2 mn, mx;
+  f32 nearD = 0.0f, farD = 0.0f;
+  if (!ProjectBox(box, &mn, &mx, &nearD, &farD)) return false;
+
+  // Every cell the box *touches* must be filled and nearer, so a box straddling
+  // a cell edge is never culled on the strength of one filled neighbour.
+  const f32 cellW = cam_.width / (f32)cellsX_;
+  const f32 cellH = cam_.height / (f32)cellsY_;
+  i32 x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+  CellSpanTouched(mn.x, mx.x, cellW, cellsX_, &x0, &x1);
+  CellSpanTouched(mn.y, mx.y, cellH, cellsY_, &y0, &y1);
+
+  for (i32 y = y0; y <= y1; ++y) {
+    for (i32 x = x0; x <= x1; ++x) {
+      const f32 cell = depth_[(size_t)y * (size_t)cellsX_ + (size_t)x];
+      // Empty cell, or a cell whose occluder is behind this box's nearest
+      // point: the box may be visible through it. Draw it.
+      if (cell < 0.0f) return false;
+      if (nearD <= cell) return false;
+    }
+  }
+  return true;   // every covered cell is filled and nearer than the box
+}
+
+i32 OcclusionBuffer::filledCells() const {
+  i32 n = 0;
+  for (f32 d : depth_) if (d >= 0.0f) ++n;
+  return n;
+}
+
 void PipelineStats::Reset() { *this = PipelineStats{}; }
 
 //----------------------------------------------------------------------------
@@ -322,6 +488,9 @@ void RenderPipeline::BeginFrame(const CameraState& camera,
     // (a debug overlay that cannot see the camera draws everything).
     frustum_ = Frustum();
   }
+  // The occlusion grid is rebuilt every frame; an invalid camera leaves it
+  // invalid so nothing is culled on a stale depth.
+  occlusion_.BeginFrame(camera);
   inFrame_ = true;
 }
 
@@ -343,6 +512,31 @@ LodTier RenderPipeline::LodFor(f32 distance) {
   const LodTier t = lod_.TierFor(distance);
   if (t != LodTier::Full) ++stats_.entitiesLodReduced;
   return t;
+}
+
+bool RenderPipeline::ShouldTickEntity(f32 distance, u64 tick, u64 phase) {
+  const LodTier t = lod_.TierFor(distance);
+  const bool tickNow = lod_.ShouldTick(t, tick, phase);
+  if (!tickNow) ++stats_.entitiesTickThrottled;
+  return tickNow;
+}
+
+bool RenderPipeline::CullEntity(const Aabb& box) {
+  ++stats_.entitiesSubmitted;
+  // Frustum first: it is a handful of dot products and drops most off-screen
+  // geometry before the grid lookup.
+  if (!frustum_.Intersects(box)) {
+    ++stats_.entitiesCulled;
+    return false;
+  }
+  // Then occlusion. A box the buffer cannot place (behind the eye, off-screen,
+  // or over an empty cell) is never occluded, so this only ever removes work.
+  if (occlusion_.IsOccluded(box)) {
+    ++stats_.entitiesOccluded;
+    return false;
+  }
+  ++stats_.entitiesDrawn;
+  return true;
 }
 
 f32 RenderPipeline::OnFrameTime(f32 frameMs) {
@@ -375,6 +569,7 @@ void RenderPipeline::EndFrame() {
 void RenderPipeline::Reset() {
   frustum_ = Frustum();
   lod_ = LodPolicy::Default();
+  occlusion_.Reset();
   resolution_.Reset();
   settings_ = RenderSettings{};
   stats_.Reset();

@@ -81,6 +81,7 @@ Test binaries:
 | `test_math` | math/Mat4 helpers |
 | `test_modules` | engine bootstrap, World+Combat+Render services, ESP |
 | `test_net` | HTTP, WebSocket echo, JSON-RPC |
+| `test_lan_transport` | UDP/multicast socket, LAN fragmentation+reassembly, mDNS discovery, signed-envelope end to end |
 | `test_render` | camera projection, draw batching, backend factory |
 | `test_sigscan` | signature parse/match, build-hash gate, fail-closed rules |
 | `test_thread` | ThreadModel role routing + assertions |

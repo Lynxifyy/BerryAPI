@@ -133,6 +133,12 @@ export type Render = {
   clip_rect: () -> {[string]: any},
   -- The camera the renderer last drew with, as {valid, x, y, z, yaw, pitch}. `valid` is false until a camera is bound.
   camera: () -> {[string]: any},
+  -- Submits a world box as an opaque occluder for this frame's software occlusion grid. Submit large near geometry (terrain, walls) front to back; boxes the grid then proves hidden are dropped by `render.occluded`. Purely CPU-side and conservative: it never hides anything it cannot prove is behind a submitted occluder.
+  add_occluder: (min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number) -> (),
+  -- True when the world box is entirely behind the occluders submitted this frame with `render.add_occluder`. False with no camera, no occluders, or any doubt, so it never over-culls. Resets every frame.
+  occluded: (min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number) -> boolean,
+  -- The full visibility test: false when the box is outside the camera frustum or hidden behind a submitted occluder. The one call an overlay makes per candidate before queuing its geometry.
+  cull_box: (min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number) -> boolean,
 }
 
 -- Capability required: world.
@@ -320,6 +326,66 @@ export type Hud = {
   tween: (widget: WidgetId, prop: string, to: number, ms: number) -> (),
 }
 
+-- Capability required: hud.
+export type Ui = {
+  -- Opens a UI frame. Call once at the top of a frame hook, before any window. If the previous frame was left open (a script faulted between begin and end), the stale frame is aborted here rather than presented.
+  begin_frame: () -> (),
+  -- Publishes the frame built since `begin_frame` so the render thread can draw and hit-test it. Call once at the end of the frame hook. A no-op when no frame is open.
+  end_frame: () -> (),
+  -- Opens a window at (x, y) with a content viewport of (w, h), returning true when its content should be built. Must be called between `begin_frame` and `end_frame`; outside a frame it returns false. The window's own title bar toggles collapse; dragging it moves the window. Content taller than h scrolls with the wheel.
+  begin_window: (title: string, x: number, y: number, w: number, h: number) -> boolean,
+  -- Closes the window opened by `begin_window`. Must be called even when `begin_window` returned false.
+  end_window: () -> (),
+  -- A push button. The result's `clicked` is true on the frame the press is released inside it.
+  button: (label: string) -> {[string]: any},
+  -- A checkbox. Pass the current value; the result's `toggled` is true on a click and `value` is the new value (1 or 0).
+  checkbox: (label: string, value: boolean) -> {[string]: any},
+  -- A horizontal slider. Pass the current value; a drag returns the new one in `value` with `changed` set. A degenerate range (hi <= lo) leaves the value untouched.
+  slider_float: (label: string, value: number, lo: number, hi: number) -> {[string]: any},
+  -- An integer slider, rounding the drag to whole steps.
+  slider_int: (label: string, value: number, lo: number, hi: number) -> {[string]: any},
+  -- A single-line text field. Pass the current text; typed characters arrive in `text` with `changed` set. Backspace (UTF-8 aware) and Enter are handled; the field stops at 256 bytes.
+  input_text: (label: string, value: string) -> {[string]: any},
+  -- A collapsible section header. Pass the current open state; the returned value is the new one. Indent the children while open.
+  collapsing_header: (label: string, open: boolean) -> boolean,
+  -- Opens a tab bar. Returns false when it could not be opened (too many nested bars), in which case `end_tab_bar` must not be called.
+  begin_tab_bar: (id: string) -> boolean,
+  end_tab_bar: () -> (),
+  -- Opens one tab, returning true when it is the selected one so its content should be built. Every `begin_tab_item` must be paired with `end_tab_item`.
+  begin_tab_item: (label: string) -> boolean,
+  end_tab_item: () -> (),
+  -- Non-interactive text at the current cursor.
+  text: (text: string) -> (),
+  -- Coloured text using a semantic theme role: window_bg, title_bg, title_text, text, muted, accent, frame_bg, frame_hover, frame_active, border, good, warn or bad.
+  text_colored: (role: string, text: string) -> (),
+  -- A 0..1 progress bar with an optional centred overlay.
+  progress_bar: (fraction: number, overlay: string) -> (),
+  -- A horizontal rule across the content width.
+  separator: () -> (),
+  -- A blank row.
+  spacing: () -> (),
+  -- Keeps the next widget on the same line as the previous one.
+  same_line: () -> (),
+  -- Reserves an empty box of (w, h).
+  dummy: (w: number, h: number) -> (),
+  -- Indents subsequent widgets by one level.
+  indent: () -> (),
+  -- Reverses one level of indent.
+  unindent: () -> (),
+  -- A bulleted line.
+  bullet_text: (text: string) -> (),
+  -- Selects the theme: \"dark\" (the default, flat) or \"glass\" (translucent, rounded, iOS-style). An unknown name is refused (fail closed) and the theme is unchanged.
+  set_theme: (name: string) -> boolean,
+  -- The active theme's name.
+  theme: () -> string,
+  -- The layer's counters as {frames, windows, widgets, hovered, clicked}.
+  stats: () -> {[string]: any},
+  -- True while any window is being dragged, so a caller can suppress camera input.
+  any_window_dragging: () -> boolean,
+  -- Drops every window's persistent state (drag offsets, scroll, collapse).
+  reset: () -> (),
+}
+
 -- Capability required: perf.
 export type Perf = {
   -- Frame timing and quality controls.
@@ -340,6 +406,8 @@ export type Perf = {
   pipeline: () -> {[string]: any},
   -- The level-of-detail tier an entity `distance` blocks from the camera would be drawn at: \"full\", \"reduced\", \"static\" or \"culled\". Follows the same policy the renderer culls with, so a script can predict whether its overlay will be given geometry.
   lod_tier: (distance: number) -> string,
+  -- Whether an entity `distance` blocks away should advance its animation/physics on `tick`, keyed by `phase` (pass the entity id so a crowd does not all update on one tick). True every tick at \"full\", one tick in the policy's reduced interval at \"reduced\", never at \"static\"/\"culled\". This is the tick-rate half of LOD: a script that drives a crowd skips a false result to throttle it.
+  lod_should_tick: (distance: number, tick: number, phase: number) -> boolean,
 }
 
 -- Capability required: input.
@@ -364,6 +432,51 @@ export type Cosmetic = {
   set_local_only: (enabled: boolean) -> (),
   -- Reload local model packs from the pack directory, registering every valid *.pack.json. Returns the number of packs loaded; each pack is applied atomically (all its assets or none).
   reload_packs: () -> number,
+}
+
+-- Capability required: cosmetic.
+export type Animator = {
+  -- Adds an empty clip. False when the name is empty/too long/already used, the duration is not finite and positive, or the clip cap is reached.
+  add_clip: (name: string, duration: number, looping: boolean) -> boolean,
+  -- Appends a keyframe to a clip. False when the clip is unknown, the bone is unknown, the time is negative or past the duration, the scale is not finite and positive, or the per-clip key cap is reached. `position`/`rotation` are offsets from the bone's rest transform (rotation in degrees).
+  add_key: (clip: string, bone: string, time: number, px: number, py: number, pz: number, rx: number, ry: number, rz: number, scale: number) -> boolean,
+  -- Removes a clip. False when it is unknown.
+  remove_clip: (name: string) -> boolean,
+  -- Removes every key from a clip, keeping the clip. False when unknown.
+  clear_clip: (name: string) -> boolean,
+  clip_count: () -> number,
+  has_clip: (name: string) -> boolean,
+  -- The number of keys in a clip, or 0 when unknown.
+  key_count: (name: string) -> number,
+  -- Starts a clip from time 0. False when the clip is unknown.
+  play: (name: string) -> boolean,
+  -- Stops playback, leaving the current time where it is.
+  stop: () -> (),
+  -- Stops and rewinds to time 0.
+  reset: () -> (),
+  playing: () -> boolean,
+  -- The current play time in seconds.
+  time: () -> number,
+  -- The current clip's duration, or 0 when none is selected.
+  duration: () -> number,
+  -- The current clip's name, or \"\" when none is selected.
+  current_clip: () -> string,
+  -- Jumps to an absolute time within the current clip, clamped/wrapped the same way playback would land there. False when no clip is selected.
+  seek: (seconds: number) -> boolean,
+  -- A bone's interpolated pose at an absolute time within the current clip, as {valid, bone, px, py, pz, rx, ry, rz, scale}. `valid` is false when no clip/bone has a key there.
+  sample: (bone: string, time: number) -> {[string]: any},
+  -- The whole current pose: one table per bone that has a key in the current clip, at the current time, each {bone, px, py, pz, rx, ry, rz, scale}. Empty when no clip is selected.
+  pose: () -> {[string]: any},
+  -- The clips as one JSON document (deterministic: same clips, same bytes).
+  save: () -> string,
+  -- Replaces the clips from a JSON document in the exact format `save` returns, including its version. Rejects the whole document on any error (malformed JSON, the wrong format or version, a duplicate name, an unknown bone, an out-of-range key) and leaves the current clips untouched. Playback is stopped.
+  load: (json: string) -> boolean,
+  -- Drops every clip and stops playback.
+  clear: () -> (),
+  -- The entity the animator drives (0 = every entity the skeleton seam resolves).
+  target: () -> number,
+  -- Sets the entity the animator drives. 0 animates every entity the base skeleton seam resolves.
+  set_target: (entity: number) -> (),
 }
 
 -- Capability required: input.
@@ -428,6 +541,68 @@ export type Record = {
   -- The current replay frame index, or -1 before the first step.
   replay_index: () -> number,
   replay_end: () -> boolean,
+}
+
+-- Capability required: world.
+export type Replay = {
+  -- Adds a camera key at a tick. False when the position or angles are not finite, the FOV is outside [1, 179], the key cap is reached, or a key already exists at that tick (remove it first).
+  add_key: (tick: number, x: number, y: number, z: number, pitch: number, yaw: number, roll: number, fov: number) -> boolean,
+  -- Removes the key at a tick. False when there is none.
+  remove_key: (tick: number) -> boolean,
+  -- Drops every key and stops playback. Keeps whether the timeline is active.
+  clear: () -> (),
+  key_count: () -> number,
+  has_key: (tick: number) -> boolean,
+  -- The first key's tick, or 0 when there are no keys.
+  first_tick: () -> number,
+  -- The last key's tick, or 0 when there are no keys.
+  last_tick: () -> number,
+  -- The span between the first and last key, or 0 with fewer than two keys.
+  duration_ticks: () -> number,
+  -- The interpolation mode, \"linear\" or \"smooth\".
+  smoothing: () -> string,
+  -- Sets the interpolation mode. False when the name is neither \"linear\" nor \"smooth\".
+  set_smoothing: (name: string) -> boolean,
+  -- True when the frame's camera is driven by this timeline.
+  active: () -> boolean,
+  -- Hands the frame's camera to this timeline (and starts playback). False when there are no keys to play.
+  activate: () -> boolean,
+  -- Gives the camera back to the player and pauses.
+  deactivate: () -> (),
+  -- Starts (or resumes) playback from the current playhead. False when there are no keys.
+  play: () -> boolean,
+  pause: () -> (),
+  -- Pauses and rewinds to the first key.
+  stop: () -> (),
+  playing: () -> boolean,
+  -- True when the playhead follows the replay tape's tick instead of the frame clock. Off by default.
+  follow_tape: () -> boolean,
+  -- When on, the playhead is the replay tape's tick: a key at tick N shows at tick N of the recording, and the camera glides as the tape steps. When off, the playhead advances on the frame clock at `speed`.
+  set_follow_tape: (on: boolean) -> (),
+  speed: () -> number,
+  -- Sets the playback speed multiplier. Must be finite and in (0, 64]; a bad value is refused.
+  set_speed: (speed: number) -> boolean,
+  -- The playhead in ticks (fractional, so it can fall between keys).
+  playhead: () -> number,
+  -- Moves the playhead, clamped into the key range. False when there are no keys.
+  seek: (tick: number) -> boolean,
+  -- The pose at an absolute tick as {valid, x, y, z, pitch, yaw, roll, fov}. Before the first key it holds the first, past the last it holds the last.
+  sample: (tick: number) -> {[string]: any},
+  -- The pose at the current playhead, same shape as `sample`.
+  sample_now: () -> {[string]: any},
+  -- The FOV override in degrees, or 0 when the keyframed FOV is used.
+  fov_override: () -> number,
+  -- Pins the FOV, or clears the pin with 0. A non-zero value must be finite and in [1, 179]; a bad value is refused.
+  set_fov_override: (fov: number) -> boolean,
+  -- Begins a fixed-rate export from the first key. False when the rate is not finite and in (0, 240], the viewport is not finite and positive, or there are no keys. While exporting, the client's frame hook yields one video frame per rendered frame at this rate — independent of the machine's real frame rate — so the export's length is a property of the timeline, not the renderer.
+  export_begin: (fps: number, width: number, height: number) -> boolean,
+  -- Ends an export. A no-op when none is running.
+  export_end: () -> (),
+  exporting: () -> boolean,
+  -- How many frames the current export has yielded.
+  export_frame: () -> number,
+  -- The export frame rate, or 0 when not exporting.
+  export_fps: () -> number,
 }
 
 export type AsyncFacade = {

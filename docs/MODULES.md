@@ -98,7 +98,14 @@ are deliberately **not** added to the strict module set. See
 
 - `Hud` (`hud.h`) — retained-mode widget tree with anchors, flex flow, theming
   and tweens.
-- `InputObserver` (`input.h`) — read-only local input and click-rate tracking.
+- `UiLayer` (`ui.h`) — immediate-mode UI, the imperative counterpart to `Hud`:
+  the script builds the interface every frame and reads each widget's result
+  inline (the ImGui contract, so a click is acted on the frame after the press).
+  The worker half builds and publishes a frame; the render half hit-tests it
+  against the input snapshot, draws it through `Renderer`, and publishes the
+  per-widget results. Scripts reach it as `ui.*` (capability `hud`).
+- `InputObserver` (`input.h`) — read-only local input and click-rate tracking,
+  plus the pointer, wheel and typed text the UI layer consumes.
 - `PvpOverlay` (`pvp.h`) — local-only CPS/keystrokes/combo/armor/ping HUD.
 - `PerformanceGovernor` (`perf.h`) — adaptive FPS governor with thermal
   awareness and a `CullPolicy` for the render hooks' keep/cull decisions.
@@ -110,3 +117,12 @@ are deliberately **not** added to the strict module set. See
 - `CosmeticSyncChannel` (`cosmetic_sync.h`) — optional signed loadout channel so
   other clients can see your cosmetics; verification fails closed and applied
   loadouts are gated on provable ownership.
+- `LanCosmeticTransport` (`lan_transport.h`) — the concrete
+  `CosmeticSyncTransport` for a LAN: a UDP socket bound to a private multicast
+  group, signed envelopes framed into MTU-sized fragments and reassembled
+  per-sender, with a bounded peer table fed by announce datagrams. It moves
+  bytes only; the channel still verifies before anything is applied.
+- `LanDiscovery` (`lan_discovery.h`) — mDNS (`_berry._udp.local`) responder and
+  browser, so a client learns which peers are on the subnet and on what port
+  without a central server. Discovery carries no trust; a peer found here is
+  still verified by the channel.

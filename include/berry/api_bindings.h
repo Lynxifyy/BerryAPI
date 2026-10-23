@@ -33,6 +33,8 @@
 #include "berry/audio.h"
 #include "berry/combat.h"
 #include "berry/combat_state.h"
+#include "berry/animator.h"
+#include "berry/replay_camera.h"
 #include "berry/cosmetic.h"
 #include "berry/event.h"
 #include "berry/fs.h"
@@ -49,6 +51,7 @@
 #include "berry/scriptmod.h"
 #include "berry/session_recorder.h"
 #include "berry/shader.h"
+#include "berry/ui.h"
 #include "berry/services.h"
 #include "berry/url.h"
 #include "berry/ws_client.h"
@@ -172,6 +175,21 @@ class BERRY_API ScriptApi {
     /// projectile prediction, hit accuracy, click budget). Null makes the
     /// `combat_state.*` bindings fail closed.
     CombatStateTracker* combatState = nullptr;
+    /// Immediate-mode UI layer. Null makes the `ui.*` bindings fail closed
+    /// (inert results, no window opens).
+    UiLayer* ui = nullptr;
+    /// Client-side keyframed animator. Null makes the `animator.*` bindings
+    /// fail closed (no clip is added, playback reports stopped).
+    Animator* animator = nullptr;
+    /// The skeleton seam that applies the animator's pose to the rendered rig.
+    /// Null makes `animator.target`/`set_target` fail closed.
+    AnimatedSkeletonSource* animatorSeam = nullptr;
+    /// Client-side replay camera: a keyframed timeline over the recorded tape.
+    /// When its timeline is active (and a renderer is bound) the frame hook
+    /// adopts its pose as the frame's camera, so a replay renders from the
+    /// scripted viewpoint instead of the player's. Null makes the `replay.*`
+    /// bindings fail closed.
+    ReplayCamera* replayCamera = nullptr;
   };
 
   ScriptApi();
@@ -276,6 +294,18 @@ class BERRY_API ScriptApi {
   /// The wall-clock ms of the last presented frame, for the PvP overlay's
   /// animation delta. Render thread only.
   u64 lastFrameMs_ = 0;
+  /// Frame clock for the animator, kept separate from lastFrameMs_ so a frame
+  /// with no PvP overlay still advances a playing clip at the real delta.
+  u64 lastAnimatorMs_ = 0;
+  /// Frame clock for replay-camera playback, kept separate for the same reason.
+  u64 lastReplayMs_ = 0;
+
+  // Immediate-mode UI frame state. A script's `ui.begin_frame` opens the frame
+  // and `ui.end_frame` publishes it, so the embedder never calls
+  // BeginFrame/EndFrame itself. `uiFrameOpen_` also detects a hook that faulted
+  // between the two, so the next `begin_frame` aborts the stale frame instead of
+  // presenting it. Script-worker-thread only.
+  bool uiFrameOpen_ = false;
 };
 
 }  // namespace Berry

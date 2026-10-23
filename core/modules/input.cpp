@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 
 namespace Berry {
 namespace {
@@ -18,8 +19,17 @@ bool IsMovementKey(const std::string& k) {
   return k == "w" || k == "a" || k == "s" || k == "d";
 }
 
+/// Keys a UI acts on once per press rather than while held. They carry no
+/// movement state; they only produce a press edge. Only keys with a consumer
+/// belong here: an edge that is never taken would fill the pending list and
+/// start dropping the edges a UI actually reads.
+bool IsOneShotKey(const std::string& k) {
+  return k == "backspace" || k == "enter";
+}
+
 bool IsTrackedKey(const std::string& k) {
-  return IsMovementKey(k) || k == "space" || k == "shift" || k == "ctrl";
+  return IsMovementKey(k) || k == "space" || k == "shift" || k == "ctrl" ||
+         IsOneShotKey(k);
 }
 
 }  // namespace
@@ -29,6 +39,14 @@ void InputObserver::OnKey(const char* key, bool down) {
   // Fail closed: an unrecognised key is ignored rather than stored, so the
   // state cannot be polluted by a stray name.
   if (!IsTrackedKey(k)) return;
+
+  // A one-shot key records a press edge and nothing else.
+  if (IsOneShotKey(k)) {
+    if (down && pressedCount_ < pressed_.size()) {
+      pressed_[pressedCount_++] = k;
+    }
+    return;
+  }
 
   if (k == "w") state_.forward = down;
   else if (k == "s") state_.back = down;
@@ -74,6 +92,28 @@ void InputObserver::OnMouse(MouseButton button, bool down) {
   }
 }
 
+void InputObserver::OnPointerMove(f32 x, f32 y) {
+  // A non-finite coordinate would poison every hit-test that follows, so it is
+  // refused rather than stored.
+  if (!std::isfinite(x) || !std::isfinite(y)) return;
+  state_.pointer = Vec2(x, y);
+}
+
+void InputObserver::OnWheel(f32 notches) {
+  if (!std::isfinite(notches)) return;
+  state_.wheel += notches;
+}
+
+void InputObserver::OnTextInput(const char* utf8) {
+  if (!utf8) return;
+  // Control bytes are rejected: a text field wants printable characters, and a
+  // stray newline or escape would otherwise land in the buffer.
+  for (const char* p = utf8; *p; ++p) {
+    const unsigned char c = (unsigned char)*p;
+    if (c >= 0x20 && c != 0x7f) typed_.push_back((char)c);
+  }
+}
+
 void InputObserver::Tick(u64 nowMs) {
   nowMs_ = nowMs;
   const u64 cutoff = nowMs > kWindowMs ? nowMs - kWindowMs : 0;
@@ -82,6 +122,34 @@ void InputObserver::Tick(u64 nowMs) {
       cw.stamps.pop_front();
     }
   }
+}
+
+f32 InputObserver::ConsumeWheel() {
+  const f32 w = state_.wheel;
+  state_.wheel = 0.0f;
+  return w;
+}
+
+std::string InputObserver::ConsumeText() {
+  std::string out = std::move(typed_);
+  typed_.clear();
+  return out;
+}
+
+bool InputObserver::ConsumeKeyPress(const char* key) {
+  const std::string k = Lower(key);
+  for (size_t i = 0; i < pressedCount_; ++i) {
+    if (pressed_[i] == k) {
+      // Compact the array so the press is seen exactly once.
+      for (size_t j = i + 1; j < pressedCount_; ++j) {
+        pressed_[j - 1] = pressed_[j];
+      }
+      --pressedCount_;
+      pressed_[pressedCount_].clear();
+      return true;
+    }
+  }
+  return false;
 }
 
 f64 InputObserver::clicksPerSecond(MouseButton button) const {
@@ -117,6 +185,9 @@ void InputObserver::Reset() {
   state_ = InputState{};
   for (auto& cw : clicks_) cw = ClickWindow{};
   for (auto& h : held_) h = Held{};
+  typed_.clear();
+  for (auto& p : pressed_) p.clear();
+  pressedCount_ = 0;
   nowMs_ = 0;
 }
 

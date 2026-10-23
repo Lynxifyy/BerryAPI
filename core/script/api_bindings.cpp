@@ -137,6 +137,43 @@ ScriptValue Vec3Value(const Vec3& v) {
   return ScriptValue::Tbl(std::move(t));
 }
 
+/// An immediate-mode UI interaction as a script table. Every field is always
+/// present, so a script can read `r.clicked` without a nil check.
+ScriptValue UiResultValue(const UiResult& r) {
+  ScriptTable t;
+  t["hovered"] = ScriptValue::Bool(r.hovered);
+  t["active"] = ScriptValue::Bool(r.active);
+  t["clicked"] = ScriptValue::Bool(r.clicked);
+  t["changed"] = ScriptValue::Bool(r.changed);
+  t["toggled"] = ScriptValue::Bool(r.toggled);
+  t["value"] = ScriptValue::Num((f64)r.value);
+  t["text"] = ScriptValue::Str(r.text);
+  return ScriptValue::Tbl(std::move(t));
+}
+
+/// Maps a semantic colour-role name to its enum. Fail closed: an unknown name
+/// returns false and leaves `out` untouched.
+bool UiColorRoleFromName(const std::string& raw, UiColorRole* out) {
+  const std::string n = Lower(raw);
+  UiColorRole role;
+  if (n == "window_bg") role = UiColorRole::WindowBg;
+  else if (n == "title_bg") role = UiColorRole::TitleBg;
+  else if (n == "title_text") role = UiColorRole::TitleText;
+  else if (n == "text") role = UiColorRole::Text;
+  else if (n == "muted") role = UiColorRole::Muted;
+  else if (n == "accent") role = UiColorRole::Accent;
+  else if (n == "frame_bg") role = UiColorRole::FrameBg;
+  else if (n == "frame_hover") role = UiColorRole::FrameHover;
+  else if (n == "frame_active") role = UiColorRole::FrameActive;
+  else if (n == "border") role = UiColorRole::Border;
+  else if (n == "good") role = UiColorRole::Good;
+  else if (n == "warn") role = UiColorRole::Warn;
+  else if (n == "bad") role = UiColorRole::Bad;
+  else return false;
+  *out = role;
+  return true;
+}
+
 /// A finite number clamped into [lo, hi]; non-finite input yields `fallback`.
 /// Used for coordinates a script feeds to the renderer, so a NaN cannot reach
 /// the draw list.
@@ -249,6 +286,43 @@ void ScriptApi::InitFrameHook() {
         // here. Apply the draw/HUD commands a script posted from the worker
         // BEFORE presenting, so a command issued this frame is drawn this frame.
         DrainOnRenderThread();
+        // The replay camera, when a script has activated one, owns the frame's
+        // camera: the renderer is pointed at the scripted viewpoint BEFORE any
+        // overlay draws, so world-to-screen, 3D debug geometry and billboards
+        // all project through the replay pose rather than the player's. While
+        // an export is running the export clock drives it at its fixed rate
+        // instead of wall time, so a rendered video has a deterministic length.
+        if (services_.replayCamera && services_.renderer) {
+          const Vec2 screen = screenSize();
+          const f32 aspect = (screen.x > 0 && screen.y > 0) ? screen.x / screen.y : 0.0f;
+          CameraState cam;
+          if (services_.replayCamera->exporting()) {
+            if (services_.replayCamera->ExportStep(&cam)) {
+              services_.renderer->SetCamera(cam);
+            }
+          } else if (services_.replayCamera->active()) {
+            // In follow-tape mode the camera is a path over the recording, so
+            // its playhead is the tape's tick, not a clock of its own: seek to
+            // wherever the replay is. A tick that lands between keys samples
+            // between them, so the camera glides as the tape steps.
+            if (services_.replayCamera->followTape() && services_.recorder) {
+              const f32 tapeTick = (f32)services_.recorder->ReplayTick();
+              services_.replayCamera->Seek(tapeTick);
+            } else {
+              const u64 now = NowMs();
+              if (lastReplayMs_ != 0 && now > lastReplayMs_) {
+                f32 dt = (f32)(now - lastReplayMs_) / 1000.0f;
+                if (dt > 0.1f) dt = 0.1f;   // a stall must not fast-forward a replay
+                services_.replayCamera->Advance(dt);
+              }
+              lastReplayMs_ = now;
+            }
+            if (aspect > 0.0f &&
+                services_.replayCamera->BuildCamera(aspect, screen.x, screen.y, &cam)) {
+              services_.renderer->SetCamera(cam);
+            }
+          }
+        }
         if (services_.hud && services_.renderer) {
           const Vec2 screen = screenSize();
           if (screen.x > 0 && screen.y > 0) {
@@ -278,6 +352,40 @@ void ScriptApi::InitFrameHook() {
             lastFrameMs_ = now;
             services_.pvp->Update(dt, now);
             services_.pvp->Present(*services_.hud, *services_.renderer, screen);
+          }
+        }
+        // The animator advances on the frame clock, like the PvP overlay, so a
+        // clip a script plays actually moves the local rig. It drives the pose
+        // the cosmetic renderer resolves through (see AnimatedSkeletonSource);
+        // no clip playing means no advance and no pose change.
+        if (services_.animator) {
+          const u64 now = NowMs();
+          if (lastAnimatorMs_ != 0 && now > lastAnimatorMs_) {
+            // Advance takes seconds; the frame clock is milliseconds.
+            f32 dt = (f32)(now - lastAnimatorMs_) / 1000.0f;
+            if (dt > 0.1f) dt = 0.1f;   // a stall must not fast-forward a clip
+            services_.animator->Advance(dt);
+          }
+          lastAnimatorMs_ = now;
+        }
+        // The immediate-mode UI presents after the HUD and the PvP overlay, so a
+        // script window sits above the retained widgets. It reads the pointer and
+        // typed text from the input snapshot, hit-tests the frame the worker
+        // built, draws it, and publishes the results the worker reads next frame.
+        if (services_.ui && services_.renderer) {
+          const Vec2 screen = screenSize();
+          if (screen.x > 0 && screen.y > 0) {
+            UiLayer::Input in;
+            if (services_.input) {
+              const InputState& st = services_.input->state();
+              in.pointer = st.pointer;
+              in.mouseDown = st.attack;
+              in.wheel = services_.input->ConsumeWheel();
+              in.typed = services_.input->ConsumeText();
+              in.backspace = services_.input->ConsumeKeyPress("backspace");
+              in.enter = services_.input->ConsumeKeyPress("enter");
+            }
+            services_.ui->Present(*services_.renderer, in);
           }
         }
         // The script-module overlay draws last, on top, when a user turned it
@@ -1138,6 +1246,52 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Tbl(std::move(t));
   });
 
+  // The software occlusion grid: a caller submits occluders, then asks whether a
+  // candidate box is hidden. Every argument is validated so a malformed box
+  // fails closed (draws) rather than culling on garbage.
+  auto boxFromArgs = [](const std::vector<ScriptValue>& args, Aabb* out) -> bool {
+    f32 v[6];
+    for (int i = 0; i < 6; ++i) {
+      const f64 d = args[i].AsNumber();
+      if (!std::isfinite(d)) return false;
+      v[i] = (f32)d;
+    }
+    if (v[0] > v[3] || v[1] > v[4] || v[2] > v[5]) return false;   // min > max
+    *out = Aabb(Vec3(v[0], v[1], v[2]), Vec3(v[3], v[4], v[5]));
+    return true;
+  };
+
+  install("render.add_occluder", [this, boxFromArgs](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.add_occluder: renderer unavailable"); return ScriptValue::Nil(); }
+    Aabb box;
+    if (!boxFromArgs(args, &box)) {
+      ctx.RaiseError("render.add_occluder: box must be six finite numbers with min <= max");
+      return ScriptValue::Nil();
+    }
+    services_.renderer->AddOccluder(box);
+    return ScriptValue::Nil();
+  });
+
+  install("render.occluded", [this, boxFromArgs](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.occluded: renderer unavailable"); return ScriptValue::Bool(false); }
+    Aabb box;
+    if (!boxFromArgs(args, &box)) {
+      ctx.RaiseError("render.occluded: box must be six finite numbers with min <= max");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(services_.renderer->IsOccluded(box));
+  });
+
+  install("render.cull_box", [this, boxFromArgs](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.cull_box: renderer unavailable"); return ScriptValue::Bool(true); }
+    Aabb box;
+    if (!boxFromArgs(args, &box)) {
+      ctx.RaiseError("render.cull_box: box must be six finite numbers with min <= max");
+      return ScriptValue::Bool(true);   // fail open: draw rather than cull on garbage
+    }
+    return ScriptValue::Bool(services_.renderer->CullEntity(box));
+  });
+
   //--- World (read-only queries) -------------------------------------------
   install("world.query", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
     if (!services_.world) { ctx.RaiseError("world.query: world unavailable"); return ScriptValue::Num(0); }
@@ -1827,6 +1981,214 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Nil();
   });
 
+  //--- Ui (immediate-mode UI) ----------------------------------------------
+  //
+  // Every call builds one widget and reads back the interaction the render
+  // thread published for it on the previous frame. The result table is the
+  // script's whole view of an interaction:
+  //
+  //   {hovered, active, clicked, changed, toggled, value, text}
+  //
+  // A call with no UI layer bound fails closed: the builder returns an inert
+  // result (all false, value 0, text ""), so a script can run against a host
+  // that has no overlay without crashing or observing a phantom click.
+  //
+  // Frame contract (the ImGui model): a frame hook opens with `ui.begin_frame`,
+  // builds any number of windows with `begin_window`/`end_window`, then calls
+  // `ui.end_frame` to publish. `begin_frame` is also the recovery point: if the
+  // previous hook faulted between begin and end, the half-built frame is
+  // aborted here rather than presented. A window built outside a frame is
+  // refused, so a script that forgets `begin_frame` draws nothing instead of
+  // corrupting the previous frame.
+  install("ui.begin_frame", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.ui) return ScriptValue::Nil();
+    if (uiFrameOpen_) {
+      // A previous hook faulted mid-build; drop the stale frame.
+      services_.ui->AbortFrame();
+      uiFrameOpen_ = false;
+    }
+    services_.ui->BeginFrame();
+    uiFrameOpen_ = true;
+    return ScriptValue::Nil();
+  });
+
+  install("ui.end_frame", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.ui || !uiFrameOpen_) return ScriptValue::Nil();
+    services_.ui->EndFrame();
+    uiFrameOpen_ = false;
+    return ScriptValue::Nil();
+  });
+
+  install("ui.begin_window", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui || !uiFrameOpen_) return ScriptValue::Bool(false);
+    const std::string title = args[0].ToDisplay();
+    const f32 x = (f32)args[1].AsNumber();
+    const f32 y = (f32)args[2].AsNumber();
+    const f32 w = (f32)args[3].AsNumber();
+    const f32 h = (f32)args[4].AsNumber();
+    return ScriptValue::Bool(services_.ui->BeginWindow(title, Vec2(x, y), Vec2(w, h)));
+  });
+
+  install("ui.end_window", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui && uiFrameOpen_) services_.ui->EndWindow();
+    return ScriptValue::Nil();
+  });
+
+  install("ui.button", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return UiResultValue(UiResult{});
+    return UiResultValue(services_.ui->Button(args[0].ToDisplay()));
+  });
+
+  install("ui.checkbox", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return UiResultValue(UiResult{});
+    return UiResultValue(services_.ui->Checkbox(args[0].ToDisplay(), args[1].Truthy()));
+  });
+
+  install("ui.slider_float", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return UiResultValue(UiResult{});
+    return UiResultValue(services_.ui->SliderFloat(
+        args[0].ToDisplay(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber(),
+        (f32)args[3].AsNumber()));
+  });
+
+  install("ui.slider_int", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return UiResultValue(UiResult{});
+    return UiResultValue(services_.ui->SliderInt(
+        args[0].ToDisplay(), (i32)args[1].AsNumber(), (i32)args[2].AsNumber(),
+        (i32)args[3].AsNumber()));
+  });
+
+  install("ui.input_text", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return UiResultValue(UiResult{});
+    return UiResultValue(services_.ui->InputText(args[0].ToDisplay(),
+                                                 args[1].ToDisplay()));
+  });
+
+  install("ui.collapsing_header", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return ScriptValue::Bool(args[1].Truthy());
+    return ScriptValue::Bool(
+        services_.ui->CollapsingHeader(args[0].ToDisplay(), args[1].Truthy()));
+  });
+
+  install("ui.begin_tab_bar", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.ui->BeginTabBar(args[0].ToDisplay()));
+  });
+
+  install("ui.end_tab_bar", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui) services_.ui->EndTabBar();
+    return ScriptValue::Nil();
+  });
+
+  install("ui.begin_tab_item", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.ui->BeginTabItem(args[0].ToDisplay()));
+  });
+
+  install("ui.end_tab_item", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui) services_.ui->EndTabItem();
+    return ScriptValue::Nil();
+  });
+
+  install("ui.text", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (services_.ui) services_.ui->Text(args[0].ToDisplay());
+    return ScriptValue::Nil();
+  });
+
+  install("ui.text_colored", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return ScriptValue::Nil();
+    UiColorRole role;
+    if (!UiColorRoleFromName(args[0].ToDisplay(), &role)) {
+      ctx.RaiseError("ui.text_colored: unknown colour role '" + args[0].ToDisplay() + "'");
+      return ScriptValue::Nil();
+    }
+    services_.ui->TextColored(role, args[1].ToDisplay());
+    return ScriptValue::Nil();
+  });
+
+  install("ui.progress_bar", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (services_.ui) services_.ui->ProgressBar((f32)args[0].AsNumber(), args[1].ToDisplay());
+    return ScriptValue::Nil();
+  });
+
+  install("ui.separator", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui) services_.ui->Separator();
+    return ScriptValue::Nil();
+  });
+
+  install("ui.spacing", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui) services_.ui->Spacing();
+    return ScriptValue::Nil();
+  });
+
+  install("ui.same_line", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui) services_.ui->SameLine();
+    return ScriptValue::Nil();
+  });
+
+  install("ui.dummy", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (services_.ui) services_.ui->Dummy(Vec2((f32)args[0].AsNumber(), (f32)args[1].AsNumber()));
+    return ScriptValue::Nil();
+  });
+
+  install("ui.indent", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui) services_.ui->Indent();
+    return ScriptValue::Nil();
+  });
+
+  install("ui.unindent", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui) services_.ui->Unindent();
+    return ScriptValue::Nil();
+  });
+
+  install("ui.bullet_text", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (services_.ui) services_.ui->BulletText(args[0].ToDisplay());
+    return ScriptValue::Nil();
+  });
+
+  install("ui.set_theme", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.ui) return ScriptValue::Bool(false);
+    const std::string name = Lower(args[0].ToDisplay());
+    // Fail closed: an unknown theme name changes nothing.
+    if (name == "dark") { services_.ui->SetTheme(UiTheme::Dark()); return ScriptValue::Bool(true); }
+    if (name == "glass") { services_.ui->SetTheme(UiTheme::Glass()); return ScriptValue::Bool(true); }
+    return ScriptValue::Bool(false);
+  });
+
+  install("ui.theme", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.ui) return ScriptValue::Str("none");
+    // The layer stores the resolved theme, not a name; report the name by
+    // matching the two built-ins on the fields that distinguish them.
+    const UiTheme t = services_.ui->theme();
+    const UiTheme glass = UiTheme::Glass();
+    if (t.windowBg.a == glass.windowBg.a && t.rounding == glass.rounding) {
+      return ScriptValue::Str("glass");
+    }
+    return ScriptValue::Str("dark");
+  });
+
+  install("ui.stats", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.ui) return ScriptValue::Nil();
+    const UiStats s = services_.ui->stats();
+    ScriptTable t;
+    t["frames"] = ScriptValue::Num((f64)s.frames);
+    t["windows"] = ScriptValue::Num((f64)s.windows);
+    t["widgets"] = ScriptValue::Num((f64)s.widgets);
+    t["hovered"] = ScriptValue::Num((f64)s.hovered);
+    t["clicked"] = ScriptValue::Num((f64)s.clicked);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("ui.any_window_dragging", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.ui) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.ui->anyWindowDragging());
+  });
+
+  install("ui.reset", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.ui) services_.ui->Reset();
+    return ScriptValue::Nil();
+  });
+
   //--- Perf (frame timing + quality controls) ------------------------------
   install("perf.frame_time_ms", [this](ScriptContext&, const std::vector<ScriptValue>&) {
     const f32 published = frameTimeMs();
@@ -1948,6 +2310,7 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     out["entities_drawn"] = ScriptValue::Num((f64)st.entitiesDrawn);
     out["entities_culled"] = ScriptValue::Num((f64)st.entitiesCulled);
     out["entities_lod_reduced"] = ScriptValue::Num((f64)st.entitiesLodReduced);
+    out["entities_tick_throttled"] = ScriptValue::Num((f64)st.entitiesTickThrottled);
     out["batches"] = ScriptValue::Num((f64)st.batches);
     out["draw_calls"] = ScriptValue::Num((f64)st.drawCalls);
     out["vertices"] = ScriptValue::Num((f64)st.vertices);
@@ -1963,6 +2326,20 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
       return ScriptValue::Str("");
     }
     return ScriptValue::Str(LodTierName(services_.renderer->LodFor((f32)distance)));
+  });
+
+  install("perf.lod_should_tick", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("perf.lod_should_tick: renderer unavailable"); return ScriptValue::Bool(false); }
+    const f64 distance = args[0].AsNumber();
+    const f64 tick = args[1].AsNumber();
+    const f64 phase = args[2].AsNumber();
+    if (!std::isfinite(distance) || distance < 0 || !std::isfinite(tick) || tick < 0 ||
+        !std::isfinite(phase) || phase < 0) {
+      ctx.RaiseError("perf.lod_should_tick: distance, tick and phase must be non-negative numbers");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(services_.renderer->ShouldTickEntity(
+        (f32)distance, (u64)tick, (u64)phase));
   });
 
   //--- Input (local, already-visible state) --------------------------------
@@ -2085,6 +2462,209 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     // atomically; the return value is how many packs loaded cleanly.
     const PackLoadReport report = services_.packs->LoadDirectory();
     return ScriptValue::Num((f64)report.packsLoaded);
+  });
+
+  //--- Animator (keyframed local-rig animation; renders on this screen only) --
+  //
+  // Client-side only: a clip moves this client's own rendered bones through the
+  // AnimatedSkeletonSource seam. Nothing is sent and nothing writes game state.
+  // The pose tables are plain {px,py,pz, rx,ry,rz, scale} so the surface needs
+  // no vector type.
+  auto animatorOrFail = [this](ScriptContext& ctx, const char* who) -> Animator* {
+    if (!services_.animator) {
+      ctx.RaiseError(std::string(who) + ": animator unavailable");
+      return nullptr;
+    }
+    return services_.animator;
+  };
+  auto parseBone = [](ScriptContext& ctx, const char* who, const std::string& raw,
+                      Bone* out) -> bool {
+    const Bone b = BoneFromName(Lower(raw));
+    if (b == Bone::None || b == Bone::Count) {
+      ctx.RaiseError(std::string(who) + ": unknown bone '" + raw + "'");
+      return false;
+    }
+    *out = b;
+    return true;
+  };
+  auto poseTable = [](const Animator::BonePose& p, const char* boneName) {
+    ScriptTable t;
+    t["valid"] = ScriptValue::Bool(p.valid);
+    t["bone"] = ScriptValue::Str(boneName);
+    t["px"] = ScriptValue::Num((f64)p.position.x);
+    t["py"] = ScriptValue::Num((f64)p.position.y);
+    t["pz"] = ScriptValue::Num((f64)p.position.z);
+    t["rx"] = ScriptValue::Num((f64)p.rotation.x);
+    t["ry"] = ScriptValue::Num((f64)p.rotation.y);
+    t["rz"] = ScriptValue::Num((f64)p.rotation.z);
+    t["scale"] = ScriptValue::Num((f64)p.scale);
+    return t;
+  };
+
+  install("animator.add_clip", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.add_clip");
+    if (!a) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(a->AddClip(args[0].ToDisplay(), (f32)args[1].AsNumber(),
+                                        args[2].Truthy()));
+  });
+
+  install("animator.add_key", [this, animatorOrFail, parseBone](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.add_key");
+    if (!a) return ScriptValue::Bool(false);
+    Bone bone;
+    if (!parseBone(ctx, "animator.add_key", args[1].ToDisplay(), &bone)) {
+      return ScriptValue::Bool(false);
+    }
+    const Vec3 pos((f32)args[3].AsNumber(), (f32)args[4].AsNumber(), (f32)args[5].AsNumber());
+    const Vec3 rot((f32)args[6].AsNumber(), (f32)args[7].AsNumber(), (f32)args[8].AsNumber());
+    return ScriptValue::Bool(a->AddKey(args[0].ToDisplay(), bone, (f32)args[2].AsNumber(),
+                                       pos, rot, (f32)args[9].AsNumber()));
+  });
+
+  install("animator.remove_clip", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.remove_clip");
+    if (!a) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(a->RemoveClip(args[0].ToDisplay()));
+  });
+
+  install("animator.clear_clip", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.clear_clip");
+    if (!a) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(a->ClearClip(args[0].ToDisplay()));
+  });
+
+  install("animator.clip_count", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.clip_count");
+    if (!a) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)a->clipCount());
+  });
+
+  install("animator.has_clip", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.has_clip");
+    if (!a) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(a->hasClip(args[0].ToDisplay()));
+  });
+
+  install("animator.key_count", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.key_count");
+    if (!a) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)a->keyCount(args[0].ToDisplay()));
+  });
+
+  install("animator.play", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.play");
+    if (!a) return ScriptValue::Bool(false);
+    const std::string name = args[0].ToDisplay();
+    if (!a->Play(name)) {
+      ctx.RaiseError("animator.play: unknown clip '" + name + "'");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(true);
+  });
+
+  install("animator.stop", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.stop");
+    if (a) a->Stop();
+    return ScriptValue::Nil();
+  });
+
+  install("animator.reset", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.reset");
+    if (a) a->Reset();
+    return ScriptValue::Nil();
+  });
+
+  install("animator.playing", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.playing");
+    if (!a) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(a->playing());
+  });
+
+  install("animator.time", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.time");
+    if (!a) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)a->time());
+  });
+
+  install("animator.duration", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.duration");
+    if (!a) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)a->duration());
+  });
+
+  install("animator.current_clip", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.current_clip");
+    if (!a) return ScriptValue::Str("");
+    return ScriptValue::Str(a->currentClip());
+  });
+
+  install("animator.seek", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.seek");
+    if (!a) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(a->Seek((f32)args[0].AsNumber()));
+  });
+
+  install("animator.sample", [this, animatorOrFail, parseBone, poseTable](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.sample");
+    if (!a) return ScriptValue::Nil();
+    Bone bone;
+    if (!parseBone(ctx, "animator.sample", args[0].ToDisplay(), &bone)) {
+      return ScriptValue::Nil();
+    }
+    const Animator::BonePose p = a->Sample(bone, (f32)args[1].AsNumber());
+    return ScriptValue::Tbl(poseTable(p, BoneName(bone)));
+  });
+
+  install("animator.pose", [this, animatorOrFail, poseTable](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.pose");
+    if (!a) return ScriptValue::Nil();
+    const auto pose = a->SamplePose();
+    ScriptTable t;
+    for (size_t i = 0; i < pose.size(); ++i) {
+      t[std::to_string(i)] = ScriptValue::Tbl(poseTable(pose[i].second, BoneName(pose[i].first)));
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("animator.save", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.save");
+    if (!a) return ScriptValue::Str("");
+    return ScriptValue::Str(a->Save());
+  });
+
+  install("animator.load", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    Animator* a = animatorOrFail(ctx, "animator.load");
+    if (!a) return ScriptValue::Bool(false);
+    const std::string json = args[0].ToDisplay();
+    if (!a->Load(json)) {
+      ctx.RaiseError("animator.load: invalid animator document");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(true);
+  });
+
+  install("animator.clear", [this, animatorOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    Animator* a = animatorOrFail(ctx, "animator.clear");
+    if (a) a->Clear();
+    return ScriptValue::Nil();
+  });
+
+  install("animator.target", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.animator || !services_.animatorSeam) { ctx.RaiseError("animator.target: animator unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.animatorSeam->target().raw);
+  });
+
+  install("animator.set_target", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.animator || !services_.animatorSeam) { ctx.RaiseError("animator.set_target: animator unavailable"); return ScriptValue::Nil(); }
+    const f64 raw = args[0].AsNumber();
+    if (!std::isfinite(raw) || raw < 0) {
+      ctx.RaiseError("animator.set_target: entity id must be a non-negative number");
+      return ScriptValue::Nil();
+    }
+    EntityId id;
+    id.raw = (u64)raw;
+    services_.animatorSeam->SetTarget(id);
+    return ScriptValue::Nil();
   });
 
   //--- Intent (what may be done on this server) ----------------------------
@@ -2372,6 +2952,248 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
   install("record.replay_end", [this](ScriptContext&, const std::vector<ScriptValue>&) {
     if (!services_.recorder) return ScriptValue::Bool(true);
     return ScriptValue::Bool(services_.recorder->ReplayAtEnd());
+  });
+
+  //--- Replay (the camera timeline over the recorded tape) ------------------
+  //
+  // Client-side only: this changes where THIS client looks while replaying what
+  // it already recorded. It never writes world state and never reveals anything
+  // the client was not already sent. The frame hook adopts the pose as the
+  // frame's camera while the timeline is active (see InitFrameHook), so a
+  // binding that authors a key actually changes what the next frame draws.
+  auto replayOrFail = [this](ScriptContext& ctx, const char* who) -> ReplayCamera* {
+    if (!services_.replayCamera) {
+      ctx.RaiseError(std::string(who) + ": replay camera unavailable");
+      return nullptr;
+    }
+    return services_.replayCamera;
+  };
+  auto cameraPoseTable = [](const CameraSample& s) {
+    ScriptTable t;
+    t["valid"] = ScriptValue::Bool(s.valid);
+    t["x"] = ScriptValue::Num((f64)s.position.x);
+    t["y"] = ScriptValue::Num((f64)s.position.y);
+    t["z"] = ScriptValue::Num((f64)s.position.z);
+    t["pitch"] = ScriptValue::Num((f64)s.pitch);
+    t["yaw"] = ScriptValue::Num((f64)s.yaw);
+    t["roll"] = ScriptValue::Num((f64)s.roll);
+    t["fov"] = ScriptValue::Num((f64)s.fov);
+    return t;
+  };
+
+  install("replay.add_key", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.add_key");
+    if (!c) return ScriptValue::Bool(false);
+    const f64 tick = args[0].AsNumber();
+    // A tick names a position on the tape, so it must be a whole, non-negative
+    // number; a fractional or negative tick cannot name a frame.
+    if (!std::isfinite(tick) || tick < 0.0) return ScriptValue::Bool(false);
+    CameraKey k;
+    k.tick = (u64)tick;
+    k.position = Vec3((f32)args[1].AsNumber(), (f32)args[2].AsNumber(),
+                      (f32)args[3].AsNumber());
+    k.pitch = (f32)args[4].AsNumber();
+    k.yaw = (f32)args[5].AsNumber();
+    k.roll = (f32)args[6].AsNumber();
+    k.fov = (f32)args[7].AsNumber();
+    return ScriptValue::Bool(c->AddKey(k));
+  });
+
+  install("replay.remove_key", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.remove_key");
+    if (!c) return ScriptValue::Bool(false);
+    const f64 tick = args[0].AsNumber();
+    if (!std::isfinite(tick) || tick < 0.0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(c->RemoveKey((u64)tick));
+  });
+
+  install("replay.clear", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.replayCamera) services_.replayCamera->Clear();
+    return ScriptValue::Nil();
+  });
+
+  install("replay.key_count", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replayCamera->keyCount());
+  });
+
+  install("replay.has_key", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.has_key");
+    if (!c) return ScriptValue::Bool(false);
+    const f64 tick = args[0].AsNumber();
+    if (!std::isfinite(tick) || tick < 0.0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(c->hasKeyAt((u64)tick));
+  });
+
+  install("replay.first_tick", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replayCamera->firstTick());
+  });
+
+  install("replay.last_tick", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replayCamera->lastTick());
+  });
+
+  install("replay.duration_ticks", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replayCamera->durationTicks());
+  });
+
+  install("replay.smoothing", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Str("linear");
+    return ScriptValue::Str(CameraSmoothingName(services_.replayCamera->smoothing()));
+  });
+
+  install("replay.set_smoothing", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.set_smoothing");
+    if (!c) return ScriptValue::Bool(false);
+    CameraSmoothing s;
+    // The doc promises false for a name that is neither mode, not an error, so
+    // a script can try a name and branch without unwinding.
+    if (!CameraSmoothingFromName(Lower(args[0].ToDisplay()), &s)) {
+      return ScriptValue::Bool(false);
+    }
+    c->SetSmoothing(s);
+    return ScriptValue::Bool(true);
+  });
+
+  install("replay.active", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replayCamera->active());
+  });
+
+  install("replay.activate", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.activate");
+    if (!c) return ScriptValue::Bool(false);
+    // Activating with nothing to play would silently hijack the camera to an
+    // invalid pose; refuse it instead.
+    if (c->empty()) {
+      ctx.RaiseError("replay.activate: no camera keys");
+      return ScriptValue::Bool(false);
+    }
+    c->SetActive(true);
+    c->Play();
+    return ScriptValue::Bool(true);
+  });
+
+  install("replay.deactivate", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.replayCamera) {
+      services_.replayCamera->SetActive(false);
+      services_.replayCamera->Pause();
+    }
+    return ScriptValue::Nil();
+  });
+
+  install("replay.play", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Bool(false);
+    if (services_.replayCamera->empty()) return ScriptValue::Bool(false);
+    services_.replayCamera->Play();
+    return ScriptValue::Bool(true);
+  });
+
+  install("replay.pause", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.replayCamera) services_.replayCamera->Pause();
+    return ScriptValue::Nil();
+  });
+
+  install("replay.stop", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.replayCamera) services_.replayCamera->Stop();
+    return ScriptValue::Nil();
+  });
+
+  install("replay.playing", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replayCamera->playing());
+  });
+
+  install("replay.follow_tape", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replayCamera->followTape());
+  });
+
+  install("replay.set_follow_tape", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (services_.replayCamera) services_.replayCamera->SetFollowTape(args[0].Truthy());
+    return ScriptValue::Nil();
+  });
+
+  install("replay.speed", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(1);
+    return ScriptValue::Num((f64)services_.replayCamera->speed());
+  });
+
+  install("replay.set_speed", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.set_speed");
+    if (!c) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(c->SetSpeed((f32)args[0].AsNumber()));
+  });
+
+  install("replay.playhead", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replayCamera->playhead());
+  });
+
+  install("replay.seek", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.seek");
+    if (!c) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(c->Seek((f32)args[0].AsNumber()));
+  });
+
+  install("replay.sample", [this, replayOrFail, cameraPoseTable](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.sample");
+    if (!c) return ScriptValue::Nil();
+    return ScriptValue::Tbl(cameraPoseTable(c->Sample((f32)args[0].AsNumber())));
+  });
+
+  install("replay.sample_now", [this, replayOrFail, cameraPoseTable](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.sample_now");
+    if (!c) return ScriptValue::Nil();
+    return ScriptValue::Tbl(cameraPoseTable(c->SampleNow()));
+  });
+
+  install("replay.fov_override", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replayCamera->fovOverride());
+  });
+
+  install("replay.set_fov_override", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.set_fov_override");
+    if (!c) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(c->SetFovOverride((f32)args[0].AsNumber()));
+  });
+
+  install("replay.export_begin", [this, replayOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ReplayCamera* c = replayOrFail(ctx, "replay.export_begin");
+    if (!c) return ScriptValue::Bool(false);
+    const f32 fps = (f32)args[0].AsNumber();
+    const f32 w = (f32)args[1].AsNumber();
+    const f32 h = (f32)args[2].AsNumber();
+    // A non-finite or non-positive viewport has no aspect; fail closed rather
+    // than build a camera from a garbage size.
+    if (!std::isfinite(w) || !std::isfinite(h) || w <= 0.0f || h <= 0.0f) {
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(c->ExportBegin(fps, w / h, w, h));
+  });
+
+  install("replay.export_end", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.replayCamera) services_.replayCamera->ExportEnd();
+    return ScriptValue::Nil();
+  });
+
+  install("replay.exporting", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replayCamera->exporting());
+  });
+
+  install("replay.export_frame", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replayCamera->exportFrame());
+  });
+
+  install("replay.export_fps", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replayCamera) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replayCamera->exportFps());
   });
 
   //--- Fs (sandboxed file store) --------------------------------------------

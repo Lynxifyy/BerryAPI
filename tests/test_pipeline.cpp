@@ -62,9 +62,14 @@ class RecordingBackend final : public IRenderBackend {
   bool running() const override { return true; }
   const char* name() const override { return "recording"; }
 
+  void SetRenderScale(f32 scale) override {
+    scaleCalls.push_back(scale);
+  }
+
   DrawBatch batch;
   Vec2 lastScreen;
   int calls = 0;
+  std::vector<f32> scaleCalls;
 };
 
 }  // namespace
@@ -167,6 +172,134 @@ static void TestLodPolicy() {
   CHECK(p2.TierFor(1000.0f) == LodTier::Static);
 
   CHECK(std::string(LodTierName(LodTier::Reduced)) == "reduced");
+}
+
+/// The software occlusion buffer: a conservative depth grid. It must cull a box
+/// genuinely behind a wall and never cull one in front, off to the side of the
+/// wall's coverage, or with no camera/occluder at all.
+static void TestOcclusionBuffer() {
+  OcclusionBuffer buf;
+
+  // No camera: nothing is ever occluded.
+  buf.BeginFrame(CameraState{});
+  CHECK(!buf.valid());
+  CHECK(!buf.IsOccluded(BoxAt(0, 0, 20)));
+
+  buf.BeginFrame(TestCamera());   // 1280x720 at the origin looking +Z
+  CHECK(buf.valid());
+  // No occluder rasterised: nothing is culled.
+  CHECK(buf.filledCells() == 0);
+  CHECK(!buf.IsOccluded(BoxAt(0, 0, 20)));
+
+  // A wall at z=10 covering the middle of the view. Cells it fully covers
+  // become opaque at depth ~10; the screen edges stay empty.
+  buf.AddOccluder(Aabb(Vec3(-3, -3, 9), Vec3(3, 3, 11)));
+  CHECK(buf.filledCells() > 0);
+
+  // A box behind the wall, at screen centre: occluded.
+  CHECK(buf.IsOccluded(BoxAt(0, 0, 20)));
+  // A box in front of the wall: never occluded (it is nearer than the depth).
+  CHECK(!buf.IsOccluded(BoxAt(0, 0, 5)));
+  // A box behind the wall but off to the side, outside the wall's projected
+  // coverage: an empty cell in its span keeps it visible.
+  CHECK(!buf.IsOccluded(BoxAt(9, 0, 20)));
+  // A box behind the eye is never culled (it cannot be placed).
+  CHECK(!buf.IsOccluded(BoxAt(0, 0, -20)));
+
+  // A nearer occluder only ever makes a cell shallower: re-rasterising the same
+  // wall from a farther box cannot un-occlude it.
+  buf.AddOccluder(Aabb(Vec3(-3, -3, 30), Vec3(3, 3, 32)));
+  CHECK(buf.IsOccluded(BoxAt(0, 0, 20)));
+}
+
+/// The pipeline's `CullEntity` runs frustum first, then occlusion, and accounts
+/// each drop separately.
+static void TestPipelineOcclusionCull() {
+  RenderPipeline p;
+  RenderSettings s;
+  s.cullFarEntities = false;   // keep the test about occlusion, not distance
+  p.BeginFrame(TestCamera(), s);
+
+  // Rasterise a wall, then a box behind it at screen centre.
+  p.occlusion().AddOccluder(Aabb(Vec3(-3, -3, 9), Vec3(3, 3, 11)));
+  CHECK(!p.CullEntity(BoxAt(0, 0, 20)));   // occluded
+  CHECK(p.stats().entitiesOccluded == 1);
+  CHECK(p.stats().entitiesCulled == 0);
+  CHECK(p.stats().entitiesDrawn == 0);
+
+  // A box in front of the wall is drawn.
+  CHECK(p.CullEntity(BoxAt(0, 0, 5)));
+  CHECK(p.stats().entitiesDrawn == 1);
+
+  // A box behind the camera is frustum-culled, not occlusion-culled.
+  CHECK(!p.CullEntity(BoxAt(0, 0, -20)));
+  CHECK(p.stats().entitiesCulled == 1);
+  CHECK(p.stats().entitiesOccluded == 1);
+
+  // A fresh frame clears the grid: the same box is now drawn.
+  p.BeginFrame(TestCamera(), s);
+  CHECK(p.occlusion().valid());           // valid camera -> valid buffer
+  CHECK(p.occlusion().filledCells() == 0);
+  CHECK(p.CullEntity(BoxAt(0, 0, 20)));
+}
+
+/// LOD's tick-rate half: a distant entity is *throttled*, not just reported as a
+/// lower tier. Full ticks every tick; Reduced one tick in the interval with the
+/// phase spreading a crowd; Static and Culled never tick.
+static void TestLodShouldTick() {
+  LodPolicy p;
+  p.reducedTickInterval = 4;
+
+  // Full ticks every tick regardless of phase.
+  for (u64 t = 0; t < 10; ++t) {
+    CHECK(p.ShouldTick(LodTier::Full, t, 0));
+    CHECK(p.ShouldTick(LodTier::Full, t, 7));
+  }
+
+  // Reduced ticks once every 4 ticks, offset by the phase.
+  int ticks0 = 0, ticks3 = 0;
+  for (u64 t = 0; t < 40; ++t) {
+    if (p.ShouldTick(LodTier::Reduced, t, 0)) ++ticks0;
+    if (p.ShouldTick(LodTier::Reduced, t, 3)) ++ticks3;
+  }
+  CHECK(ticks0 == 10);
+  CHECK(ticks3 == 10);
+  // Different phases must not land on the same tick: the whole point.
+  CHECK(p.ShouldTick(LodTier::Reduced, 0, 0));
+  CHECK(!p.ShouldTick(LodTier::Reduced, 0, 1));
+
+  // An interval below 1 is clamped to 1 (every tick), never a divide-by-zero.
+  LodPolicy q;
+  q.reducedTickInterval = 0;
+  CHECK(q.ShouldTick(LodTier::Reduced, 5, 0));
+  CHECK(q.ShouldTick(LodTier::Reduced, 6, 0));
+
+  // Static and Culled never tick.
+  CHECK(!p.ShouldTick(LodTier::Static, 0, 0));
+  CHECK(!p.ShouldTick(LodTier::Culled, 0, 0));
+}
+
+/// The pipeline's `ShouldTickEntity` records the skipped ticks so a caller can
+/// read what the throttle saved.
+static void TestPipelineTickThrottleAccounting() {
+  RenderPipeline p;
+  RenderSettings s;
+  s.animationDistance = 32.0f;
+  s.entityDistance = 64.0f;
+  p.BeginFrame(TestCamera(), s);
+  p.SetLodPolicy(LodPolicy::Default());   // reducedTickInterval == 4
+
+  CHECK(p.stats().entitiesTickThrottled == 0);
+  // Full distance: always ticks, never counted.
+  CHECK(p.ShouldTickEntity(5.0f, 0, 0));
+  CHECK(p.stats().entitiesTickThrottled == 0);
+  // Reduced band is (16, 32]: ticks on tick 0 (0+0 % 4 == 0), skipped on tick 1.
+  CHECK(p.ShouldTickEntity(24.0f, 0, 0));
+  CHECK(!p.ShouldTickEntity(24.0f, 1, 0));
+  CHECK(p.stats().entitiesTickThrottled == 1);
+  // Static: never ticks, counted.
+  CHECK(!p.ShouldTickEntity(100.0f, 0, 0));
+  CHECK(p.stats().entitiesTickThrottled == 2);
 }
 
 static void TestPipelineLodAccounting() {
@@ -467,6 +600,44 @@ static void TestBackendSeam() {
   delete seam;
 }
 
+/// Dynamic resolution is only real if its output reaches the presenter. This
+/// pins that link: a sustained slow frame time must push a reduced scale to the
+/// seam exactly once per change, and a restored frame time must push it back.
+static void TestRenderScaleReachesSeam() {
+  RecordingBackend backend;
+  RenderSeam* seam = CreateBackendSeam(&backend);
+  Renderer r;
+  r.Attach(seam);
+
+  // Native scale is never pushed (it is the default the seam already assumes).
+  CHECK(backend.scaleCalls.empty());
+
+  // Six consecutive slow frames (default framesToReact) drop the scale by one
+  // step, 1.0 -> 0.9, and the seam is told once.
+  f32 last = 1.0f;
+  for (int i = 0; i < 6; ++i) last = r.OnFrameTime(40.0f);
+  CHECK(Near(last, 0.9f));
+  CHECK(backend.scaleCalls.size() == 1);
+  CHECK(Near(backend.scaleCalls.back(), 0.9f));
+
+  // More slow frames keep stepping down; each change is pushed once.
+  for (int i = 0; i < 6; ++i) r.OnFrameTime(40.0f);
+  CHECK(backend.scaleCalls.size() == 2);
+  CHECK(Near(backend.scaleCalls.back(), 0.8f));
+
+  // A steady fast run restores the scale, pushing the new value.
+  for (int i = 0; i < 6; ++i) r.OnFrameTime(4.0f);
+  CHECK(backend.scaleCalls.size() == 3);
+  CHECK(backend.scaleCalls.back() > 0.8f);
+
+  // No change, no push: repeating the same fast frame pushes nothing new.
+  const size_t pushes = backend.scaleCalls.size();
+  r.OnFrameTime(4.0f);
+  CHECK(backend.scaleCalls.size() == pushes);
+
+  delete seam;
+}
+
 static void TestBackendIsNullOnHost() {
   // The host build's backend is the null stub: it reports cleanly rather than
   // pretending to have GL.
@@ -509,6 +680,10 @@ int main() {
   TestFrustum();
   TestFrustumNoCameraCullsNothing();
   TestLodPolicy();
+  TestOcclusionBuffer();
+  TestPipelineOcclusionCull();
+  TestLodShouldTick();
+  TestPipelineTickThrottleAccounting();
   TestPipelineLodAccounting();
   TestSubmitCountsMatchesSubmitBatch();
   TestDynamicResolution();
@@ -516,6 +691,7 @@ int main() {
   TestBatchBuilder();
   TestPipelineBatchAccounting();
   TestBackendSeam();
+  TestRenderScaleReachesSeam();
   TestBackendIsNullOnHost();
   TestPipelineReset();
 

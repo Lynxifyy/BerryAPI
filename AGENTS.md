@@ -89,6 +89,48 @@ make lib             # builds build/libBerryAPI.so
   key/slot/bone, or repeats an id registers nothing. `LoadDirectory()` reads only
   `*.pack.json`. `RealScriptFileSystem`/`MemoryScriptFileSystem` both implement
   `ListDir`; a seam without a listing simply finds no packs.
+- `LanCosmeticTransport` (`lan_transport.h`) is the concrete
+  `CosmeticSyncTransport` for a LAN: one UDP socket on a private multicast
+  group, messages framed into MTU-sized fragments and reassembled per sender.
+  The fragment header is 24 bytes and carries the fragment payload size, so a
+  receiver with a different MTU computes the right offsets instead of guessing;
+  the sender tag is assigned at `Open` (not at `Announce`), so a client skips
+  its own multicast loopback copy even before it announces. It moves bytes only
+  — the channel still verifies before anything is applied.
+- `LanDiscovery` (`lan_discovery.h`) is a minimal mDNS (`_berry._udp.local`)
+  responder+browser: it publishes PTR/SRV/TXT/A and caches peers with a TTL. It
+  follows compression pointers on read and never writes one. Discovery carries
+  no trust; a found peer is still verified by the channel. `SendTo` sends
+  straight to a discovered peer. There is no chat seam in the library, so an
+  in-game-chat signaling fallback belongs to the embedder (wrap the one-virtual
+  `Send` seam), not to the transport.
+- `Animator` (`animator.h`) is a client-side keyframed clip player, not a strict
+  module. It owns no clock: `Advance(dtSeconds)` is the whole input, and the
+  `ScriptApi` frame hook is what calls it (the `animator.advance` binding does
+  not exist, because a second clock would double-step a clip). Keys are kept
+  sorted by `(bone, time)`; sampling binary-searches one bone's run and lerps
+  the bracketing keys. `AnimatedSkeletonSource` is the seam that makes it real:
+  it adds the sampled pose to a base `CosmeticSkeletonSource`'s transform, so
+  the cosmetic render path draws the animated rig. While a clip plays it reports
+  no pose revision, which disables the cosmetic resolve cache for that entity.
+  `Save`/`Load` use the versioned `berry-animator` document; `Load` refuses a
+  wrong version, a duplicate name, an unknown bone or an out-of-range key, and
+  parses into a scratch list so a bad document never disturbs the live clips.
+- `ReplayCamera` (`replay_camera.h`) is the client feature on top of the tape:
+  a keyframed camera timeline over replay ticks. Like the animator it owns no
+  clock (`Advance(dtSeconds)` is the only time input), and the `ScriptApi`
+  frame hook is its real caller — while `active()` it builds the frame's
+  `CameraState` and hands it to the renderer *before* any overlay draws, so
+  world-to-screen/3D geometry project through the replay pose. Sampling is
+  `Linear` or `Smooth` (Catmull-Rom position; angles/FOV always a shorter-arc
+  eased lerp, never a spline, so aim never overshoots). Keys are unique per
+  tick and kept sorted. `ExportBegin`/`ExportStep` walk the timeline at a fixed
+  fps so an offline render has a deterministic length; the frame hook steps it
+  instead of wall time. `SetFollowTape(true)` makes the playhead the tape's own
+  tick (the frame hook seeks to `recorder->ReplayTick()`), so a key at tick N
+  shows at tick N of the recording — the mode a replay mod wants. Everything is
+  bounded (`kMaxKeys`, FOV `[1,179]`, `kMaxSpeed`) and every bad value is
+  refused, not clamped.
 
 ## Conventions
 

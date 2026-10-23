@@ -17,6 +17,8 @@ CORE_SRC := \
   core/modules/module.cpp \
   core/modules/combat.cpp \
   core/modules/combat_state.cpp \
+  core/modules/animator.cpp \
+  core/modules/replay_camera.cpp \
   core/modules/render.cpp \
   core/modules/render_backend.cpp \
   core/modules/pipeline.cpp \
@@ -24,6 +26,7 @@ CORE_SRC := \
   core/modules/world.cpp \
   core/modules/world_query.cpp \
   core/modules/hud.cpp \
+  core/modules/ui.cpp \
   core/modules/input.cpp \
   core/modules/pvp.cpp \
   core/modules/cosmetic.cpp \
@@ -34,6 +37,8 @@ CORE_SRC := \
   core/net/net.cpp \
   core/net/ws_client.cpp \
   core/net/cosmetic_sync.cpp \
+  core/net/lan_transport.cpp \
+  core/net/lan_discovery.cpp \
   core/script/crypto.cpp \
   core/script/ed25519.cpp \
   core/script/manifest.cpp \
@@ -81,6 +86,7 @@ TEST_SRC := \
   tests/test_math.cpp \
   tests/test_modules.cpp \
   tests/test_net.cpp \
+  tests/test_lan_transport.cpp \
   tests/test_jsonrpc.cpp \
   tests/test_render.cpp \
   tests/test_sample.cpp \
@@ -94,6 +100,7 @@ TEST_SRC := \
   tests/test_luau.cpp \
   tests/test_idl.cpp \
   tests/test_hud.cpp \
+  tests/test_ui.cpp \
   tests/test_governor.cpp \
   tests/test_url.cpp \
   tests/test_loader.cpp \
@@ -115,7 +122,9 @@ TEST_SRC := \
   tests/test_sigpack.cpp \
   tests/test_session_recorder.cpp \
   tests/test_combat_state.cpp \
-  tests/test_pipeline.cpp
+  tests/test_pipeline.cpp \
+  tests/test_animator.cpp \
+  tests/test_replay_camera.cpp
 # Vendored Luau (MIT). See third_party/luau/PROVENANCE.md for the pinned
 # version and why these units and not the CLI. Compiled with -w because upstream
 # is only warning-clean under its own flag set; our code stays -Wall -Wextra clean.

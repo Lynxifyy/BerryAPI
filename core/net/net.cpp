@@ -113,6 +113,140 @@ bool TcpSocket::WaitReadable(int timeoutMs) {
 }
 
 //----------------------------------------------------------------------------
+// UdpSocket
+//----------------------------------------------------------------------------
+
+UdpSocket::UdpSocket() = default;
+UdpSocket::~UdpSocket() { Close(); }
+
+void UdpSocket::Close() {
+  if (fd_ >= 0) { ::close(fd_); fd_ = -1; }
+}
+
+bool UdpSocket::Bind(u16 port, const char* bindAddr, bool broadcast) {
+  Close();
+  int s = ::socket(AF_INET, SOCK_DGRAM, 0);
+  if (s < 0) {
+    err_ = std::string("socket: ") + strerror(errno);
+    return false;
+  }
+
+  sockaddr_in a{};
+  a.sin_family = AF_INET;
+  a.sin_port = htons(port);
+  if (::inet_pton(AF_INET, bindAddr ? bindAddr : "0.0.0.0", &a.sin_addr) != 1) {
+    err_ = "bad bind address";
+    ::close(s);
+    return false;
+  }
+  // Every client on a host binds the same fixed port, so the group join can be
+  // shared. SO_REUSEADDR lets the second bind succeed instead of failing with
+  // EADDRINUSE.
+  int reuse = 1;
+  ::setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse);
+  if (::bind(s, (sockaddr*)&a, sizeof a) != 0) {
+    err_ = std::string("bind: ") + strerror(errno);
+    ::close(s);
+    return false;
+  }
+  if (broadcast) {
+    int on = 1;
+    ::setsockopt(s, SOL_SOCKET, SO_BROADCAST, &on, sizeof on);
+  }
+  fd_ = s;
+  return true;
+}
+
+bool UdpSocket::JoinMulticast(const char* group, const char* ifaceAddr) {
+  if (fd_ < 0) { err_ = "not bound"; return false; }
+  ip_mreq req{};
+  if (::inet_pton(AF_INET, group, &req.imr_multiaddr) != 1 ||
+      (req.imr_multiaddr.s_addr & htonl(0xf0000000u)) != htonl(0xe0000000u)) {
+    err_ = "not a multicast group";
+    return false;
+  }
+  if (::inet_pton(AF_INET, ifaceAddr ? ifaceAddr : "0.0.0.0",
+                  &req.imr_interface) != 1) {
+    err_ = "bad interface address";
+    return false;
+  }
+  if (::setsockopt(fd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &req, sizeof req) != 0) {
+    err_ = std::string("join: ") + strerror(errno);
+    return false;
+  }
+  // Without this a sender on the same host does not see its own datagrams, so a
+  // host test (two sockets on loopback) would hear nothing.
+  int loop = 1;
+  ::setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof loop);
+  return true;
+}
+
+bool UdpSocket::SetMulticastInterface(const char* ifaceAddr) {
+  if (fd_ < 0) { err_ = "not bound"; return false; }
+  in_addr iface{};
+  if (::inet_pton(AF_INET, ifaceAddr ? ifaceAddr : "0.0.0.0", &iface) != 1) {
+    err_ = "bad interface address";
+    return false;
+  }
+  if (::setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_IF, &iface, sizeof iface) != 0) {
+    err_ = std::string("multicast if: ") + strerror(errno);
+    return false;
+  }
+  return true;
+}
+
+bool UdpSocket::SendTo(const void* data, size_t len, const char* host, u16 port) {
+  if (fd_ < 0) { err_ = "not bound"; return false; }
+  sockaddr_in a{};
+  a.sin_family = AF_INET;
+  a.sin_port = htons(port);
+  if (::inet_pton(AF_INET, host, &a.sin_addr) != 1) {
+    err_ = "bad destination";
+    return false;
+  }
+  ssize_t n = ::sendto(fd_, data, len, MSG_NOSIGNAL, (sockaddr*)&a, sizeof a);
+  if (n < 0 || (size_t)n != len) {
+    err_ = std::string("sendto: ") + strerror(errno);
+    return false;
+  }
+  return true;
+}
+
+ssize_t UdpSocket::RecvFrom(void* buf, size_t len, std::string* fromHost,
+                            u16* fromPort, int timeoutMs) {
+  if (fd_ < 0) { err_ = "not bound"; return -1; }
+  fd_set rset;
+  FD_ZERO(&rset);
+  FD_SET(fd_, &rset);
+  timeval tv{};
+  tv.tv_sec = timeoutMs / 1000;
+  tv.tv_usec = (timeoutMs % 1000) * 1000;
+  int rc = ::select(fd_ + 1, &rset, nullptr, nullptr, &tv);
+  if (rc == 0) return 0;               // timeout
+  if (rc < 0) { err_ = std::string("select: ") + strerror(errno); return -1; }
+
+  sockaddr_in from{};
+  socklen_t flen = sizeof from;
+  ssize_t n = ::recvfrom(fd_, buf, len, 0, (sockaddr*)&from, &flen);
+  if (n < 0) { err_ = std::string("recvfrom: ") + strerror(errno); return -1; }
+  if (fromHost) {
+    char ip[INET_ADDRSTRLEN] = {0};
+    ::inet_ntop(AF_INET, &from.sin_addr, ip, sizeof ip);
+    *fromHost = ip;
+  }
+  if (fromPort) *fromPort = ntohs(from.sin_port);
+  return n;
+}
+
+u16 UdpSocket::localPort() const {
+  if (fd_ < 0) return 0;
+  sockaddr_in a{};
+  socklen_t len = sizeof a;
+  if (::getsockname(fd_, (sockaddr*)&a, &len) != 0) return 0;
+  return ntohs(a.sin_port);
+}
+
+//----------------------------------------------------------------------------
 // HTTP
 //----------------------------------------------------------------------------
 

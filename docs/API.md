@@ -96,6 +96,9 @@ Capability: `render`.
 | `render.pop_clip_rect() -> nil` | `render` | Pops the innermost clip rectangle. An unmatched pop is a no-op. |
 | `render.clip_rect() -> Table` | `render` | The active clip rectangle as {active, x, y, w, h}; `active` is false when no clip is pushed. |
 | `render.camera() -> Table` | `render` | The camera the renderer last drew with, as {valid, x, y, z, yaw, pitch}. `valid` is false until a camera is bound. |
+| `render.add_occluder(min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number) -> nil` | `render` | Submits a world box as an opaque occluder for this frame's software occlusion grid. Submit large near geometry (terrain, walls) front to back; boxes the grid then proves hidden are dropped by `render.occluded`. Purely CPU-side and conservative: it never hides anything it cannot prove is behind a submitted occluder. |
+| `render.occluded(min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number) -> bool` | `render` | True when the world box is entirely behind the occluders submitted this frame with `render.add_occluder`. False with no camera, no occluders, or any doubt, so it never over-culls. Resets every frame. |
+| `render.cull_box(min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number) -> bool` | `render` | The full visibility test: false when the box is outside the camera frustum or hidden behind a submitted occluder. The one call an overlay makes per candidate before queuing its geometry. |
 
 ## World
 
@@ -282,6 +285,42 @@ Capability: `hud`.
 | `hud.set_visible(widget: Widget, visible: bool) -> nil` | `hud` | - |
 | `hud.tween(widget: Widget, prop: string, to: number, ms: number) -> nil` | `hud` | - |
 
+## Ui
+
+Capability: `hud`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `ui.begin_frame() -> nil` | `hud` | Opens a UI frame. Call once at the top of a frame hook, before any window. If the previous frame was left open (a script faulted between begin and end), the stale frame is aborted here rather than presented. |
+| `ui.end_frame() -> nil` | `hud` | Publishes the frame built since `begin_frame` so the render thread can draw and hit-test it. Call once at the end of the frame hook. A no-op when no frame is open. |
+| `ui.begin_window(title: string, x: number, y: number, w: number, h: number) -> bool` | `hud` | Opens a window at (x, y) with a content viewport of (w, h), returning true when its content should be built. Must be called between `begin_frame` and `end_frame`; outside a frame it returns false. The window's own title bar toggles collapse; dragging it moves the window. Content taller than h scrolls with the wheel. |
+| `ui.end_window() -> nil` | `hud` | Closes the window opened by `begin_window`. Must be called even when `begin_window` returned false. |
+| `ui.button(label: string) -> Table` | `hud` | A push button. The result's `clicked` is true on the frame the press is released inside it. |
+| `ui.checkbox(label: string, value: bool) -> Table` | `hud` | A checkbox. Pass the current value; the result's `toggled` is true on a click and `value` is the new value (1 or 0). |
+| `ui.slider_float(label: string, value: number, lo: number, hi: number) -> Table` | `hud` | A horizontal slider. Pass the current value; a drag returns the new one in `value` with `changed` set. A degenerate range (hi <= lo) leaves the value untouched. |
+| `ui.slider_int(label: string, value: number, lo: number, hi: number) -> Table` | `hud` | An integer slider, rounding the drag to whole steps. |
+| `ui.input_text(label: string, value: string) -> Table` | `hud` | A single-line text field. Pass the current text; typed characters arrive in `text` with `changed` set. Backspace (UTF-8 aware) and Enter are handled; the field stops at 256 bytes. |
+| `ui.collapsing_header(label: string, open: bool) -> bool` | `hud` | A collapsible section header. Pass the current open state; the returned value is the new one. Indent the children while open. |
+| `ui.begin_tab_bar(id: string) -> bool` | `hud` | Opens a tab bar. Returns false when it could not be opened (too many nested bars), in which case `end_tab_bar` must not be called. |
+| `ui.end_tab_bar() -> nil` | `hud` | - |
+| `ui.begin_tab_item(label: string) -> bool` | `hud` | Opens one tab, returning true when it is the selected one so its content should be built. Every `begin_tab_item` must be paired with `end_tab_item`. |
+| `ui.end_tab_item() -> nil` | `hud` | - |
+| `ui.text(text: string) -> nil` | `hud` | Non-interactive text at the current cursor. |
+| `ui.text_colored(role: string, text: string) -> nil` | `hud` | Coloured text using a semantic theme role: window_bg, title_bg, title_text, text, muted, accent, frame_bg, frame_hover, frame_active, border, good, warn or bad. |
+| `ui.progress_bar(fraction: number, overlay: string) -> nil` | `hud` | A 0..1 progress bar with an optional centred overlay. |
+| `ui.separator() -> nil` | `hud` | A horizontal rule across the content width. |
+| `ui.spacing() -> nil` | `hud` | A blank row. |
+| `ui.same_line() -> nil` | `hud` | Keeps the next widget on the same line as the previous one. |
+| `ui.dummy(w: number, h: number) -> nil` | `hud` | Reserves an empty box of (w, h). |
+| `ui.indent() -> nil` | `hud` | Indents subsequent widgets by one level. |
+| `ui.unindent() -> nil` | `hud` | Reverses one level of indent. |
+| `ui.bullet_text(text: string) -> nil` | `hud` | A bulleted line. |
+| `ui.set_theme(name: string) -> bool` | `hud` | Selects the theme: \"dark\" (the default, flat) or \"glass\" (translucent, rounded, iOS-style). An unknown name is refused (fail closed) and the theme is unchanged. |
+| `ui.theme() -> string` | `hud` | The active theme's name. |
+| `ui.stats() -> Table` | `hud` | The layer's counters as {frames, windows, widgets, hovered, clicked}. |
+| `ui.any_window_dragging() -> bool` | `hud` | True while any window is being dragged, so a caller can suppress camera input. |
+| `ui.reset() -> nil` | `hud` | Drops every window's persistent state (drag offsets, scroll, collapse). |
+
 ## Perf
 
 Capability: `perf`.
@@ -299,6 +338,7 @@ Capability: `perf`.
 | `perf.flame_reset() -> nil` | `perf` | Drops the flame tree, the span stats and the per-frame ring, starting the profiler over. |
 | `perf.pipeline() -> Table` | `perf` | The render pipeline's frame counters as {frames, entities_submitted, entities_drawn, entities_culled, entities_lod_reduced, batches, draw_calls, vertices, resolution_scale}. `draw_calls` counts the two coalesced calls (triangles + lines) a frame issues, so it stays flat however many primitives a script queued; `resolution_scale` is the factor the dynamic-resolution controller settled on (1.0 is native). |
 | `perf.lod_tier(distance: number) -> string` | `perf` | The level-of-detail tier an entity `distance` blocks from the camera would be drawn at: \"full\", \"reduced\", \"static\" or \"culled\". Follows the same policy the renderer culls with, so a script can predict whether its overlay will be given geometry. |
+| `perf.lod_should_tick(distance: number, tick: number, phase: number) -> bool` | `perf` | Whether an entity `distance` blocks away should advance its animation/physics on `tick`, keyed by `phase` (pass the entity id so a crowd does not all update on one tick). True every tick at \"full\", one tick in the policy's reduced interval at \"reduced\", never at \"static\"/\"culled\". This is the tick-rate half of LOD: a script that drives a crowd skips a false result to throttle it. |
 
 ## Input
 
@@ -325,6 +365,35 @@ Capability: `cosmetic`.
 | `cosmetic.presets() -> string` | `cosmetic` | - |
 | `cosmetic.set_local_only(enabled: bool) -> nil` | `cosmetic` | - |
 | `cosmetic.reload_packs() -> number` | `cosmetic` | Reload local model packs from the pack directory, registering every valid *.pack.json. Returns the number of packs loaded; each pack is applied atomically (all its assets or none). |
+
+## Animator
+
+Capability: `cosmetic`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `animator.add_clip(name: string, duration: number, looping: bool) -> bool` | `cosmetic` | Adds an empty clip. False when the name is empty/too long/already used, the duration is not finite and positive, or the clip cap is reached. |
+| `animator.add_key(clip: string, bone: string, time: number, px: number, py: number, pz: number, rx: number, ry: number, rz: number, scale: number) -> bool` | `cosmetic` | Appends a keyframe to a clip. False when the clip is unknown, the bone is unknown, the time is negative or past the duration, the scale is not finite and positive, or the per-clip key cap is reached. `position`/`rotation` are offsets from the bone's rest transform (rotation in degrees). |
+| `animator.remove_clip(name: string) -> bool` | `cosmetic` | Removes a clip. False when it is unknown. |
+| `animator.clear_clip(name: string) -> bool` | `cosmetic` | Removes every key from a clip, keeping the clip. False when unknown. |
+| `animator.clip_count() -> number` | `cosmetic` | - |
+| `animator.has_clip(name: string) -> bool` | `cosmetic` | - |
+| `animator.key_count(name: string) -> number` | `cosmetic` | The number of keys in a clip, or 0 when unknown. |
+| `animator.play(name: string) -> bool` | `cosmetic` | Starts a clip from time 0. False when the clip is unknown. |
+| `animator.stop() -> nil` | `cosmetic` | Stops playback, leaving the current time where it is. |
+| `animator.reset() -> nil` | `cosmetic` | Stops and rewinds to time 0. |
+| `animator.playing() -> bool` | `cosmetic` | - |
+| `animator.time() -> number` | `cosmetic` | The current play time in seconds. |
+| `animator.duration() -> number` | `cosmetic` | The current clip's duration, or 0 when none is selected. |
+| `animator.current_clip() -> string` | `cosmetic` | The current clip's name, or \"\" when none is selected. |
+| `animator.seek(seconds: number) -> bool` | `cosmetic` | Jumps to an absolute time within the current clip, clamped/wrapped the same way playback would land there. False when no clip is selected. |
+| `animator.sample(bone: string, time: number) -> Table` | `cosmetic` | A bone's interpolated pose at an absolute time within the current clip, as {valid, bone, px, py, pz, rx, ry, rz, scale}. `valid` is false when no clip/bone has a key there. |
+| `animator.pose() -> Table` | `cosmetic` | The whole current pose: one table per bone that has a key in the current clip, at the current time, each {bone, px, py, pz, rx, ry, rz, scale}. Empty when no clip is selected. |
+| `animator.save() -> string` | `cosmetic` | The clips as one JSON document (deterministic: same clips, same bytes). |
+| `animator.load(json: string) -> bool` | `cosmetic` | Replaces the clips from a JSON document in the exact format `save` returns, including its version. Rejects the whole document on any error (malformed JSON, the wrong format or version, a duplicate name, an unknown bone, an out-of-range key) and leaves the current clips untouched. Playback is stopped. |
+| `animator.clear() -> nil` | `cosmetic` | Drops every clip and stops playback. |
+| `animator.target() -> number` | `cosmetic` | The entity the animator drives (0 = every entity the skeleton seam resolves). |
+| `animator.set_target(entity: number) -> nil` | `cosmetic` | Sets the entity the animator drives. 0 animates every entity the base skeleton seam resolves. |
 
 ## Events
 
@@ -409,3 +478,42 @@ Capability: `world`.
 | `record.replay_tick() -> number` | `world` | The tick of the current replay frame, or 0 when there is none. |
 | `record.replay_index() -> number` | `world` | The current replay frame index, or -1 before the first step. |
 | `record.replay_end() -> bool` | `world` | - |
+
+## Replay
+
+Capability: `world`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `replay.add_key(tick: number, x: number, y: number, z: number, pitch: number, yaw: number, roll: number, fov: number) -> bool` | `world` | Adds a camera key at a tick. False when the position or angles are not finite, the FOV is outside [1, 179], the key cap is reached, or a key already exists at that tick (remove it first). |
+| `replay.remove_key(tick: number) -> bool` | `world` | Removes the key at a tick. False when there is none. |
+| `replay.clear() -> nil` | `world` | Drops every key and stops playback. Keeps whether the timeline is active. |
+| `replay.key_count() -> number` | `world` | - |
+| `replay.has_key(tick: number) -> bool` | `world` | - |
+| `replay.first_tick() -> number` | `world` | The first key's tick, or 0 when there are no keys. |
+| `replay.last_tick() -> number` | `world` | The last key's tick, or 0 when there are no keys. |
+| `replay.duration_ticks() -> number` | `world` | The span between the first and last key, or 0 with fewer than two keys. |
+| `replay.smoothing() -> string` | `world` | The interpolation mode, \"linear\" or \"smooth\". |
+| `replay.set_smoothing(name: string) -> bool` | `world` | Sets the interpolation mode. False when the name is neither \"linear\" nor \"smooth\". |
+| `replay.active() -> bool` | `world` | True when the frame's camera is driven by this timeline. |
+| `replay.activate() -> bool` | `world` | Hands the frame's camera to this timeline (and starts playback). False when there are no keys to play. |
+| `replay.deactivate() -> nil` | `world` | Gives the camera back to the player and pauses. |
+| `replay.play() -> bool` | `world` | Starts (or resumes) playback from the current playhead. False when there are no keys. |
+| `replay.pause() -> nil` | `world` | - |
+| `replay.stop() -> nil` | `world` | Pauses and rewinds to the first key. |
+| `replay.playing() -> bool` | `world` | - |
+| `replay.follow_tape() -> bool` | `world` | True when the playhead follows the replay tape's tick instead of the frame clock. Off by default. |
+| `replay.set_follow_tape(on: bool) -> nil` | `world` | When on, the playhead is the replay tape's tick: a key at tick N shows at tick N of the recording, and the camera glides as the tape steps. When off, the playhead advances on the frame clock at `speed`. |
+| `replay.speed() -> number` | `world` | - |
+| `replay.set_speed(speed: number) -> bool` | `world` | Sets the playback speed multiplier. Must be finite and in (0, 64]; a bad value is refused. |
+| `replay.playhead() -> number` | `world` | The playhead in ticks (fractional, so it can fall between keys). |
+| `replay.seek(tick: number) -> bool` | `world` | Moves the playhead, clamped into the key range. False when there are no keys. |
+| `replay.sample(tick: number) -> Table` | `world` | The pose at an absolute tick as {valid, x, y, z, pitch, yaw, roll, fov}. Before the first key it holds the first, past the last it holds the last. |
+| `replay.sample_now() -> Table` | `world` | The pose at the current playhead, same shape as `sample`. |
+| `replay.fov_override() -> number` | `world` | The FOV override in degrees, or 0 when the keyframed FOV is used. |
+| `replay.set_fov_override(fov: number) -> bool` | `world` | Pins the FOV, or clears the pin with 0. A non-zero value must be finite and in [1, 179]; a bad value is refused. |
+| `replay.export_begin(fps: number, width: number, height: number) -> bool` | `world` | Begins a fixed-rate export from the first key. False when the rate is not finite and in (0, 240], the viewport is not finite and positive, or there are no keys. While exporting, the client's frame hook yields one video frame per rendered frame at this rate — independent of the machine's real frame rate — so the export's length is a property of the timeline, not the renderer. |
+| `replay.export_end() -> nil` | `world` | Ends an export. A no-op when none is running. |
+| `replay.exporting() -> bool` | `world` | - |
+| `replay.export_frame() -> number` | `world` | How many frames the current export has yielded. |
+| `replay.export_fps() -> number` | `world` | The export frame rate, or 0 when not exporting. |
