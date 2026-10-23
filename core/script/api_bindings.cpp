@@ -6,7 +6,9 @@
 #include "berry/engine.h"
 #include "berry/event.h"
 #include "berry/generated_bindings.h"
+#include "berry/jsonrpc_client.h"
 #include "berry/logger.h"
+#include "berry/ws_client.h"
 
 #include <algorithm>
 #include <cmath>
@@ -236,6 +238,7 @@ ScriptApi::~ScriptApi() { RemoveHooks(); }
 
 void ScriptApi::InitHooks() {
   InitCombatCache();
+  InitCombatStateHook();
   InitFrameHook();
 }
 
@@ -298,6 +301,14 @@ void ScriptApi::RemoveHooks() {
   if (combatListener_) {
     EventBus::Instance().Off("berry:combat", combatListener_);
     combatListener_ = 0;
+  }
+  if (tickListener_) {
+    EventBus::Instance().Off("berry:tick", tickListener_);
+    tickListener_ = 0;
+  }
+  if (combatStateListener_) {
+    EventBus::Instance().Off("berry:combat", combatStateListener_);
+    combatStateListener_ = 0;
   }
 }
 
@@ -375,6 +386,321 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Num((f64)n);
   });
 
+  //--- CombatState (local combat-state telemetry / CSHR) --------------------
+  //
+  // Everything here derives from data the client already has. When the service
+  // is not wired the reads fail closed with neutral values rather than
+  // fabricating combat state.
+
+  auto combatStateOrFail = [this](ScriptContext& ctx, const char* who)
+      -> CombatStateTracker* {
+    if (!services_.combatState) {
+      ctx.RaiseError(std::string(who) + ": combat-state tracker unavailable");
+      return nullptr;
+    }
+    return services_.combatState;
+  };
+
+  auto parseCombatButton = [](ScriptContext& ctx, const char* who,
+                              const std::string& raw, MouseButton* out) -> bool {
+    const std::string b = Lower(raw);
+    if (b == "left") { *out = MouseButton::Left; return true; }
+    if (b == "right") { *out = MouseButton::Right; return true; }
+    ctx.RaiseError(std::string(who) + ": button must be \"left\" or \"right\"");
+    return false;
+  };
+
+  install("combat_state.max_reach", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.max_reach");
+    if (!cs) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)cs->maxReach());
+  });
+
+  install("combat_state.set_max_reach", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.set_max_reach");
+    if (!cs) return ScriptValue::Bool(false);
+    const f64 blocks = args[0].AsNumber();
+    if (!std::isfinite(blocks) || blocks <= 0) {
+      ctx.RaiseError("combat_state.set_max_reach: blocks must be a finite positive number");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(cs->SetMaxReach((f32)blocks));
+  });
+
+  install("combat_state.last_reach", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.last_reach");
+    if (!cs) return ScriptValue::Nil();
+    const ReachCheck rc = cs->lastReach();
+    ScriptTable t;
+    t["valid"] = ScriptValue::Bool(rc.valid);
+    t["distance"] = ScriptValue::Num((f64)rc.distance);
+    t["max_reach"] = ScriptValue::Num((f64)rc.maxReach);
+    t["within_reach"] = ScriptValue::Bool(rc.withinReach);
+    t["tick"] = ScriptValue::Num((f64)rc.tick);
+    t["attacker"] = ScriptValue::Num((f64)rc.attacker.raw);
+    t["victim"] = ScriptValue::Num((f64)rc.victim.raw);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("combat_state.reach_violations", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.reach_violations");
+    if (!cs) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)cs->reachViolations());
+  });
+
+  install("combat_state.hitbox_count", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.hitbox_count");
+    if (!cs) return ScriptValue::Num(0);
+    const f64 raw = args[0].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0) {
+      ctx.RaiseError("combat_state.hitbox_count: entity id must be a positive number");
+      return ScriptValue::Num(0);
+    }
+    EntityId id; id.raw = (u64)raw;
+    return ScriptValue::Num((f64)cs->HitboxCount(id));
+  });
+
+  install("combat_state.hitbox_ticks", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.hitbox_ticks");
+    if (!cs) return ScriptValue::Nil();
+    const f64 raw = args[0].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0) {
+      ctx.RaiseError("combat_state.hitbox_ticks: entity id must be a positive number");
+      return ScriptValue::Nil();
+    }
+    EntityId id; id.raw = (u64)raw;
+    const std::vector<u64> ticks = cs->HitboxTicks(id);
+    ScriptTable t;
+    for (size_t i = 0; i < ticks.size(); ++i) {
+      t[std::to_string(i)] = ScriptValue::Num((f64)ticks[i]);
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("combat_state.hitbox_at", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.hitbox_at");
+    if (!cs) return ScriptValue::Nil();
+    const f64 raw = args[0].AsNumber();
+    const f64 tick = args[1].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0 || !std::isfinite(tick) || tick < 0) {
+      ctx.RaiseError("combat_state.hitbox_at: entity id must be positive and tick non-negative");
+      return ScriptValue::Nil();
+    }
+    EntityId id; id.raw = (u64)raw;
+    Aabb box;
+    ScriptTable t;
+    const bool ok = cs->HitboxAt(id, (u64)tick, &box);
+    t["valid"] = ScriptValue::Bool(ok);
+    t["min_x"] = ScriptValue::Num((f64)box.min.x);
+    t["min_y"] = ScriptValue::Num((f64)box.min.y);
+    t["min_z"] = ScriptValue::Num((f64)box.min.z);
+    t["max_x"] = ScriptValue::Num((f64)box.max.x);
+    t["max_y"] = ScriptValue::Num((f64)box.max.y);
+    t["max_z"] = ScriptValue::Num((f64)box.max.z);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  auto swingToTable = [](const SwingSample& s) {
+    ScriptTable t;
+    t["valid"] = ScriptValue::Bool(s.valid);
+    t["delta_ticks"] = ScriptValue::Num((f64)s.deltaTicks);
+    t["cps"] = ScriptValue::Num(s.cps);
+    t["tick"] = ScriptValue::Num((f64)s.tick);
+    t["attacker"] = ScriptValue::Num((f64)s.attacker.raw);
+    return ScriptValue::Tbl(std::move(t));
+  };
+
+  install("combat_state.swing", [this, combatStateOrFail, swingToTable](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.swing");
+    if (!cs) return ScriptValue::Nil();
+    const f64 raw = args[0].AsNumber();
+    const f64 tick = args[1].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0 || !std::isfinite(tick) || tick < 0) {
+      ctx.RaiseError("combat_state.swing: entity id must be positive and tick non-negative");
+      return ScriptValue::Nil();
+    }
+    EntityId id; id.raw = (u64)raw;
+    return swingToTable(cs->ObserveSwing(id, (u64)tick));
+  });
+
+  install("combat_state.last_swing", [this, combatStateOrFail, swingToTable](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.last_swing");
+    if (!cs) return ScriptValue::Nil();
+    return swingToTable(cs->lastSwing());
+  });
+
+  install("combat_state.average_swing_cps", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.average_swing_cps");
+    if (!cs) return ScriptValue::Num(0);
+    const f64 raw = args[0].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0) {
+      ctx.RaiseError("combat_state.average_swing_cps: entity id must be a positive number");
+      return ScriptValue::Num(0);
+    }
+    EntityId id; id.raw = (u64)raw;
+    return ScriptValue::Num(cs->AverageSwingCps(id));
+  });
+
+  install("combat_state.predict_projectile", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    const f64 x = args[0].AsNumber(), y = args[1].AsNumber(), z = args[2].AsNumber();
+    const f64 vx = args[3].AsNumber(), vy = args[4].AsNumber(), vz = args[5].AsNumber();
+    const f64 gravity = args[6].AsNumber(), ticks = args[7].AsNumber();
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+        !std::isfinite(vx) || !std::isfinite(vy) || !std::isfinite(vz) ||
+        !std::isfinite(gravity) || !std::isfinite(ticks) || ticks < 0) {
+      ctx.RaiseError("combat_state.predict_projectile: arguments must be finite and ticks non-negative");
+      return Vec3Value(Vec3());
+    }
+    const Vec3 p = CombatStateTracker::Extrapolate(
+        Vec3((f32)x, (f32)y, (f32)z), Vec3((f32)vx, (f32)vy, (f32)vz),
+        (f32)gravity, (u32)ticks);
+    return Vec3Value(p);
+  });
+
+  install("combat_state.note_projectile", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.note_projectile");
+    if (!cs) return ScriptValue::Nil();
+    const f64 raw = args[0].AsNumber();
+    const f64 x = args[1].AsNumber(), y = args[2].AsNumber(), z = args[3].AsNumber();
+    const f64 tick = args[4].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0 || !std::isfinite(x) || !std::isfinite(y) ||
+        !std::isfinite(z) || !std::isfinite(tick) || tick < 0) {
+      ctx.RaiseError("combat_state.note_projectile: id must be positive and coordinates/tick finite");
+      return ScriptValue::Nil();
+    }
+    EntityId id; id.raw = (u64)raw;
+    cs->NoteProjectile(id, Vec3((f32)x, (f32)y, (f32)z), (u64)tick);
+    return ScriptValue::Nil();
+  });
+
+  install("combat_state.resolve_projectile", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.resolve_projectile");
+    if (!cs) return ScriptValue::Num(-1);
+    const f64 raw = args[0].AsNumber();
+    const f64 x = args[1].AsNumber(), y = args[2].AsNumber(), z = args[3].AsNumber();
+    const f64 tick = args[4].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0 || !std::isfinite(x) || !std::isfinite(y) ||
+        !std::isfinite(z) || !std::isfinite(tick) || tick < 0) {
+      ctx.RaiseError("combat_state.resolve_projectile: id must be positive and coordinates/tick finite");
+      return ScriptValue::Num(-1);
+    }
+    EntityId id; id.raw = (u64)raw;
+    return ScriptValue::Num((f64)cs->ResolveProjectile(id, Vec3((f32)x, (f32)y, (f32)z), (u64)tick));
+  });
+
+  install("combat_state.prediction_error", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.prediction_error");
+    if (!cs) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)cs->MeanPredictionError());
+  });
+
+  install("combat_state.prediction_count", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.prediction_count");
+    if (!cs) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)cs->PredictionCount());
+  });
+
+  install("combat_state.predict_hit", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.predict_hit");
+    if (!cs) return ScriptValue::Nil();
+    const f64 attacker = args[0].AsNumber();
+    const f64 victim = args[1].AsNumber();
+    const f64 tick = args[2].AsNumber();
+    if (!std::isfinite(attacker) || attacker <= 0 || !std::isfinite(victim) || victim <= 0 ||
+        !std::isfinite(tick) || tick < 0) {
+      ctx.RaiseError("combat_state.predict_hit: attacker/victim must be positive and tick non-negative");
+      return ScriptValue::Nil();
+    }
+    EntityId a; a.raw = (u64)attacker;
+    EntityId v; v.raw = (u64)victim;
+    cs->PredictHit(a, v, (u64)tick);
+    return ScriptValue::Nil();
+  });
+
+  install("combat_state.hit_accuracy", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.hit_accuracy");
+    if (!cs) return ScriptValue::Num(0);
+    return ScriptValue::Num(cs->HitAccuracy());
+  });
+
+  install("combat_state.predicted_hits", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.predicted_hits");
+    if (!cs) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)cs->PredictedHits());
+  });
+
+  install("combat_state.confirmed_hits", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.confirmed_hits");
+    if (!cs) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)cs->ConfirmedHits());
+  });
+
+  install("combat_state.missed_hits", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.missed_hits");
+    if (!cs) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)cs->MissedHits());
+  });
+
+  install("combat_state.note_click", [this, combatStateOrFail, parseCombatButton](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.note_click");
+    if (!cs) return ScriptValue::Bool(false);
+    MouseButton button;
+    if (!parseCombatButton(ctx, "combat_state.note_click", args[0].ToDisplay(), &button)) {
+      return ScriptValue::Bool(false);
+    }
+    const f64 nowMs = args[1].AsNumber();
+    if (!std::isfinite(nowMs) || nowMs < 0) {
+      ctx.RaiseError("combat_state.note_click: now_ms must be non-negative");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(cs->NoteClick(button, (u64)nowMs));
+  });
+
+  install("combat_state.click_rate", [this, combatStateOrFail, parseCombatButton](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.click_rate");
+    if (!cs) return ScriptValue::Num(0);
+    MouseButton button;
+    if (!parseCombatButton(ctx, "combat_state.click_rate", args[0].ToDisplay(), &button)) {
+      return ScriptValue::Num(0);
+    }
+    return ScriptValue::Num(cs->ClickRate(button));
+  });
+
+  install("combat_state.click_limited", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.click_limited");
+    if (!cs) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(cs->ClickLimited());
+  });
+
+  install("combat_state.click_tokens", [this, combatStateOrFail, parseCombatButton](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.click_tokens");
+    if (!cs) return ScriptValue::Num(0);
+    MouseButton button;
+    if (!parseCombatButton(ctx, "combat_state.click_tokens", args[0].ToDisplay(), &button)) {
+      return ScriptValue::Num(0);
+    }
+    return ScriptValue::Num((f64)cs->ClickTokens(button));
+  });
+
+  install("combat_state.set_click_budget", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.set_click_budget");
+    if (!cs) return ScriptValue::Bool(false);
+    const f64 perSecond = args[0].AsNumber();
+    const f64 burst = args[1].AsNumber();
+    if (!std::isfinite(perSecond) || perSecond <= 0 ||
+        !std::isfinite(burst) || burst < 1) {
+      ctx.RaiseError("combat_state.set_click_budget: per_second must be positive and burst at least 1");
+      return ScriptValue::Bool(false);
+    }
+    return ScriptValue::Bool(cs->SetClickBudget((f32)perSecond, (f32)burst));
+  });
+
+  install("combat_state.clear", [this, combatStateOrFail](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    CombatStateTracker* cs = combatStateOrFail(ctx, "combat_state.clear");
+    if (cs) cs->Clear();
+    return ScriptValue::Nil();
+  });
+
   //--- Player (read-only view of the LOCAL player) -------------------------
   //
   // Every read resolves the local player through the World seam and fails
@@ -443,6 +769,147 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     EntitySnapshot s;
     if (!localSnapshot(ctx, "player.name", &s)) return ScriptValue::Str("");
     return ScriptValue::Str(s.name);
+  });
+
+  // The local player's own extended state (hunger, armour, gamemode, effects).
+  // Resolved through the same seam as the reads above and fail-closed: an
+  // unbound seam or a seam that does not report the state raises and returns a
+  // neutral value, so a script sees "no data", never a fabricated stat.
+  auto localState = [this](ScriptContext& ctx, const char* who,
+                           LocalPlayerState* out) -> bool {
+    if (!services_.world) {
+      ctx.RaiseError(std::string(who) + ": world unavailable");
+      return false;
+    }
+    auto seam = services_.world->Seam();
+    if (!seam) {
+      ctx.RaiseError(std::string(who) + ": no level seam bound");
+      return false;
+    }
+    const EntityId id = services_.localPlayer;
+    if (!id.raw && !id.runtime) {
+      ctx.RaiseError(std::string(who) + ": no local player bound");
+      return false;
+    }
+    *out = seam->GetLocalPlayerState();
+    if (!out->valid) {
+      ctx.RaiseError(std::string(who) + ": local player state unavailable");
+      return false;
+    }
+    return true;
+  };
+
+  install("player.hunger", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.hunger", &st)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)st.hunger);
+  });
+
+  install("player.saturation", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.saturation", &st)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)st.saturation);
+  });
+
+  install("player.armor", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.armor", &st)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)st.armorPoints);
+  });
+
+  install("player.gamemode", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.gamemode", &st)) return ScriptValue::Str("unknown");
+    return ScriptValue::Str(GameModeName(st.gamemode));
+  });
+
+  install("player.dimension", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.dimension", &st)) return ScriptValue::Str("unknown");
+    return ScriptValue::Str(DimensionName(st.dimension));
+  });
+
+  install("player.xp_level", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.xp_level", &st)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)st.xpLevel);
+  });
+
+  install("player.xp_progress", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.xp_progress", &st)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)st.xpProgress);
+  });
+
+  install("player.air", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.air", &st)) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)st.air);
+  });
+
+  install("player.on_fire", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.on_fire", &st)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(st.onFire);
+  });
+
+  install("player.sneaking", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.sneaking", &st)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(st.sneaking);
+  });
+
+  install("player.sprinting", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.sprinting", &st)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(st.sprinting);
+  });
+
+  install("player.effects", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.effects", &st)) return ScriptValue::Nil();
+    ScriptTable out;
+    for (size_t i = 0; i < st.effects.size(); ++i) {
+      const PlayerEffect& e = st.effects[i];
+      ScriptTable fx;
+      fx["name"] = ScriptValue::Str(e.name);
+      fx["amplifier"] = ScriptValue::Num((f64)e.amplifier);
+      fx["seconds"] = ScriptValue::Num((f64)e.secondsLeft);
+      fx["ambient"] = ScriptValue::Bool(e.ambient);
+      out[std::to_string(i)] = ScriptValue::Tbl(std::move(fx));
+    }
+    out["count"] = ScriptValue::Num((f64)st.effects.size());
+    return ScriptValue::Tbl(std::move(out));
+  });
+
+  install("player.state", [this, localState](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    LocalPlayerState st;
+    if (!localState(ctx, "player.state", &st)) return ScriptValue::Nil();
+    ScriptTable t;
+    t["hunger"] = ScriptValue::Num((f64)st.hunger);
+    t["saturation"] = ScriptValue::Num((f64)st.saturation);
+    t["armor"] = ScriptValue::Num((f64)st.armorPoints);
+    t["gamemode"] = ScriptValue::Str(GameModeName(st.gamemode));
+    t["dimension"] = ScriptValue::Str(DimensionName(st.dimension));
+    t["xp_level"] = ScriptValue::Num((f64)st.xpLevel);
+    t["xp_progress"] = ScriptValue::Num((f64)st.xpProgress);
+    t["air"] = ScriptValue::Num((f64)st.air);
+    t["on_fire"] = ScriptValue::Bool(st.onFire);
+    t["sneaking"] = ScriptValue::Bool(st.sneaking);
+    t["sprinting"] = ScriptValue::Bool(st.sprinting);
+    ScriptTable fx;
+    for (size_t i = 0; i < st.effects.size(); ++i) {
+      const PlayerEffect& e = st.effects[i];
+      ScriptTable one;
+      one["name"] = ScriptValue::Str(e.name);
+      one["amplifier"] = ScriptValue::Num((f64)e.amplifier);
+      one["seconds"] = ScriptValue::Num((f64)e.secondsLeft);
+      one["ambient"] = ScriptValue::Bool(e.ambient);
+      fx[std::to_string(i)] = ScriptValue::Tbl(std::move(one));
+    }
+    fx["count"] = ScriptValue::Num((f64)st.effects.size());
+    t["effects"] = ScriptValue::Tbl(std::move(fx));
+    return ScriptValue::Tbl(std::move(t));
   });
 
   //--- Render (client-side draw) -------------------------------------------
@@ -547,6 +1014,130 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Nil();
   });
 
+  //--- Render: world-space projection, 3D geometry and clipping ------------
+  //
+  // The 3D helpers project through the camera the render thread published and
+  // queue the same 2D primitives, so they go through the one RenderSeam. The
+  // camera is read from the Renderer (not the script thread's own copy), so a
+  // script projects against exactly the view the frame is drawn with.
+  install("render.world_to_screen", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.world_to_screen: renderer unavailable"); return ScriptValue::Nil(); }
+    const Vec3 world(SafeCoord(args[0]), SafeCoord(args[1]), SafeCoord(args[2]));
+    const CameraState cam = services_.renderer->camera();
+    ScriptTable t;
+    Vec2 p;
+    const bool visible = cam.valid && cam.WorldToScreen(world, &p);
+    t["visible"] = ScriptValue::Bool(visible);
+    t["x"] = ScriptValue::Num(visible ? (f64)p.x : 0.0);
+    t["y"] = ScriptValue::Num(visible ? (f64)p.y : 0.0);
+    // The eye is the inverse of the view matrix's translation column; distance
+    // is measured from there so a caller can sort overlays by depth.
+    const Vec3 eye(-(cam.view.m[0] * cam.view.m[12] + cam.view.m[1] * cam.view.m[13] +
+                     cam.view.m[2] * cam.view.m[14]),
+                   -(cam.view.m[4] * cam.view.m[12] + cam.view.m[5] * cam.view.m[13] +
+                     cam.view.m[6] * cam.view.m[14]),
+                   -(cam.view.m[8] * cam.view.m[12] + cam.view.m[9] * cam.view.m[13] +
+                     cam.view.m[10] * cam.view.m[14]));
+    t["distance"] = ScriptValue::Num((f64)(cam.valid ? world.Distance(eye) : 0.0f));
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("render.draw_3d_line", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.draw_3d_line: renderer unavailable"); return ScriptValue::Nil(); }
+    const Vec3 a(SafeCoord(args[0]), SafeCoord(args[1]), SafeCoord(args[2]));
+    const Vec3 b(SafeCoord(args[3]), SafeCoord(args[4]), SafeCoord(args[5]));
+    const Rgba color = ParseRgba(args[6]);
+    PostRender([this, a, b, color] {
+      if (services_.renderer) services_.renderer->Draw3DLine(a, b, color);
+    });
+    return ScriptValue::Nil();
+  });
+
+  install("render.draw_3d_box", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.draw_3d_box: renderer unavailable"); return ScriptValue::Nil(); }
+    const Vec3 mn(SafeCoord(args[0]), SafeCoord(args[1]), SafeCoord(args[2]));
+    const Vec3 mx(SafeCoord(args[3]), SafeCoord(args[4]), SafeCoord(args[5]));
+    const Rgba color = ParseRgba(args[6]);
+    PostRender([this, mn, mx, color] {
+      if (services_.renderer) services_.renderer->Draw3DBox(mn, mx, color);
+    });
+    return ScriptValue::Nil();
+  });
+
+  install("render.draw_3d_text", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.draw_3d_text: renderer unavailable"); return ScriptValue::Nil(); }
+    const Vec3 world(SafeCoord(args[0]), SafeCoord(args[1]), SafeCoord(args[2]));
+    const std::string text = args[3].ToDisplay();
+    const Rgba color = ParseRgba(args[4]);
+    PostRender([this, world, text, color] {
+      if (services_.renderer) services_.renderer->Draw3DText(world, text.c_str(), color);
+    });
+    return ScriptValue::Nil();
+  });
+
+  install("render.push_clip_rect", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("render.push_clip_rect: renderer unavailable"); return ScriptValue::Nil(); }
+    const f32 x = SafeCoord(args[0]);
+    const f32 y = SafeCoord(args[1]);
+    const f32 w = SafeCoord(args[2]);
+    const f32 h = SafeCoord(args[3]);
+    PostRender([this, x, y, w, h] {
+      if (!services_.renderer) return;
+      Rect2D r;
+      r.min = Vec2(x, y);
+      r.max = Vec2(x + w, y + h);
+      services_.renderer->PushClipRect(r);
+    });
+    return ScriptValue::Nil();
+  });
+
+  install("render.pop_clip_rect", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.renderer) { ctx.RaiseError("render.pop_clip_rect: renderer unavailable"); return ScriptValue::Nil(); }
+    PostRender([this] {
+      if (services_.renderer) services_.renderer->PopClipRect();
+    });
+    return ScriptValue::Nil();
+  });
+
+  install("render.clip_rect", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.renderer) { ctx.RaiseError("render.clip_rect: renderer unavailable"); return ScriptValue::Nil(); }
+    // The clip stack lives on the render thread, but a script's pushes are
+    // queued. Reporting the last-known clip from the render thread keeps the
+    // read honest (it never fabricates a value the renderer has not applied).
+    Rect2D r;
+    const bool active = services_.renderer->clipRect(&r);
+    ScriptTable t;
+    t["active"] = ScriptValue::Bool(active);
+    t["x"] = ScriptValue::Num(active ? (f64)r.min.x : 0.0);
+    t["y"] = ScriptValue::Num(active ? (f64)r.min.y : 0.0);
+    t["w"] = ScriptValue::Num(active ? (f64)(r.max.x - r.min.x) : 0.0);
+    t["h"] = ScriptValue::Num(active ? (f64)(r.max.y - r.min.y) : 0.0);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("render.camera", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    const CameraState cam = services_.renderer ? services_.renderer->camera() : CameraState();
+    // The camera's world position is the inverse of the view matrix's
+    // translation; yaw/pitch come from the view's forward axis so a script can
+    // reason about the view direction without the matrix.
+    const Vec3 eye(-(cam.view.m[0] * cam.view.m[12] + cam.view.m[1] * cam.view.m[13] +
+                     cam.view.m[2] * cam.view.m[14]),
+                   -(cam.view.m[4] * cam.view.m[12] + cam.view.m[5] * cam.view.m[13] +
+                     cam.view.m[6] * cam.view.m[14]),
+                   -(cam.view.m[8] * cam.view.m[12] + cam.view.m[9] * cam.view.m[13] +
+                     cam.view.m[10] * cam.view.m[14]));
+    const Vec3 fwd(-cam.view.m[2], -cam.view.m[6], -cam.view.m[10]);
+    const Vec3 angles = fwd.LengthSq() > 0.0f ? fwd.Angle() : Vec3();
+    ScriptTable t;
+    t["valid"] = ScriptValue::Bool(cam.valid);
+    t["x"] = ScriptValue::Num((f64)eye.x);
+    t["y"] = ScriptValue::Num((f64)eye.y);
+    t["z"] = ScriptValue::Num((f64)eye.z);
+    t["pitch"] = ScriptValue::Num((f64)angles.x);
+    t["yaw"] = ScriptValue::Num((f64)angles.y);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
   //--- World (read-only queries) -------------------------------------------
   install("world.query", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
     if (!services_.world) { ctx.RaiseError("world.query: world unavailable"); return ScriptValue::Num(0); }
@@ -568,10 +1159,38 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
   });
 
   install("world.block_at", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
-    if (!services_.world) { ctx.RaiseError("world.block_at: world unavailable"); return ScriptValue::Str(""); }
+    if (!services_.world) { ctx.RaiseError("world.block_at: world unavailable"); return ScriptValue::Num(0); }
     const Vec3 p((f32)args[0].AsNumber(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber());
     const u32 block = services_.world->GetBlock(p);
-    return ScriptValue::Str(std::to_string(block));
+    return ScriptValue::Num((f64)block);
+  });
+
+  install("world.block_id_at", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("world.block_id_at: world unavailable"); return ScriptValue::Num(0); }
+    const Vec3 p((f32)args[0].AsNumber(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber());
+    const u32 block = services_.world->GetBlock(p);
+    return ScriptValue::Num((f64)block);
+  });
+
+  install("world.get_biome", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("world.get_biome: world unavailable"); return ScriptValue::Str(""); }
+    if (!services_.world->Seam()) { ctx.RaiseError("world.get_biome: no level seam bound"); return ScriptValue::Str(""); }
+    const BlockPos p((i32)args[0].AsNumber(), (i32)args[1].AsNumber(), (i32)args[2].AsNumber());
+    return ScriptValue::Str(services_.world->GetBiome(p));
+  });
+
+  install("world.get_light", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("world.get_light: world unavailable"); return ScriptValue::Num(-1); }
+    if (!services_.world->Seam()) { ctx.RaiseError("world.get_light: no level seam bound"); return ScriptValue::Num(-1); }
+    const BlockPos p((i32)args[0].AsNumber(), (i32)args[1].AsNumber(), (i32)args[2].AsNumber());
+    return ScriptValue::Num((f64)services_.world->GetLight(p));
+  });
+
+  install("world.get_chunk_state", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("world.get_chunk_state: world unavailable"); return ScriptValue::Str("unloaded"); }
+    if (!services_.world->Seam()) { ctx.RaiseError("world.get_chunk_state: no level seam bound"); return ScriptValue::Str("unloaded"); }
+    const BlockPos p((i32)args[0].AsNumber(), (i32)args[1].AsNumber(), (i32)args[2].AsNumber());
+    return ScriptValue::Str(ChunkStateName(services_.world->GetChunkState(p)));
   });
 
   install("world.entity_count", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
@@ -716,6 +1335,127 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Tbl(std::move(t));
   });
 
+  // A helper that snapshots a set of ids and renders them as one table keyed
+  // "0","1",…, sorted by id so the order is stable across ticks. The type
+  // filter is applied here so the shim and the device adapter share one
+  // definition of "matching".
+  auto entitiesToTable = [this](const std::vector<EntityId>& ids,
+                                const EntityType& filter,
+                                const Vec3& from) -> ScriptValue {
+    auto seam = services_.world->Seam();
+    std::vector<EntitySnapshot> found;
+    for (const EntityId& id : ids) {
+      EntitySnapshot s;
+      if (!seam->GetEntity(id, &s)) continue;
+      if (filter != EntityType::Unknown && s.type != filter) continue;
+      found.push_back(s);
+    }
+    std::sort(found.begin(), found.end(), [](const EntitySnapshot& a, const EntitySnapshot& b) {
+      if (a.id.raw != b.id.raw) return a.id.raw < b.id.raw;
+      return a.id.runtime < b.id.runtime;
+    });
+    ScriptTable out;
+    int n = 0;
+    for (const EntitySnapshot& s : found) {
+      out[std::to_string(n++)] = EntityTableValue(s, &from);
+    }
+    out["count"] = ScriptValue::Num((f64)found.size());
+    return ScriptValue::Tbl(std::move(out));
+  };
+
+  install("world.entities_in_aabb", [this, entitiesToTable](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("world.entities_in_aabb: world unavailable"); return ScriptValue::Nil(); }
+    const Vec3 mn((f32)args[0].AsNumber(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber());
+    const Vec3 mx((f32)args[3].AsNumber(), (f32)args[4].AsNumber(), (f32)args[5].AsNumber());
+    if (mn.x > mx.x || mn.y > mx.y || mn.z > mx.z) {
+      ctx.RaiseError("world.entities_in_aabb: min must not exceed max");
+      return ScriptValue::Nil();
+    }
+    EntityType filter = EntityType::Unknown;
+    if (!ParseTypeFilter(args[6].ToDisplay(), &filter)) {
+      ctx.RaiseError("world.entities_in_aabb: unknown entity type '" + args[6].ToDisplay() + "'");
+      return ScriptValue::Nil();
+    }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("world.entities_in_aabb: no level seam bound"); return ScriptValue::Nil(); }
+    const EntitySnapshot self = services_.world->GetEntity(services_.localPlayer);
+    return entitiesToTable(seam->EntitiesInAabb(Aabb(mn, mx), filter), filter, self.position);
+  });
+
+  install("world.entities_in_radius", [this, entitiesToTable](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("world.entities_in_radius: world unavailable"); return ScriptValue::Nil(); }
+    const Vec3 center((f32)args[0].AsNumber(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber());
+    const f32 radius = (f32)args[3].AsNumber();
+    if (!std::isfinite(radius) || radius < 0) {
+      ctx.RaiseError("world.entities_in_radius: radius must be a non-negative number");
+      return ScriptValue::Nil();
+    }
+    EntityType filter = EntityType::Unknown;
+    if (!ParseTypeFilter(args[4].ToDisplay(), &filter)) {
+      ctx.RaiseError("world.entities_in_radius: unknown entity type '" + args[4].ToDisplay() + "'");
+      return ScriptValue::Nil();
+    }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("world.entities_in_radius: no level seam bound"); return ScriptValue::Nil(); }
+    return entitiesToTable(seam->EntitiesInRadius(center, radius), filter, center);
+  });
+
+  install("world.raycast", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.world) { ctx.RaiseError("world.raycast: world unavailable"); return ScriptValue::Nil(); }
+    const Vec3 origin((f32)args[0].AsNumber(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber());
+    Vec3 dir((f32)args[3].AsNumber(), (f32)args[4].AsNumber(), (f32)args[5].AsNumber());
+    const f32 maxDist = (f32)args[6].AsNumber();
+    if (!std::isfinite(maxDist) || maxDist <= 0) {
+      ctx.RaiseError("world.raycast: distance must be positive");
+      return ScriptValue::Nil();
+    }
+    if (dir.Length() < 1e-6f) {
+      ctx.RaiseError("world.raycast: direction must be non-zero");
+      return ScriptValue::Nil();
+    }
+    dir = dir.Normalized();
+    const std::string target = Lower(args[7].ToDisplay());
+    const bool wantBlock = target == "block" || target == "any";
+    const bool wantEntity = target == "entity" || target == "any";
+    if (!wantBlock && !wantEntity) {
+      ctx.RaiseError("world.raycast: target must be 'block', 'entity' or 'any'");
+      return ScriptValue::Nil();
+    }
+    auto seam = services_.world->Seam();
+    if (!seam) { ctx.RaiseError("world.raycast: no level seam bound"); return ScriptValue::Nil(); }
+
+    ScriptTable t;
+    bool hit = false;
+    f32 bestDist = maxDist + 1.0f;
+    Vec3 blockPos;
+    u32 block = 0;
+    if (wantBlock && seam->RaycastBlock(origin, dir, maxDist, &blockPos, &block)) {
+      hit = true;
+      bestDist = (blockPos - origin).Length();
+    }
+    EntityId entId;
+    f32 entDist = 0;
+    if (wantEntity && seam->RaycastEntity(origin, dir, maxDist, &entId, &entDist)) {
+      // Prefer the nearer of the two hits, so a ray into a wall does not report
+      // an entity behind it.
+      if (!hit || entDist < bestDist) {
+        hit = true;
+        t["id"] = ScriptValue::Num((f64)entId.raw);
+        t["runtime"] = ScriptValue::Num((f64)entId.runtime);
+        t["distance"] = ScriptValue::Num((f64)entDist);
+      }
+    }
+    t["hit"] = ScriptValue::Bool(hit);
+    if (hit && !t.count("distance")) {
+      t["x"] = ScriptValue::Num((f64)blockPos.x);
+      t["y"] = ScriptValue::Num((f64)blockPos.y);
+      t["z"] = ScriptValue::Num((f64)blockPos.z);
+      t["block"] = ScriptValue::Num((f64)block);
+      t["distance"] = ScriptValue::Num((f64)bestDist);
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
   //--- Entity (read-only, by raw id) ---------------------------------------
   //
   // The id a script carries is the raw engine id: the one an entity table or an
@@ -823,6 +1563,59 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Num(found ? (f64)best.raw : 0.0);
   });
 
+  install("entity.get_hitbox", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.get_hitbox", args, &s)) {
+      ScriptTable t;
+      t["valid"] = ScriptValue::Bool(false);
+      return ScriptValue::Tbl(std::move(t));
+    }
+    const Aabb box = EntityHitbox(s);
+    ScriptTable t;
+    t["valid"] = ScriptValue::Bool(true);
+    t["min_x"] = ScriptValue::Num((f64)box.min.x);
+    t["min_y"] = ScriptValue::Num((f64)box.min.y);
+    t["min_z"] = ScriptValue::Num((f64)box.min.z);
+    t["max_x"] = ScriptValue::Num((f64)box.max.x);
+    t["max_y"] = ScriptValue::Num((f64)box.max.y);
+    t["max_z"] = ScriptValue::Num((f64)box.max.z);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("entity.trace_line", [this, entitySnapshot](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    EntitySnapshot s;
+    if (!entitySnapshot(ctx, "entity.trace_line", args, &s)) {
+      ScriptTable t;
+      t["hit"] = ScriptValue::Bool(false);
+      return ScriptValue::Tbl(std::move(t));
+    }
+    const Vec3 origin((f32)args[1].AsNumber(), (f32)args[2].AsNumber(), (f32)args[3].AsNumber());
+    Vec3 dir((f32)args[4].AsNumber(), (f32)args[5].AsNumber(), (f32)args[6].AsNumber());
+    const f32 maxDist = (f32)args[7].AsNumber();
+    if (!std::isfinite(maxDist) || maxDist <= 0) {
+      ctx.RaiseError("entity.trace_line: distance must be positive");
+      return ScriptValue::Nil();
+    }
+    if (dir.Length() < 1e-6f) {
+      ctx.RaiseError("entity.trace_line: direction must be non-zero");
+      return ScriptValue::Nil();
+    }
+    dir = dir.Normalized();
+    const Aabb box = EntityHitbox(s);
+    f32 dist = 0;
+    const bool hit = RayHitsAabb(origin, dir, box, maxDist, &dist);
+    ScriptTable t;
+    t["hit"] = ScriptValue::Bool(hit);
+    t["distance"] = ScriptValue::Num(hit ? (f64)dist : -1.0);
+    if (hit) {
+      const Vec3 p = origin + dir * dist;
+      t["x"] = ScriptValue::Num((f64)p.x);
+      t["y"] = ScriptValue::Num((f64)p.y);
+      t["z"] = ScriptValue::Num((f64)p.z);
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
   //--- Network (granted, host-scoped) --------------------------------------
   // Both calls go through the async layer's egress path, so the grant is
   // checked here and on every redirect hop. They return an HttpResult table
@@ -840,6 +1633,128 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     const f64 timeout = args[2].AsNumber();
     return HttpRequestBlocking(ctx, "POST", url, body, (long)timeout,
                                services_.networkPolicy);
+  });
+
+  //--- Ws (script-facing WebSocket client) ---------------------------------
+  //
+  // The pool owns the sockets and applies the same egress gate the HTTP path
+  // uses, so a WebSocket cannot become a way around the SSRF rules. The
+  // connect/send/pump calls run on the script worker, where blocking IO is
+  // expected.
+  install("ws.connect", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.connect: websocket pool unavailable"); return ScriptValue::Num(0); }
+    const std::string url = args[0].ToDisplay();
+    const f64 timeout = args[1].AsNumber();
+    int t = 8000;
+    if (std::isfinite(timeout)) t = (int)timeout;
+    if (t < 1000) t = 1000;
+    if (t > 60000) t = 60000;
+    WsClientError err = WsClientError::Ok;
+    const u64 h = services_.wsPool->Connect(url, ctx.granted(), services_.networkPolicy,
+                                            t, &err);
+    if (h == 0) {
+      ctx.RaiseError(std::string("ws.connect: ") + WsClientErrorName(err) +
+                     " (" + url + ")");
+      return ScriptValue::Num(0);
+    }
+    return ScriptValue::Num((f64)h);
+  });
+
+  install("ws.send_text", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.send_text: websocket pool unavailable"); return ScriptValue::Bool(false); }
+    const u64 handle = (u64)args[0].AsNumber();
+    WsClientError err = WsClientError::Ok;
+    const bool ok = services_.wsPool->SendText(handle, args[1].ToDisplay(), &err);
+    if (!ok) ctx.RaiseError(std::string("ws.send_text: ") + WsClientErrorName(err));
+    return ScriptValue::Bool(ok);
+  });
+
+  install("ws.send_binary", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.send_binary: websocket pool unavailable"); return ScriptValue::Bool(false); }
+    const u64 handle = (u64)args[0].AsNumber();
+    const std::string data = args[1].ToDisplay();
+    WsClientError err = WsClientError::Ok;
+    const bool ok = services_.wsPool->SendBinary(handle, data.data(), data.size(), &err);
+    if (!ok) ctx.RaiseError(std::string("ws.send_binary: ") + WsClientErrorName(err));
+    return ScriptValue::Bool(ok);
+  });
+
+  install("ws.pump", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.pump: websocket pool unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.wsPool->Pump());
+  });
+
+  install("ws.poll", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.poll: websocket pool unavailable"); return ScriptValue::Nil(); }
+    const u64 handle = (u64)args[0].AsNumber();
+    WsClientMessage m;
+    const bool got = services_.wsPool->Poll(handle, &m);
+    ScriptTable t;
+    t["ok"] = ScriptValue::Bool(got);
+    t["opcode"] = ScriptValue::Str(got ? m.opcode : std::string());
+    t["data"] = ScriptValue::Str(got ? m.data : std::string());
+    t["binary"] = ScriptValue::Bool(got && m.binary);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("ws.pending", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.pending: websocket pool unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.wsPool->Pending((u64)args[0].AsNumber()));
+  });
+
+  install("ws.is_open", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.is_open: websocket pool unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.wsPool->IsOpen((u64)args[0].AsNumber()));
+  });
+
+  install("ws.close", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.close: websocket pool unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.wsPool->Close((u64)args[0].AsNumber()));
+  });
+
+  install("ws.count", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.count: websocket pool unavailable"); return ScriptValue::Num(0); }
+    return ScriptValue::Num((f64)services_.wsPool->Count());
+  });
+
+  install("ws.url", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.wsPool) { ctx.RaiseError("ws.url: websocket pool unavailable"); return ScriptValue::Str(""); }
+    return ScriptValue::Str(services_.wsPool->Url((u64)args[0].AsNumber()));
+  });
+
+  //--- JsonRpc (JSON-RPC 2.0 client) ---------------------------------------
+  install("json_rpc.call", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    const std::string url = args[0].ToDisplay();
+    const std::string method = args[1].ToDisplay();
+    const std::string params = args[2].ToDisplay();
+    const f64 timeout = args[3].AsNumber();
+    const JsonRpcOutcome out =
+        JsonRpcCallBlocking(ctx, url, method, params, (long)timeout,
+                            services_.networkPolicy);
+    ScriptTable t;
+    t["ok"] = ScriptValue::Bool(out.ok);
+    t["status"] = ScriptValue::Num((f64)out.http_status);
+    t["error_code"] = ScriptValue::Num((f64)out.error_code);
+    t["error_message"] = ScriptValue::Str(
+        out.ok ? std::string()
+               : (out.error_message.empty() ? out.transport_error : out.error_message));
+    if (out.ok) {
+      // Decode the result JSON into a table so a script reads fields directly.
+      std::string derr;
+      ScriptValue result = JsonTextToScriptValue(out.result_json, &derr);
+      if (!derr.empty()) {
+        // The envelope validated, so this should not happen; fail closed rather
+        // than hand back a value the script would trust.
+        t["ok"] = ScriptValue::Bool(false);
+        t["error_message"] = ScriptValue::Str("json_rpc.call: result decode failed");
+        t["result"] = ScriptValue::Nil();
+      } else {
+        t["result"] = std::move(result);
+      }
+    } else {
+      t["result"] = ScriptValue::Nil();
+    }
+    return ScriptValue::Tbl(std::move(t));
   });
 
   //--- HUD (retained-mode widgets) -----------------------------------------
@@ -1017,6 +1932,37 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     if (!services_.profiler) { ctx.RaiseError("perf.flame_reset: profiler unavailable"); return ScriptValue::Nil(); }
     services_.profiler->FlameReset();
     return ScriptValue::Nil();
+  });
+
+  //--- Render pipeline (cull/LOD/resolution accounting) --------------------
+  //
+  // Read-only: the pipeline is driven by the governor and the frame hook, not
+  // by a script. A script reads the counters to see what the frame cost and how
+  // much the culler dropped.
+  install("perf.pipeline", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.renderer) { ctx.RaiseError("perf.pipeline: renderer unavailable"); return ScriptValue::Nil(); }
+    const PipelineStats st = services_.renderer->pipelineStats();
+    ScriptTable out;
+    out["frames"] = ScriptValue::Num((f64)st.frames);
+    out["entities_submitted"] = ScriptValue::Num((f64)st.entitiesSubmitted);
+    out["entities_drawn"] = ScriptValue::Num((f64)st.entitiesDrawn);
+    out["entities_culled"] = ScriptValue::Num((f64)st.entitiesCulled);
+    out["entities_lod_reduced"] = ScriptValue::Num((f64)st.entitiesLodReduced);
+    out["batches"] = ScriptValue::Num((f64)st.batches);
+    out["draw_calls"] = ScriptValue::Num((f64)st.drawCalls);
+    out["vertices"] = ScriptValue::Num((f64)st.vertices);
+    out["resolution_scale"] = ScriptValue::Num((f64)st.resolutionScale);
+    return ScriptValue::Tbl(std::move(out));
+  });
+
+  install("perf.lod_tier", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.renderer) { ctx.RaiseError("perf.lod_tier: renderer unavailable"); return ScriptValue::Str(""); }
+    const f64 distance = args[0].AsNumber();
+    if (!std::isfinite(distance) || distance < 0) {
+      ctx.RaiseError("perf.lod_tier: distance must be a non-negative number");
+      return ScriptValue::Str("");
+    }
+    return ScriptValue::Str(LodTierName(services_.renderer->LodFor((f32)distance)));
   });
 
   //--- Input (local, already-visible state) --------------------------------
@@ -2087,6 +3033,15 @@ void ScriptApi::PublishFrame(f32 frameMs, const Vec2& screen) {
   screenW_.store(screen.x);
   screenH_.store(screen.y);
   if (services_.governor) services_.governor->OnFrame(frameMs);
+  // The render pipeline follows the governor: adopt the settings the governor
+  // just settled on and feed it the frame time, so culling, LOD and dynamic
+  // resolution all track the quality level rather than running wide open.
+  if (services_.renderer) {
+    if (services_.governor) {
+      services_.renderer->SetRenderSettings(services_.governor->settings());
+    }
+    services_.renderer->OnFrameTime(frameMs);
+  }
   if (services_.hud) services_.hud->Update(frameMs);
 }
 
@@ -2133,6 +3088,56 @@ void ScriptApi::InitCombatCache() {
         std::lock_guard<std::mutex> lk(combatMutex_);
         observed_.push_back(ObservedHit{evt->tick, dmg});
         while (observed_.size() > kMaxObserved) observed_.pop_front();
+        return EventResult::Continue;
+      });
+}
+
+void ScriptApi::InitCombatStateHook() {
+  // The tracker is a client-side service, not a strict module, so the bridge
+  // feeds it from the same events everything else sees:
+  //
+  //   berry:tick    -> record the current tick's hitboxes and age predictions
+  //   berry:combat  -> validate reach, confirm a predicted hit, record a swing
+  //
+  // Both run on the game-tick thread and read only seam data / event payloads,
+  // never game memory. When the service is not wired the hook is a no-op.
+  tickListener_ = EventBus::Instance().On(
+      "berry:tick", [this](const EventContext& e) {
+        if (!services_.combatState) return EventResult::Continue;
+        const GameTick* t = static_cast<const GameTick*>(e.data);
+        if (!t) return EventResult::Continue;
+        const u64 tick = (u64)*t;
+        // Snapshot every entity the world already knows about, so the reach
+        // check has a box to measure against. This is the same cache the World
+        // module refreshes; nothing new is read from the engine.
+        if (services_.world) {
+          auto seam = services_.world->Seam();
+          if (seam) {
+            for (const EntityId& id : seam->AllEntities()) {
+              EntitySnapshot snap;
+              if (seam->GetEntity(id, &snap)) {
+                services_.combatState->ObserveEntity(snap, tick);
+              }
+            }
+          }
+        }
+        // Age pending hit predictions: anything past the window becomes a miss.
+        services_.combatState->Tick(tick);
+        return EventResult::Continue;
+      });
+
+  combatStateListener_ = EventBus::Instance().On(
+      "berry:combat", [this](const EventContext& e) {
+        if (!services_.combatState) return EventResult::Continue;
+        const CombatEvent* evt = static_cast<const CombatEvent*>(e.data);
+        if (!evt) return EventResult::Continue;
+        // Reach validation, swing timing and hit confirmation, all from the one
+        // applied-hit observation. The tracker is read-only: it never changes
+        // the event or the damage. `ConfirmHit` publishes the confirmed event,
+        // so it runs outside `ObserveHit`'s lock.
+        services_.combatState->ObserveHit(*evt, evt->tick);
+        services_.combatState->ConfirmHit(*evt, evt->tick);
+        services_.combatState->ObserveSwing(evt->attacker, evt->tick);
         return EventResult::Continue;
       });
 }

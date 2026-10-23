@@ -16,6 +16,59 @@ export type Combat = {
   observe: (ticks: number) -> number,
 }
 
+-- Capability required: combat.
+export type CombatState = {
+  -- The configured maximum legitimate reach, in blocks.
+  max_reach: () -> number,
+  -- Sets the reach limit. Must be a finite positive number; a bad value is refused and leaves the limit unchanged.
+  set_max_reach: (blocks: number) -> boolean,
+  -- The most recent reach check as {valid, distance, max_reach, within_reach, tick, attacker, victim}.
+  last_reach: () -> {[string]: any},
+  -- How many applied hits so far were beyond the reach limit.
+  reach_violations: () -> number,
+  -- How many hitbox samples are recorded for an entity.
+  hitbox_count: (id: number) -> number,
+  -- The ticks an entity has recorded hitbox samples for, oldest first, as a table keyed \"0\",\"1\",….
+  hitbox_ticks: (id: number) -> {[string]: any},
+  -- The entity's recorded hitbox at an exact tick as {valid, min_x, min_y, min_z, max_x, max_y, max_z}. `valid` is false when there is no sample for that tick.
+  hitbox_at: (id: number, tick: number) -> {[string]: any},
+  -- Records a swing by an entity at a tick, returning {valid, delta_ticks, cps, tick}. `valid` is false for the first swing, which has no interval yet.
+  swing: (id: number, tick: number) -> {[string]: any},
+  -- The most recent swing sample, same shape as `swing`.
+  last_swing: () -> {[string]: any},
+  -- Average swings per second for an entity across the retained window, 0 when there is not enough data.
+  average_swing_cps: (id: number) -> number,
+  -- Extrapolates a projectile forward `ticks` ticks from a position and velocity under `gravity` (blocks/s^2, e.g. -20), returning a Vec3. Pure: it reads no state.
+  predict_projectile: (x: number, y: number, z: number, vx: number, vy: number, vz: number, gravity: number, ticks: number) -> Vec3,
+  -- Records a projectile prediction for an id at a tick, so `resolve_projectile` can score it.
+  note_projectile: (id: number, x: number, y: number, z: number, tick: number) -> (),
+  -- Scores the pending prediction for an id against an actual position, returning the error in blocks, or -1 when there was no pending prediction.
+  resolve_projectile: (id: number, x: number, y: number, z: number, tick: number) -> number,
+  -- Mean error, in blocks, across the retained projectile predictions, or -1 when none have been scored.
+  prediction_error: () -> number,
+  -- How many projectile predictions have been scored.
+  prediction_count: () -> number,
+  -- Records a predicted hit (attacker, victim) at a tick, so a later applied hit can confirm it.
+  predict_hit: (attacker: number, victim: number, tick: number) -> (),
+  -- Confirmed hits divided by predicted hits, 0 when nothing has been predicted.
+  hit_accuracy: () -> number,
+  predicted_hits: () -> number,
+  confirmed_hits: () -> number,
+  missed_hits: () -> number,
+  -- Feeds one click into a button's budget (\"left\" or \"right\"). Returns true when the click is within budget. It only reports; the click is never blocked or dropped.
+  note_click: (button: string, now_ms: number) -> boolean,
+  -- Rolling clicks per second for a button over the last second.
+  click_rate: (button: string) -> number,
+  -- True when the most recent `note_click` was over budget.
+  click_limited: () -> boolean,
+  -- Tokens left in a button's bucket.
+  click_tokens: (button: string) -> number,
+  -- Sets the click budget: `per_second` sustained clicks with a `burst` allowance. Both must be finite and positive and the burst at least 1; a bad value is refused.
+  set_click_budget: (per_second: number, burst: number) -> boolean,
+  -- Drops all recorded combat state (history, swings, predictions, counters, click buckets).
+  clear: () -> (),
+}
+
 -- Capability required: world.
 export type Player = {
   -- Read-only view of the LOCAL player. This is the client's own state, which it already holds; nothing here reveals another player. Reads fail closed when the local player is not bound.
@@ -26,11 +79,37 @@ export type Player = {
   max_health: () -> number,
   alive: () -> boolean,
   name: () -> string,
+  -- Food level, 0..20. -1 when the local player is not bound.
+  hunger: () -> number,
+  -- The hidden saturation value. -1 when the local player is not bound.
+  saturation: () -> number,
+  -- Total armour points, 0..20.
+  armor: () -> number,
+  -- The gamemode as a name: \"survival\", \"creative\", \"adventure\", \"spectator\" or \"unknown\".
+  gamemode: () -> string,
+  -- The dimension as a name: \"overworld\", \"nether\", \"end\" or \"unknown\".
+  dimension: () -> string,
+  -- The experience level.
+  xp_level: () -> number,
+  -- Progress toward the next level, 0..1.
+  xp_progress: () -> number,
+  -- Remaining breath in ticks (300 = full).
+  air: () -> number,
+  -- True while the local player is on fire.
+  on_fire: () -> boolean,
+  -- True while the local player is sneaking.
+  sneaking: () -> boolean,
+  -- True while the local player is sprinting.
+  sprinting: () -> boolean,
+  -- Active status effects as a table keyed \"0\",\"1\",…, each {name, amplifier, seconds, ambient}. Empty when none or the local player is unbound.
+  effects: () -> {[string]: any},
+  -- The whole local-player state as one table: {hunger, saturation, armor, gamemode, dimension, xp_level, xp_progress, air, on_fire, sneaking, sprinting, effects}. Raises and returns nil when the local player is not bound.
+  state: () -> {[string]: any},
 }
 
 -- Capability required: render.
 export type Render = {
-  -- Client-side drawing. Everything here is local to this screen.
+  -- Client-side drawing. Everything here is local to this screen. The 2D helpers take pixels; the 3D helpers take world coordinates and project through the current camera, so a script can draw an ESP-style overlay without knowing the projection matrix. Clipping is a nested scissor stack: `push_clip_rect` narrows the active clip (a child can only shrink its parent) and `pop_clip_rect` restores it. Rectangles and lines are clipped exactly; text and circles are kept while any part of them intersects the clip and dropped only when they fall entirely outside.
   draw_text: (x: number, y: number, text: string, color: Rgba) -> (),
   draw_text_centered: (x: number, y: number, text: string, color: Rgba) -> (),
   draw_rect: (x: number, y: number, w: number, h: number, color: Rgba) -> (),
@@ -38,20 +117,50 @@ export type Render = {
   draw_circle: (x: number, y: number, radius: number, color: Rgba) -> (),
   screen_size: () -> Vec3,
   set_zoom: (factor: number) -> (),
+  -- Projects a world point to pixels through the current camera. Returns {visible, x, y, distance}: `visible` is false when the point is behind the camera or no camera is set, so a caller checks it before drawing. `distance` is the world distance from the camera eye.
+  world_to_screen: (x: number, y: number, z: number) -> {[string]: any},
+  -- Draws a world-space line. Clipped against the active clip rectangle; dropped when an endpoint is behind the camera.
+  draw_3d_line: (x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, color: Rgba) -> (),
+  -- Draws the 12 edges of an axis-aligned world box from (min) to (max).
+  draw_3d_box: (min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number, color: Rgba) -> (),
+  -- Draws text anchored at a world position. Nothing is drawn when the point is behind the camera or outside the active clip.
+  draw_3d_text: (x: number, y: number, z: number, text: string, color: Rgba) -> (),
+  -- Pushes a clip rectangle, intersected with the current top so a child clip can only narrow its parent. Bounded to 32 levels; a push past the cap is ignored rather than growing the stack.
+  push_clip_rect: (x: number, y: number, w: number, h: number) -> (),
+  -- Pops the innermost clip rectangle. An unmatched pop is a no-op.
+  pop_clip_rect: () -> (),
+  -- The active clip rectangle as {active, x, y, w, h}; `active` is false when no clip is pushed.
+  clip_rect: () -> {[string]: any},
+  -- The camera the renderer last drew with, as {valid, x, y, z, yaw, pitch}. `valid` is false until a camera is bound.
+  camera: () -> {[string]: any},
 }
 
 -- Capability required: world.
 export type World = {
-  -- Read-only world queries. The core never hands out raw pointers. `entities_within` returns a table keyed \"0\",\"1\",… each an entity table (id, type, x, y, z, health, alive, distance), sorted by id so the order is stable across ticks; a `type` of \"\" or \"any\" matches every type, and an unknown type name is refused rather than matching everything. The raycast helpers cast from the local player's eye along its look direction and return {hit, x, y, z, block, id, distance}.
+  -- Read-only world queries. The core never hands out raw pointers. `entities_within` returns a table keyed \"0\",\"1\",… each an entity table (id, type, x, y, z, health, alive, distance), sorted by id so the order is stable across ticks; a `type` of \"\" or \"any\" matches every type, and an unknown type name is refused rather than matching everything. The raycast helpers cast from the local player's eye along its look direction and return {hit, x, y, z, block, id, distance}. The biome/light/chunk reads take a block coordinate and fail closed (\"\", -1, \"unloaded\") when the seam has no answer.
   query: (within: number) -> number,
   entity_count: () -> number,
-  block_at: (x: number, y: number, z: number) -> string,
+  block_at: (x: number, y: number, z: number) -> number,
   time: () -> {[string]: any},
   is_day: () -> boolean,
   is_raining: () -> boolean,
   entities_within: (within: number, type: string) -> {[string]: any},
   raycast_block: (max_dist: number) -> {[string]: any},
   raycast_entity: (max_dist: number) -> {[string]: any},
+  -- Every entity whose AABB overlaps the axis-aligned box from (min_x,min_y,min_z) to (max_x,max_y,max_z), as a table keyed \"0\",\"1\",… each an entity table. `type` filters as in `entities_within`. A box whose min exceeds its max is refused.
+  entities_in_aabb: (min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number, type: string) -> {[string]: any},
+  -- Every entity within `radius` of a point, as a table keyed \"0\",\"1\",… each an entity table. `type` filters as in `entities_within`.
+  entities_in_radius: (x: number, y: number, z: number, radius: number, type: string) -> {[string]: any},
+  -- Casts a ray from an arbitrary origin along a direction (not the local player's look), returning {hit, x, y, z, block, id, distance}. `dir_x`/`dir_y`/`dir_z` need not be normalized; a zero-length direction is refused. `target` is \"block\", \"entity\" or \"any\".
+  raycast: (origin_x: number, origin_y: number, origin_z: number, dir_x: number, dir_y: number, dir_z: number, max_dist: number, target: string) -> {[string]: any},
+  -- The biome name at a block coordinate, or \"\" when the seam has no answer.
+  get_biome: (x: number, y: number, z: number) -> string,
+  -- The light level (0..15) at a block coordinate, or -1 when the seam has no answer.
+  get_light: (x: number, y: number, z: number) -> number,
+  -- The load state of the chunk containing a block coordinate: \"unloaded\", \"loaded\" or \"rendered\".
+  get_chunk_state: (x: number, y: number, z: number) -> string,
+  -- The numeric block id at integer coordinates (0 = air). Alias of `block_at`, spelled to make the numeric return obvious.
+  block_id_at: (x: number, y: number, z: number) -> number,
 }
 
 -- Capability required: world.
@@ -66,6 +175,10 @@ export type Entity = {
   distance_to: (id: number) -> number,
   -- The raw id of the nearest alive entity of `type` to the local player, or 0 when none is in range. An unknown type name is refused (fails closed) rather than returning an arbitrary entity.
   nearest: (type: string) -> number,
+  -- The entity's axis-aligned bounding box as {valid, min_x, min_y, min_z, max_x, max_y, max_z}. `valid` is false when the entity is not present. The box is derived from the entity's position and type (a fixed per-type size), never from engine memory.
+  get_hitbox: (id: number) -> {[string]: any},
+  -- Casts a ray from (origin_x,origin_y,origin_z) along a direction and reports whether it reaches this entity's hitbox: {hit, distance, x, y, z}. A zero-length direction or a non-positive max distance is refused.
+  trace_line: (id: number, origin_x: number, origin_y: number, origin_z: number, dir_x: number, dir_y: number, dir_z: number, max_dist: number) -> {[string]: any},
 }
 
 -- Capability required: fileio.
@@ -173,6 +286,30 @@ export type Network = {
   post: (url: string, body: string, timeout_ms: number) -> HttpResult,
 }
 
+-- Capability required: network.
+export type Ws = {
+  -- WebSocket client. Requires a network grant scoped to the host, and the same egress policy `network.get` uses: a ws:// URL to a private or reserved host is refused, and wss:// fails closed because TLS is not implemented. A connection is addressed by an integer handle; the frames a peer sends are buffered in order and read with `ws.poll` after `ws.pump`. Every call runs on the script worker (blocking reads are expected there). `ws.connect` returns 0 and raises on a refused destination or a failed handshake. `ws.poll` returns {ok, opcode, data, binary}; `ok` is false when the inbox is empty.
+  connect: (url: string, timeout_ms: number) -> number,
+  send_text: (handle: number, text: string) -> boolean,
+  send_binary: (handle: number, data: string) -> boolean,
+  -- Reads any pending frames for every open handle into their inboxes. Returns how many frames were read.
+  pump: () -> number,
+  -- Pops the oldest buffered frame for `handle`. `ok` is false when the inbox is empty or the handle is unknown.
+  poll: (handle: number) -> {[string]: any},
+  pending: (handle: number) -> number,
+  is_open: (handle: number) -> boolean,
+  close: (handle: number) -> boolean,
+  count: () -> number,
+  -- The URL a handle was opened with, or \"\" when the handle is unknown.
+  url: (handle: number) -> string,
+}
+
+-- Capability required: network.
+export type JsonRpc = {
+  -- JSON-RPC 2.0 client. Issues one call over the same egress-checked HTTP path as `network.post`, so the destination rules are identical. The response is validated as JSON-RPC 2.0 and its id must match before the result is trusted. `call` returns {ok, result, error_code, error_message, status}: `result` is a structured table decoded from the reply's `result` member, and a transport failure (bad URL, refused destination, HTTP status, malformed envelope) comes back with `ok` false and `error_message` set, so a script branches on the outcome rather than unwinding. `params_json` is raw JSON (an object or array); an empty string omits `params`.
+  call: (url: string, method: string, params_json: string, timeout_ms: number) -> {[string]: any},
+}
+
 -- Capability required: hud.
 export type Hud = {
   -- Retained-mode HUD widget tree.
@@ -199,6 +336,10 @@ export type Perf = {
   spans: () -> {[string]: any},
   -- Drops the flame tree, the span stats and the per-frame ring, starting the profiler over.
   flame_reset: () -> (),
+  -- The render pipeline's frame counters as {frames, entities_submitted, entities_drawn, entities_culled, entities_lod_reduced, batches, draw_calls, vertices, resolution_scale}. `draw_calls` counts the two coalesced calls (triangles + lines) a frame issues, so it stays flat however many primitives a script queued; `resolution_scale` is the factor the dynamic-resolution controller settled on (1.0 is native).
+  pipeline: () -> {[string]: any},
+  -- The level-of-detail tier an entity `distance` blocks from the camera would be drawn at: \"full\", \"reduced\", \"static\" or \"culled\". Follows the same policy the renderer culls with, so a script can predict whether its overlay will be given geometry.
+  lod_tier: (distance: number) -> string,
 }
 
 -- Capability required: input.

@@ -1,5 +1,6 @@
 #include "berry/combat.h"
 #include "berry/logger.h"
+#include "berry/world_query.h"
 #include <chrono>
 #include <algorithm>
 #include <cmath>
@@ -38,6 +39,8 @@ CombatOutcome Combat::Observe(const CombatEvent& evt) {
   if (onApplied_) onApplied_(evt);
   RecordHit(evt.attacker, evt.finalDamage > 0 ? evt.finalDamage : evt.baseDamage);
   EventBus::Instance().Emit("berry:combat", const_cast<CombatEvent*>(&evt));
+  // Bridge to the script-visible lifecycle event: `Events.once("entityHurt")`.
+  PublishCombatToEvents(evt);
   return CombatOutcome::Observed;
 }
 

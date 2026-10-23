@@ -66,6 +66,15 @@ CAPABILITY_ENUM = {
     "packets": "CapKind::Packets",
 }
 
+# Modules whose binding prefix is not simply the lower-cased module name. The
+# binding name is a public contract (a script calls `json_rpc.call`), so the
+# spelling is pinned here rather than derived. Every other module uses its
+# lower-cased name.
+MODULE_BINDING_PREFIX = {
+    "JsonRpc": "json_rpc",
+    "CombatState": "combat_state",
+}
+
 
 class Param:
     def __init__(self, name, typ):
@@ -94,7 +103,8 @@ class Function:
     @property
     def binding(self):
         """Canonical binding name, e.g. combat.recent_kills."""
-        return "%s.%s" % (self.module.lower(), self.name)
+        return "%s.%s" % (
+            MODULE_BINDING_PREFIX.get(self.module, self.module.lower()), self.name)
 
 
 class Event:
@@ -116,6 +126,11 @@ class Module:
         self.doc = ""
         self.functions = []
         self.events = []
+
+    @property
+    def prefix(self):
+        """The binding prefix for this module's functions."""
+        return MODULE_BINDING_PREFIX.get(self.name, self.name.lower())
 
 
 def _split_types(text):

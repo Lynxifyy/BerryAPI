@@ -32,6 +32,7 @@
 #include "berry/types.h"
 #include "berry/audio.h"
 #include "berry/combat.h"
+#include "berry/combat_state.h"
 #include "berry/cosmetic.h"
 #include "berry/event.h"
 #include "berry/fs.h"
@@ -50,6 +51,7 @@
 #include "berry/shader.h"
 #include "berry/services.h"
 #include "berry/url.h"
+#include "berry/ws_client.h"
 
 #include <atomic>
 #include <deque>
@@ -163,6 +165,13 @@ class BERRY_API ScriptApi {
     SessionRecorder* recorder = nullptr;
     /// Egress policy for `network.get`. The harness relaxes it for loopback.
     UrlPolicy networkPolicy;
+    /// Script-facing WebSocket pool. Null makes the `ws.*` bindings fail closed
+    /// ("websocket pool unavailable").
+    WsClientPool* wsPool = nullptr;
+    /// Local combat-state telemetry (reach, swing timing, hitbox history,
+    /// projectile prediction, hit accuracy, click budget). Null makes the
+    /// `combat_state.*` bindings fail closed.
+    CombatStateTracker* combatState = nullptr;
   };
 
   ScriptApi();
@@ -222,6 +231,7 @@ class BERRY_API ScriptApi {
   /// to `berry:combat` to keep the read-only combat telemetry current.
   void InitHooks();
   void InitCombatCache();
+  void InitCombatStateHook();
   void InitFrameHook();
   void RemoveHooks();
 
@@ -261,6 +271,8 @@ class BERRY_API ScriptApi {
 
   EventBus::ListenerId frameListener_ = 0;
   EventBus::ListenerId combatListener_ = 0;
+  EventBus::ListenerId tickListener_ = 0;
+  EventBus::ListenerId combatStateListener_ = 0;
   /// The wall-clock ms of the last presented frame, for the PvP overlay's
   /// animation delta. Render thread only.
   u64 lastFrameMs_ = 0;

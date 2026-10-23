@@ -9,6 +9,7 @@ cache/
 build/
 *.o
 *.so
+*.d
 
 # Build output
 dist/

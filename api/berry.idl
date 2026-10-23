@@ -28,6 +28,60 @@ module Combat {
   fn observe(ticks: number) -> number
 }
 
+module CombatState {
+  capability combat
+  doc "Local combat-state telemetry (CSHR): reach validation, swing timing, hitbox history, projectile prediction, hit-prediction accuracy and a click-budget read-out. Every value is derived from data the client already has — hits the engine already applied, entity snapshots the level seam already delivered, and the local player's own clicks. Nothing here is sent, nothing writes game state, and nothing reveals another player beyond what a fight already shows: there is no reach extension, no aim assist and no packet injection. `hitbox_at`/`last_reach` return {valid, ...} and `last_reach` also carries {distance, max_reach, within_reach, tick, attacker, victim}; a check whose positions are unknown reports valid=false rather than a guessed distance."
+  doc "The configured maximum legitimate reach, in blocks."
+  fn max_reach() -> number
+  doc "Sets the reach limit. Must be a finite positive number; a bad value is refused and leaves the limit unchanged."
+  fn set_max_reach(blocks: number) -> bool
+  doc "The most recent reach check as {valid, distance, max_reach, within_reach, tick, attacker, victim}."
+  fn last_reach() -> Table
+  doc "How many applied hits so far were beyond the reach limit."
+  fn reach_violations() -> number
+  doc "How many hitbox samples are recorded for an entity."
+  fn hitbox_count(id: number) -> number
+  doc "The ticks an entity has recorded hitbox samples for, oldest first, as a table keyed \"0\",\"1\",…."
+  fn hitbox_ticks(id: number) -> Table
+  doc "The entity's recorded hitbox at an exact tick as {valid, min_x, min_y, min_z, max_x, max_y, max_z}. `valid` is false when there is no sample for that tick."
+  fn hitbox_at(id: number, tick: number) -> Table
+  doc "Records a swing by an entity at a tick, returning {valid, delta_ticks, cps, tick}. `valid` is false for the first swing, which has no interval yet."
+  fn swing(id: number, tick: number) -> Table
+  doc "The most recent swing sample, same shape as `swing`."
+  fn last_swing() -> Table
+  doc "Average swings per second for an entity across the retained window, 0 when there is not enough data."
+  fn average_swing_cps(id: number) -> number
+  doc "Extrapolates a projectile forward `ticks` ticks from a position and velocity under `gravity` (blocks/s^2, e.g. -20), returning a Vec3. Pure: it reads no state."
+  fn predict_projectile(x: number, y: number, z: number, vx: number, vy: number, vz: number, gravity: number, ticks: number) -> Vec3
+  doc "Records a projectile prediction for an id at a tick, so `resolve_projectile` can score it."
+  fn note_projectile(id: number, x: number, y: number, z: number, tick: number) -> nil
+  doc "Scores the pending prediction for an id against an actual position, returning the error in blocks, or -1 when there was no pending prediction."
+  fn resolve_projectile(id: number, x: number, y: number, z: number, tick: number) -> number
+  doc "Mean error, in blocks, across the retained projectile predictions, or -1 when none have been scored."
+  fn prediction_error() -> number
+  doc "How many projectile predictions have been scored."
+  fn prediction_count() -> number
+  doc "Records a predicted hit (attacker, victim) at a tick, so a later applied hit can confirm it."
+  fn predict_hit(attacker: number, victim: number, tick: number) -> nil
+  doc "Confirmed hits divided by predicted hits, 0 when nothing has been predicted."
+  fn hit_accuracy() -> number
+  fn predicted_hits() -> number
+  fn confirmed_hits() -> number
+  fn missed_hits() -> number
+  doc "Feeds one click into a button's budget (\"left\" or \"right\"). Returns true when the click is within budget. It only reports; the click is never blocked or dropped."
+  fn note_click(button: string, now_ms: number) -> bool
+  doc "Rolling clicks per second for a button over the last second."
+  fn click_rate(button: string) -> number
+  doc "True when the most recent `note_click` was over budget."
+  fn click_limited() -> bool
+  doc "Tokens left in a button's bucket."
+  fn click_tokens(button: string) -> number
+  doc "Sets the click budget: `per_second` sustained clicks with a `burst` allowance. Both must be finite and positive and the burst at least 1; a bad value is refused."
+  fn set_click_budget(per_second: number, burst: number) -> bool
+  doc "Drops all recorded combat state (history, swings, predictions, counters, click buckets)."
+  fn clear() -> nil
+}
+
 module Player {
   capability world
   doc "Read-only view of the LOCAL player. This is the client's own state, which it already holds; nothing here reveals another player. Reads fail closed when the local player is not bound."
@@ -38,11 +92,37 @@ module Player {
   fn max_health() -> number
   fn alive() -> bool
   fn name() -> string
+  doc "Food level, 0..20. -1 when the local player is not bound."
+  fn hunger() -> number
+  doc "The hidden saturation value. -1 when the local player is not bound."
+  fn saturation() -> number
+  doc "Total armour points, 0..20."
+  fn armor() -> number
+  doc "The gamemode as a name: \"survival\", \"creative\", \"adventure\", \"spectator\" or \"unknown\"."
+  fn gamemode() -> string
+  doc "The dimension as a name: \"overworld\", \"nether\", \"end\" or \"unknown\"."
+  fn dimension() -> string
+  doc "The experience level."
+  fn xp_level() -> number
+  doc "Progress toward the next level, 0..1."
+  fn xp_progress() -> number
+  doc "Remaining breath in ticks (300 = full)."
+  fn air() -> number
+  doc "True while the local player is on fire."
+  fn on_fire() -> bool
+  doc "True while the local player is sneaking."
+  fn sneaking() -> bool
+  doc "True while the local player is sprinting."
+  fn sprinting() -> bool
+  doc "Active status effects as a table keyed \"0\",\"1\",…, each {name, amplifier, seconds, ambient}. Empty when none or the local player is unbound."
+  fn effects() -> Table
+  doc "The whole local-player state as one table: {hunger, saturation, armor, gamemode, dimension, xp_level, xp_progress, air, on_fire, sneaking, sprinting, effects}. Raises and returns nil when the local player is not bound."
+  fn state() -> Table
 }
 
 module Render {
   capability render
-  doc "Client-side drawing. Everything here is local to this screen."
+  doc "Client-side drawing. Everything here is local to this screen. The 2D helpers take pixels; the 3D helpers take world coordinates and project through the current camera, so a script can draw an ESP-style overlay without knowing the projection matrix. Clipping is a nested scissor stack: `push_clip_rect` narrows the active clip (a child can only shrink its parent) and `pop_clip_rect` restores it. Rectangles and lines are clipped exactly; text and circles are kept while any part of them intersects the clip and dropped only when they fall entirely outside."
   fn draw_text(x: number, y: number, text: string, color: Rgba) -> nil
   fn draw_text_centered(x: number, y: number, text: string, color: Rgba) -> nil
   fn draw_rect(x: number, y: number, w: number, h: number, color: Rgba) -> nil
@@ -50,20 +130,50 @@ module Render {
   fn draw_circle(x: number, y: number, radius: number, color: Rgba) -> nil
   fn screen_size() -> Vec3
   fn set_zoom(factor: number) -> nil
+  doc "Projects a world point to pixels through the current camera. Returns {visible, x, y, distance}: `visible` is false when the point is behind the camera or no camera is set, so a caller checks it before drawing. `distance` is the world distance from the camera eye."
+  fn world_to_screen(x: number, y: number, z: number) -> Table
+  doc "Draws a world-space line. Clipped against the active clip rectangle; dropped when an endpoint is behind the camera."
+  fn draw_3d_line(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, color: Rgba) -> nil
+  doc "Draws the 12 edges of an axis-aligned world box from (min) to (max)."
+  fn draw_3d_box(min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number, color: Rgba) -> nil
+  doc "Draws text anchored at a world position. Nothing is drawn when the point is behind the camera or outside the active clip."
+  fn draw_3d_text(x: number, y: number, z: number, text: string, color: Rgba) -> nil
+  doc "Pushes a clip rectangle, intersected with the current top so a child clip can only narrow its parent. Bounded to 32 levels; a push past the cap is ignored rather than growing the stack."
+  fn push_clip_rect(x: number, y: number, w: number, h: number) -> nil
+  doc "Pops the innermost clip rectangle. An unmatched pop is a no-op."
+  fn pop_clip_rect() -> nil
+  doc "The active clip rectangle as {active, x, y, w, h}; `active` is false when no clip is pushed."
+  fn clip_rect() -> Table
+  doc "The camera the renderer last drew with, as {valid, x, y, z, yaw, pitch}. `valid` is false until a camera is bound."
+  fn camera() -> Table
 }
 
 module World {
   capability world
-  doc "Read-only world queries. The core never hands out raw pointers. `entities_within` returns a table keyed \"0\",\"1\",… each an entity table (id, type, x, y, z, health, alive, distance), sorted by id so the order is stable across ticks; a `type` of \"\" or \"any\" matches every type, and an unknown type name is refused rather than matching everything. The raycast helpers cast from the local player's eye along its look direction and return {hit, x, y, z, block, id, distance}."
+  doc "Read-only world queries. The core never hands out raw pointers. `entities_within` returns a table keyed \"0\",\"1\",… each an entity table (id, type, x, y, z, health, alive, distance), sorted by id so the order is stable across ticks; a `type` of \"\" or \"any\" matches every type, and an unknown type name is refused rather than matching everything. The raycast helpers cast from the local player's eye along its look direction and return {hit, x, y, z, block, id, distance}. The biome/light/chunk reads take a block coordinate and fail closed (\"\", -1, \"unloaded\") when the seam has no answer."
   fn query(within: number) -> number
   fn entity_count() -> number
-  fn block_at(x: number, y: number, z: number) -> string
+  fn block_at(x: number, y: number, z: number) -> number
   fn time() -> Table
   fn is_day() -> bool
   fn is_raining() -> bool
   fn entities_within(within: number, type: string) -> Table
   fn raycast_block(max_dist: number) -> Table
   fn raycast_entity(max_dist: number) -> Table
+  doc "Every entity whose AABB overlaps the axis-aligned box from (min_x,min_y,min_z) to (max_x,max_y,max_z), as a table keyed \"0\",\"1\",… each an entity table. `type` filters as in `entities_within`. A box whose min exceeds its max is refused."
+  fn entities_in_aabb(min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number, type: string) -> Table
+  doc "Every entity within `radius` of a point, as a table keyed \"0\",\"1\",… each an entity table. `type` filters as in `entities_within`."
+  fn entities_in_radius(x: number, y: number, z: number, radius: number, type: string) -> Table
+  doc "Casts a ray from an arbitrary origin along a direction (not the local player's look), returning {hit, x, y, z, block, id, distance}. `dir_x`/`dir_y`/`dir_z` need not be normalized; a zero-length direction is refused. `target` is \"block\", \"entity\" or \"any\"."
+  fn raycast(origin_x: number, origin_y: number, origin_z: number, dir_x: number, dir_y: number, dir_z: number, max_dist: number, target: string) -> Table
+  doc "The biome name at a block coordinate, or \"\" when the seam has no answer."
+  fn get_biome(x: number, y: number, z: number) -> string
+  doc "The light level (0..15) at a block coordinate, or -1 when the seam has no answer."
+  fn get_light(x: number, y: number, z: number) -> number
+  doc "The load state of the chunk containing a block coordinate: \"unloaded\", \"loaded\" or \"rendered\"."
+  fn get_chunk_state(x: number, y: number, z: number) -> string
+  doc "The numeric block id at integer coordinates (0 = air). Alias of `block_at`, spelled to make the numeric return obvious."
+  fn block_id_at(x: number, y: number, z: number) -> number
 }
 
 module Entity {
@@ -78,6 +188,10 @@ module Entity {
   fn distance_to(id: number) -> number
   doc "The raw id of the nearest alive entity of `type` to the local player, or 0 when none is in range. An unknown type name is refused (fails closed) rather than returning an arbitrary entity."
   fn nearest(type: string) -> number
+  doc "The entity's axis-aligned bounding box as {valid, min_x, min_y, min_z, max_x, max_y, max_z}. `valid` is false when the entity is not present. The box is derived from the entity's position and type (a fixed per-type size), never from engine memory."
+  fn get_hitbox(id: number) -> Table
+  doc "Casts a ray from (origin_x,origin_y,origin_z) along a direction and reports whether it reaches this entity's hitbox: {hit, distance, x, y, z}. A zero-length direction or a non-positive max distance is refused."
+  fn trace_line(id: number, origin_x: number, origin_y: number, origin_z: number, dir_x: number, dir_y: number, dir_z: number, max_dist: number) -> Table
 }
 
 module Fs {
@@ -186,6 +300,30 @@ module Network {
   fn post(url: string, body: string, timeout_ms: number) -> HttpResult
 }
 
+module Ws {
+  capability network
+  doc "WebSocket client. Requires a network grant scoped to the host, and the same egress policy `network.get` uses: a ws:// URL to a private or reserved host is refused, and wss:// fails closed because TLS is not implemented. A connection is addressed by an integer handle; the frames a peer sends are buffered in order and read with `ws.poll` after `ws.pump`. Every call runs on the script worker (blocking reads are expected there). `ws.connect` returns 0 and raises on a refused destination or a failed handshake. `ws.poll` returns {ok, opcode, data, binary}; `ok` is false when the inbox is empty."
+  fn connect(url: string, timeout_ms: number) -> number
+  fn send_text(handle: number, text: string) -> bool
+  fn send_binary(handle: number, data: string) -> bool
+  doc "Reads any pending frames for every open handle into their inboxes. Returns how many frames were read."
+  fn pump() -> number
+  doc "Pops the oldest buffered frame for `handle`. `ok` is false when the inbox is empty or the handle is unknown."
+  fn poll(handle: number) -> Table
+  fn pending(handle: number) -> number
+  fn is_open(handle: number) -> bool
+  fn close(handle: number) -> bool
+  fn count() -> number
+  doc "The URL a handle was opened with, or \"\" when the handle is unknown."
+  fn url(handle: number) -> string
+}
+
+module JsonRpc {
+  capability network
+  doc "JSON-RPC 2.0 client. Issues one call over the same egress-checked HTTP path as `network.post`, so the destination rules are identical. The response is validated as JSON-RPC 2.0 and its id must match before the result is trusted. `call` returns {ok, result, error_code, error_message, status}: `result` is a structured table decoded from the reply's `result` member, and a transport failure (bad URL, refused destination, HTTP status, malformed envelope) comes back with `ok` false and `error_message` set, so a script branches on the outcome rather than unwinding. `params_json` is raw JSON (an object or array); an empty string omits `params`."
+  fn call(url: string, method: string, params_json: string, timeout_ms: number) -> Table
+}
+
 module Hud {
   capability hud
   doc "Retained-mode HUD widget tree."
@@ -212,6 +350,10 @@ module Perf {
   fn spans() -> Table
   doc "Drops the flame tree, the span stats and the per-frame ring, starting the profiler over."
   fn flame_reset() -> nil
+  doc "The render pipeline's frame counters as {frames, entities_submitted, entities_drawn, entities_culled, entities_lod_reduced, batches, draw_calls, vertices, resolution_scale}. `draw_calls` counts the two coalesced calls (triangles + lines) a frame issues, so it stays flat however many primitives a script queued; `resolution_scale` is the factor the dynamic-resolution controller settled on (1.0 is native)."
+  fn pipeline() -> Table
+  doc "The level-of-detail tier an entity `distance` blocks from the camera would be drawn at: \"full\", \"reduced\", \"static\" or \"culled\". Follows the same policy the renderer culls with, so a script can predict whether its overlay will be given geometry."
+  fn lod_tier(distance: number) -> string
 }
 
 module Input {
@@ -240,7 +382,7 @@ module Cosmetic {
 
 module Events {
   capability events
-  doc "Event channels scripts may await with Events.once. The world-diff channels are driven by the reactive world grid: entityEntered and entityLeft carry \"<id>:<type>\", entityUpdated fires when an entity's position, health or state changed between ticks, and blockChanged carries \"x,y,z,block\". A script never polls for these."
+  doc "Event channels scripts may await with Events.once. The world-diff channels are driven by the reactive world grid: entityEntered and entityLeft carry \"<id>:<type>\", entityUpdated fires when an entity's position, health or state changed between ticks, and blockChanged carries \"x,y,z,block\". A script never polls for these. The lifecycle channels (entityHurt, entityDeath, entitySpawn) are driven by the combat bus and the world diff and carry \"<id>:<detail>\" (entityHurt's detail is the damage, entitySpawn's is the type), so a script can filter by id without a parser."
   event hit(damage: number)
   event kill(victim: string)
   event tick_count(count: number)
@@ -248,6 +390,15 @@ module Events {
   event entityLeft(entity: string)
   event entityUpdated(entity: string)
   event blockChanged(change: string)
+  event entityHurt(entity: string)
+  event entityDeath(entity: string)
+  event entitySpawn(entity: string)
+  doc "A hit the local client predicted (the swing it believes will land). Carries \"<attacker>:<victim>\"."
+  event combatPredicted(hit: string)
+  doc "A predicted hit the engine then confirmed. Carries \"<attacker>:<victim>\"."
+  event combatConfirmed(hit: string)
+  doc "A predicted hit that was never confirmed within the prediction window. Carries \"<attacker>:<victim>\"."
+  event combatMissed(hit: string)
 }
 
 module Intent {

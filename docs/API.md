@@ -15,6 +15,39 @@ Capability: `combat`.
 | `combat.last_hit_damage() -> number` | `combat` | - |
 | `combat.observe(ticks: number) -> number` | `combat` | - |
 
+## CombatState
+
+Capability: `combat`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `combat_state.max_reach() -> number` | `combat` | The configured maximum legitimate reach, in blocks. |
+| `combat_state.set_max_reach(blocks: number) -> bool` | `combat` | Sets the reach limit. Must be a finite positive number; a bad value is refused and leaves the limit unchanged. |
+| `combat_state.last_reach() -> Table` | `combat` | The most recent reach check as {valid, distance, max_reach, within_reach, tick, attacker, victim}. |
+| `combat_state.reach_violations() -> number` | `combat` | How many applied hits so far were beyond the reach limit. |
+| `combat_state.hitbox_count(id: number) -> number` | `combat` | How many hitbox samples are recorded for an entity. |
+| `combat_state.hitbox_ticks(id: number) -> Table` | `combat` | The ticks an entity has recorded hitbox samples for, oldest first, as a table keyed \"0\",\"1\",…. |
+| `combat_state.hitbox_at(id: number, tick: number) -> Table` | `combat` | The entity's recorded hitbox at an exact tick as {valid, min_x, min_y, min_z, max_x, max_y, max_z}. `valid` is false when there is no sample for that tick. |
+| `combat_state.swing(id: number, tick: number) -> Table` | `combat` | Records a swing by an entity at a tick, returning {valid, delta_ticks, cps, tick}. `valid` is false for the first swing, which has no interval yet. |
+| `combat_state.last_swing() -> Table` | `combat` | The most recent swing sample, same shape as `swing`. |
+| `combat_state.average_swing_cps(id: number) -> number` | `combat` | Average swings per second for an entity across the retained window, 0 when there is not enough data. |
+| `combat_state.predict_projectile(x: number, y: number, z: number, vx: number, vy: number, vz: number, gravity: number, ticks: number) -> Vec3` | `combat` | Extrapolates a projectile forward `ticks` ticks from a position and velocity under `gravity` (blocks/s^2, e.g. -20), returning a Vec3. Pure: it reads no state. |
+| `combat_state.note_projectile(id: number, x: number, y: number, z: number, tick: number) -> nil` | `combat` | Records a projectile prediction for an id at a tick, so `resolve_projectile` can score it. |
+| `combat_state.resolve_projectile(id: number, x: number, y: number, z: number, tick: number) -> number` | `combat` | Scores the pending prediction for an id against an actual position, returning the error in blocks, or -1 when there was no pending prediction. |
+| `combat_state.prediction_error() -> number` | `combat` | Mean error, in blocks, across the retained projectile predictions, or -1 when none have been scored. |
+| `combat_state.prediction_count() -> number` | `combat` | How many projectile predictions have been scored. |
+| `combat_state.predict_hit(attacker: number, victim: number, tick: number) -> nil` | `combat` | Records a predicted hit (attacker, victim) at a tick, so a later applied hit can confirm it. |
+| `combat_state.hit_accuracy() -> number` | `combat` | Confirmed hits divided by predicted hits, 0 when nothing has been predicted. |
+| `combat_state.predicted_hits() -> number` | `combat` | - |
+| `combat_state.confirmed_hits() -> number` | `combat` | - |
+| `combat_state.missed_hits() -> number` | `combat` | - |
+| `combat_state.note_click(button: string, now_ms: number) -> bool` | `combat` | Feeds one click into a button's budget (\"left\" or \"right\"). Returns true when the click is within budget. It only reports; the click is never blocked or dropped. |
+| `combat_state.click_rate(button: string) -> number` | `combat` | Rolling clicks per second for a button over the last second. |
+| `combat_state.click_limited() -> bool` | `combat` | True when the most recent `note_click` was over budget. |
+| `combat_state.click_tokens(button: string) -> number` | `combat` | Tokens left in a button's bucket. |
+| `combat_state.set_click_budget(per_second: number, burst: number) -> bool` | `combat` | Sets the click budget: `per_second` sustained clicks with a `burst` allowance. Both must be finite and positive and the burst at least 1; a bad value is refused. |
+| `combat_state.clear() -> nil` | `combat` | Drops all recorded combat state (history, swings, predictions, counters, click buckets). |
+
 ## Player
 
 Capability: `world`.
@@ -28,6 +61,19 @@ Capability: `world`.
 | `player.max_health() -> number` | `world` | - |
 | `player.alive() -> bool` | `world` | - |
 | `player.name() -> string` | `world` | - |
+| `player.hunger() -> number` | `world` | Food level, 0..20. -1 when the local player is not bound. |
+| `player.saturation() -> number` | `world` | The hidden saturation value. -1 when the local player is not bound. |
+| `player.armor() -> number` | `world` | Total armour points, 0..20. |
+| `player.gamemode() -> string` | `world` | The gamemode as a name: \"survival\", \"creative\", \"adventure\", \"spectator\" or \"unknown\". |
+| `player.dimension() -> string` | `world` | The dimension as a name: \"overworld\", \"nether\", \"end\" or \"unknown\". |
+| `player.xp_level() -> number` | `world` | The experience level. |
+| `player.xp_progress() -> number` | `world` | Progress toward the next level, 0..1. |
+| `player.air() -> number` | `world` | Remaining breath in ticks (300 = full). |
+| `player.on_fire() -> bool` | `world` | True while the local player is on fire. |
+| `player.sneaking() -> bool` | `world` | True while the local player is sneaking. |
+| `player.sprinting() -> bool` | `world` | True while the local player is sprinting. |
+| `player.effects() -> Table` | `world` | Active status effects as a table keyed \"0\",\"1\",…, each {name, amplifier, seconds, ambient}. Empty when none or the local player is unbound. |
+| `player.state() -> Table` | `world` | The whole local-player state as one table: {hunger, saturation, armor, gamemode, dimension, xp_level, xp_progress, air, on_fire, sneaking, sprinting, effects}. Raises and returns nil when the local player is not bound. |
 
 ## Render
 
@@ -35,13 +81,21 @@ Capability: `render`.
 
 | Function | Capability | Description |
 | --- | --- | --- |
-| `render.draw_text(x: number, y: number, text: string, color: Rgba) -> nil` | `render` | Client-side drawing. Everything here is local to this screen. |
+| `render.draw_text(x: number, y: number, text: string, color: Rgba) -> nil` | `render` | Client-side drawing. Everything here is local to this screen. The 2D helpers take pixels; the 3D helpers take world coordinates and project through the current camera, so a script can draw an ESP-style overlay without knowing the projection matrix. Clipping is a nested scissor stack: `push_clip_rect` narrows the active clip (a child can only shrink its parent) and `pop_clip_rect` restores it. Rectangles and lines are clipped exactly; text and circles are kept while any part of them intersects the clip and dropped only when they fall entirely outside. |
 | `render.draw_text_centered(x: number, y: number, text: string, color: Rgba) -> nil` | `render` | - |
 | `render.draw_rect(x: number, y: number, w: number, h: number, color: Rgba) -> nil` | `render` | - |
 | `render.draw_line(x1: number, y1: number, x2: number, y2: number, color: Rgba) -> nil` | `render` | - |
 | `render.draw_circle(x: number, y: number, radius: number, color: Rgba) -> nil` | `render` | - |
 | `render.screen_size() -> Vec3` | `render` | - |
 | `render.set_zoom(factor: number) -> nil` | `render` | - |
+| `render.world_to_screen(x: number, y: number, z: number) -> Table` | `render` | Projects a world point to pixels through the current camera. Returns {visible, x, y, distance}: `visible` is false when the point is behind the camera or no camera is set, so a caller checks it before drawing. `distance` is the world distance from the camera eye. |
+| `render.draw_3d_line(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, color: Rgba) -> nil` | `render` | Draws a world-space line. Clipped against the active clip rectangle; dropped when an endpoint is behind the camera. |
+| `render.draw_3d_box(min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number, color: Rgba) -> nil` | `render` | Draws the 12 edges of an axis-aligned world box from (min) to (max). |
+| `render.draw_3d_text(x: number, y: number, z: number, text: string, color: Rgba) -> nil` | `render` | Draws text anchored at a world position. Nothing is drawn when the point is behind the camera or outside the active clip. |
+| `render.push_clip_rect(x: number, y: number, w: number, h: number) -> nil` | `render` | Pushes a clip rectangle, intersected with the current top so a child clip can only narrow its parent. Bounded to 32 levels; a push past the cap is ignored rather than growing the stack. |
+| `render.pop_clip_rect() -> nil` | `render` | Pops the innermost clip rectangle. An unmatched pop is a no-op. |
+| `render.clip_rect() -> Table` | `render` | The active clip rectangle as {active, x, y, w, h}; `active` is false when no clip is pushed. |
+| `render.camera() -> Table` | `render` | The camera the renderer last drew with, as {valid, x, y, z, yaw, pitch}. `valid` is false until a camera is bound. |
 
 ## World
 
@@ -49,15 +103,22 @@ Capability: `world`.
 
 | Function | Capability | Description |
 | --- | --- | --- |
-| `world.query(within: number) -> number` | `world` | Read-only world queries. The core never hands out raw pointers. `entities_within` returns a table keyed \"0\",\"1\",… each an entity table (id, type, x, y, z, health, alive, distance), sorted by id so the order is stable across ticks; a `type` of \"\" or \"any\" matches every type, and an unknown type name is refused rather than matching everything. The raycast helpers cast from the local player's eye along its look direction and return {hit, x, y, z, block, id, distance}. |
+| `world.query(within: number) -> number` | `world` | Read-only world queries. The core never hands out raw pointers. `entities_within` returns a table keyed \"0\",\"1\",… each an entity table (id, type, x, y, z, health, alive, distance), sorted by id so the order is stable across ticks; a `type` of \"\" or \"any\" matches every type, and an unknown type name is refused rather than matching everything. The raycast helpers cast from the local player's eye along its look direction and return {hit, x, y, z, block, id, distance}. The biome/light/chunk reads take a block coordinate and fail closed (\"\", -1, \"unloaded\") when the seam has no answer. |
 | `world.entity_count() -> number` | `world` | - |
-| `world.block_at(x: number, y: number, z: number) -> string` | `world` | - |
+| `world.block_at(x: number, y: number, z: number) -> number` | `world` | - |
 | `world.time() -> Table` | `world` | - |
 | `world.is_day() -> bool` | `world` | - |
 | `world.is_raining() -> bool` | `world` | - |
 | `world.entities_within(within: number, type: string) -> Table` | `world` | - |
 | `world.raycast_block(max_dist: number) -> Table` | `world` | - |
 | `world.raycast_entity(max_dist: number) -> Table` | `world` | - |
+| `world.entities_in_aabb(min_x: number, min_y: number, min_z: number, max_x: number, max_y: number, max_z: number, type: string) -> Table` | `world` | Every entity whose AABB overlaps the axis-aligned box from (min_x,min_y,min_z) to (max_x,max_y,max_z), as a table keyed \"0\",\"1\",… each an entity table. `type` filters as in `entities_within`. A box whose min exceeds its max is refused. |
+| `world.entities_in_radius(x: number, y: number, z: number, radius: number, type: string) -> Table` | `world` | Every entity within `radius` of a point, as a table keyed \"0\",\"1\",… each an entity table. `type` filters as in `entities_within`. |
+| `world.raycast(origin_x: number, origin_y: number, origin_z: number, dir_x: number, dir_y: number, dir_z: number, max_dist: number, target: string) -> Table` | `world` | Casts a ray from an arbitrary origin along a direction (not the local player's look), returning {hit, x, y, z, block, id, distance}. `dir_x`/`dir_y`/`dir_z` need not be normalized; a zero-length direction is refused. `target` is \"block\", \"entity\" or \"any\". |
+| `world.get_biome(x: number, y: number, z: number) -> string` | `world` | The biome name at a block coordinate, or \"\" when the seam has no answer. |
+| `world.get_light(x: number, y: number, z: number) -> number` | `world` | The light level (0..15) at a block coordinate, or -1 when the seam has no answer. |
+| `world.get_chunk_state(x: number, y: number, z: number) -> string` | `world` | The load state of the chunk containing a block coordinate: \"unloaded\", \"loaded\" or \"rendered\". |
+| `world.block_id_at(x: number, y: number, z: number) -> number` | `world` | The numeric block id at integer coordinates (0 = air). Alias of `block_at`, spelled to make the numeric return obvious. |
 
 ## Entity
 
@@ -73,6 +134,8 @@ Capability: `world`.
 | `entity.alive(id: number) -> bool` | `world` | - |
 | `entity.distance_to(id: number) -> number` | `world` | - |
 | `entity.nearest(type: string) -> number` | `world` | The raw id of the nearest alive entity of `type` to the local player, or 0 when none is in range. An unknown type name is refused (fails closed) rather than returning an arbitrary entity. |
+| `entity.get_hitbox(id: number) -> Table` | `world` | The entity's axis-aligned bounding box as {valid, min_x, min_y, min_z, max_x, max_y, max_z}. `valid` is false when the entity is not present. The box is derived from the entity's position and type (a fixed per-type size), never from engine memory. |
+| `entity.trace_line(id: number, origin_x: number, origin_y: number, origin_z: number, dir_x: number, dir_y: number, dir_z: number, max_dist: number) -> Table` | `world` | Casts a ray from (origin_x,origin_y,origin_z) along a direction and reports whether it reaches this entity's hitbox: {hit, distance, x, y, z}. A zero-length direction or a non-positive max distance is refused. |
 
 ## Fs
 
@@ -182,6 +245,31 @@ Capability: `network`.
 | `network.get(url: string, timeout_ms: number) -> HttpResult` | `network` | Outbound requests. Requires a network grant scoped to the host. Both calls return an HttpResult table (status, ok, headers, body, error, truncated) rather than raising, so a script can branch on the outcome; headers is a newline-separated \"Name: value\" list. A refused destination (bad URL, egress policy, or a host outside the grant) comes back with status 0 and a non-empty error. TLS is not implemented, so an https destination is refused rather than downgraded to plaintext. |
 | `network.post(url: string, body: string, timeout_ms: number) -> HttpResult` | `network` | - |
 
+## Ws
+
+Capability: `network`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `ws.connect(url: string, timeout_ms: number) -> number` | `network` | WebSocket client. Requires a network grant scoped to the host, and the same egress policy `network.get` uses: a ws:// URL to a private or reserved host is refused, and wss:// fails closed because TLS is not implemented. A connection is addressed by an integer handle; the frames a peer sends are buffered in order and read with `ws.poll` after `ws.pump`. Every call runs on the script worker (blocking reads are expected there). `ws.connect` returns 0 and raises on a refused destination or a failed handshake. `ws.poll` returns {ok, opcode, data, binary}; `ok` is false when the inbox is empty. |
+| `ws.send_text(handle: number, text: string) -> bool` | `network` | - |
+| `ws.send_binary(handle: number, data: string) -> bool` | `network` | - |
+| `ws.pump() -> number` | `network` | Reads any pending frames for every open handle into their inboxes. Returns how many frames were read. |
+| `ws.poll(handle: number) -> Table` | `network` | Pops the oldest buffered frame for `handle`. `ok` is false when the inbox is empty or the handle is unknown. |
+| `ws.pending(handle: number) -> number` | `network` | - |
+| `ws.is_open(handle: number) -> bool` | `network` | - |
+| `ws.close(handle: number) -> bool` | `network` | - |
+| `ws.count() -> number` | `network` | - |
+| `ws.url(handle: number) -> string` | `network` | The URL a handle was opened with, or \"\" when the handle is unknown. |
+
+## JsonRpc
+
+Capability: `network`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `json_rpc.call(url: string, method: string, params_json: string, timeout_ms: number) -> Table` | `network` | JSON-RPC 2.0 client. Issues one call over the same egress-checked HTTP path as `network.post`, so the destination rules are identical. The response is validated as JSON-RPC 2.0 and its id must match before the result is trusted. `call` returns {ok, result, error_code, error_message, status}: `result` is a structured table decoded from the reply's `result` member, and a transport failure (bad URL, refused destination, HTTP status, malformed envelope) comes back with `ok` false and `error_message` set, so a script branches on the outcome rather than unwinding. `params_json` is raw JSON (an object or array); an empty string omits `params`. |
+
 ## Hud
 
 Capability: `hud`.
@@ -209,6 +297,8 @@ Capability: `perf`.
 | `perf.flame() -> Table` | `perf` | The aggregated span call tree since the last `perf.flame_reset`, as a nested table: each node is {name, self_ms, total_ms, count, children}, and `children` is ordered by total time descending so the expensive branch reads first. `self_ms` excludes child spans, so a parent's `total_ms` is the time actually spent inside it. Populated by the profiler spans the modules and hooks raise. |
 | `perf.spans() -> Table` | `perf` | The flat span list, highest total time first: a table keyed \"0\",\"1\",… each {name, total_ms, count, max_ms}. The list view of the same data `flame` nests. |
 | `perf.flame_reset() -> nil` | `perf` | Drops the flame tree, the span stats and the per-frame ring, starting the profiler over. |
+| `perf.pipeline() -> Table` | `perf` | The render pipeline's frame counters as {frames, entities_submitted, entities_drawn, entities_culled, entities_lod_reduced, batches, draw_calls, vertices, resolution_scale}. `draw_calls` counts the two coalesced calls (triangles + lines) a frame issues, so it stays flat however many primitives a script queued; `resolution_scale` is the factor the dynamic-resolution controller settled on (1.0 is native). |
+| `perf.lod_tier(distance: number) -> string` | `perf` | The level-of-detail tier an entity `distance` blocks from the camera would be drawn at: \"full\", \"reduced\", \"static\" or \"culled\". Follows the same policy the renderer culls with, so a script can predict whether its overlay will be given geometry. |
 
 ## Input
 
@@ -242,13 +332,19 @@ Capability: `events`.
 
 Events (await with `Events.once`):
 
-- `hit(damage: number)` — Event channels scripts may await with Events.once. The world-diff channels are driven by the reactive world grid: entityEntered and entityLeft carry \"<id>:<type>\", entityUpdated fires when an entity's position, health or state changed between ticks, and blockChanged carries \"x,y,z,block\". A script never polls for these.
+- `hit(damage: number)` — Event channels scripts may await with Events.once. The world-diff channels are driven by the reactive world grid: entityEntered and entityLeft carry \"<id>:<type>\", entityUpdated fires when an entity's position, health or state changed between ticks, and blockChanged carries \"x,y,z,block\". A script never polls for these. The lifecycle channels (entityHurt, entityDeath, entitySpawn) are driven by the combat bus and the world diff and carry \"<id>:<detail>\" (entityHurt's detail is the damage, entitySpawn's is the type), so a script can filter by id without a parser.
 - `kill(victim: string)` — -
 - `tick_count(count: number)` — -
 - `entityEntered(entity: string)` — -
 - `entityLeft(entity: string)` — -
 - `entityUpdated(entity: string)` — -
 - `blockChanged(change: string)` — -
+- `entityHurt(entity: string)` — -
+- `entityDeath(entity: string)` — -
+- `entitySpawn(entity: string)` — -
+- `combatPredicted(hit: string)` — A hit the local client predicted (the swing it believes will land). Carries \"<attacker>:<victim>\".
+- `combatConfirmed(hit: string)` — A predicted hit the engine then confirmed. Carries \"<attacker>:<victim>\".
+- `combatMissed(hit: string)` — A predicted hit that was never confirmed within the prediction window. Carries \"<attacker>:<victim>\".
 
 ## Intent
 

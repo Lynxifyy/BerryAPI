@@ -33,6 +33,9 @@ make lib             # builds build/libBerryAPI.so
 - The `.so` ELF constructor auto-attaches on dlopen; it is compiled out
   (`BERRY_BUILD_SHARED` guard) for test binaries where `main()` drives the
   lifecycle.
+- Object files carry header dependencies (`-MMD -MP`, `-include $(DEPS)`), so
+  editing a header rebuilds every translation unit that includes it. Without
+  this a stale object can link against a changed struct layout and crash.
 
 ## Scripting layer
 
@@ -60,6 +63,20 @@ make lib             # builds build/libBerryAPI.so
 - `Hud::Present` re-lays out only dirty subtrees; call `SetText`/`SetSize`/
   `SetOffset` (which dirty the right nodes) rather than poking resolved
   geometry.
+- The render frame path is the pipeline in `pipeline.h`. `Renderer::BeginFrame`
+  rebuilds the frustum from the camera, adopts the governor's `RenderSettings`
+  and derives the LOD tiers; `EndFrame` counts the frame and accounts its
+  batch. World-space draws (`DrawBillboard`) cull against that frustum before
+  projecting. A camera that is not set leaves the frustum invalid, which culls
+  nothing — never cull blindly. `ScriptApi::PublishFrame` is what keeps the
+  pipeline following the governor: it adopts the settled settings and feeds the
+  frame time to the resolution controller. Cross-thread reads go through the
+  locked `Renderer::pipelineStats`/`LodFor`/`Visible`/`lastBatchCounts`, not the
+  raw `pipeline()` reference (which is for a caller that owns the frame).
+- Draw primitives (`Rgba`, `Rect2D`, `Line2D`, `Text2D`, `Circle2D`,
+  `Billboard3D`, `CameraState`, `RenderSeam`) live in `draw.h`, which both
+  `render.h` and `pipeline.h` include. Keep the pipeline header free of
+  `render.h` to avoid a cycle.
 - `CosmeticService` resolves a loadout into draw items through the
   `CosmeticSkeletonSource`/`CosmeticRenderSeam` seams; never assume engine
   pointers in the core. A resolve is cached per entity and only reused while the
@@ -89,6 +106,14 @@ make lib             # builds build/libBerryAPI.so
 - `make test` and `make test-sanitize` (ASan+UBSan) must both stay green; the
   sanitizer build is slow (several minutes) — run it in the background and poll
   a log file rather than blocking the terminal.
+- Header dependency tracking is real but fragile: the `-include` of the
+  generated `*.d` files must stay *below* `include tools/sources.mk`, because
+  `CORE_SRC`/`TEST_SRC` are empty above it and the include then expands to
+  nothing (a silent no-op that leaves stale objects). Every compile rule passes
+  `-MMD -MP`.
+- `WsClientPool` callbacks capture a `weak_ptr<Conn>`, never a `shared_ptr`: the
+  connection owns its socket, so a strong capture is a cycle that leaks the
+  connection and its socket. Keep the same shape in any new owner/callback pair.
 
 ## Pull requests
 

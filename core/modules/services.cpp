@@ -114,6 +114,18 @@ class WorldModule : public BerryModule, public WorldHandle {
   }
   LevelTime GetTime() const override { return seam_ ? seam_->GetTime() : LevelTime{}; }
   u32 GetBlock(const Vec3& p) const override { return seam_ ? seam_->GetBlock(p) : 0; }
+  std::string GetBiome(const BlockPos& p) const override {
+    return seam_ ? seam_->GetBiome(p) : std::string();
+  }
+  i32 GetLight(const BlockPos& p) const override {
+    return seam_ ? seam_->GetLight(p) : -1;
+  }
+  ChunkState GetChunkState(const BlockPos& p) const override {
+    return seam_ ? seam_->GetChunkState(p) : ChunkState::Unloaded;
+  }
+  LocalPlayerState GetLocalPlayerState() const override {
+    return seam_ ? seam_->GetLocalPlayerState() : LocalPlayerState{};
+  }
   void SetValue(const char* k, const char* v) override { kv_[k] = v; }
   const char* GetValue(const char* k, const char* fb) const override {
     auto it = kv_.find(k);

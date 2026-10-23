@@ -368,20 +368,10 @@ constexpr int kMaxRedirects = 5;
 
 /// True when the script's granted set covers `host`. A wildcard grant
 /// (`network:*`) covers any host; a scoped grant covers exactly the host it
-/// names, normalized so `network:api.example.com` and
-/// `network:domain=api.example.com` behave the same. An unscoped `network`
-/// grant covers nothing — it is not a licence to reach every host.
+/// names. The implementation is shared with the WebSocket client so the two
+/// cannot diverge (see HostCoveredByGrant).
 bool HostGranted(const ScriptContext& ctx, const std::string& host) {
-  const std::string want = NormalizeNetworkScope(host);
-  if (want.empty()) return false;
-  for (const Capability& have : ctx.granted().All()) {
-    if (have.kind != CapKind::Network) continue;
-    if (have.scope == "*") return true;
-    if (have.scope.empty()) continue;
-    const std::string granted = NormalizeNetworkScope(have.scope);
-    if (!granted.empty() && granted == want) return true;
-  }
-  return false;
+  return HostCoveredByGrant(ctx.granted(), host);
 }
 
 /// Resolves a Location header against the URL it came from. Only absolute

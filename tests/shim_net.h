@@ -221,3 +221,110 @@ class TinyWsServer final : public TinyTcpAcceptor {
     ::send(conn, out.data(), out.size(), MSG_NOSIGNAL);
   }
 };
+
+// A JSON-RPC 2.0 echo server. It reads one request, parses out the id and
+// method with a tolerant string scan (enough for the tests), and answers with a
+// well-formed result. "/rpcerr" answers with a JSON-RPC error object instead,
+// and "/rpcbadid" answers with a mismatched id so the client's id check can be
+// exercised.
+class TinyJsonRpcServer final : public TinyTcpAcceptor {
+ protected:
+  void Handle(int conn) override {
+    std::string req = RecvAll(conn, 2000);
+    if (req.empty()) return;
+
+    const bool wantError = req.rfind("POST /rpcerr", 0) == 0;
+    const bool badId = req.rfind("POST /rpcbadid", 0) == 0;
+    const bool badJson = req.rfind("POST /rpcbadjson", 0) == 0;
+
+    std::string id = ExtractScalar(req, "\"id\":");
+    if (id.empty()) id = "1";
+    std::string method = Extract(req, "\"method\":");
+    std::string params = ExtractRaw(req, "\"params\":");
+
+    std::string body;
+    if (badJson) {
+      body = "this is not json";
+    } else if (wantError) {
+      body = "{\"jsonrpc\":\"2.0\",\"id\":" + id +
+             ",\"error\":{\"code\":-32601,\"message\":\"method not found\"}}";
+    } else {
+      const std::string useId = badId ? "999999" : id;
+      body = "{\"jsonrpc\":\"2.0\",\"id\":" + useId +
+             ",\"result\":{\"method\":" + Quote(method) +
+             ",\"echo\":" + (params.empty() ? std::string("null") : params) +
+             ",\"n\":3,\"flag\":true,\"nested\":{\"a\":[1,2,3]}}}";
+    }
+    std::string resp = "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: " + std::to_string(body.size()) + "\r\n"
+        "Connection: close\r\n\r\n" + body;
+    ::send(conn, resp.data(), resp.size(), MSG_NOSIGNAL);
+  }
+
+ private:
+  static std::string Quote(const std::string& s) { return "\"" + s + "\""; }
+
+  /// Reads a JSON string value following `key` (the value must be quoted).
+  static std::string Extract(const std::string& s, const std::string& key) {
+    size_t p = s.find(key);
+    if (p == std::string::npos) return "";
+    p += key.size();
+    while (p < s.size() && (s[p] == ' ' || s[p] == '\t')) ++p;
+    if (p >= s.size() || s[p] != '"') return "";
+    ++p;
+    std::string out;
+    while (p < s.size() && s[p] != '"') out.push_back(s[p++]);
+    return out;
+  }
+
+  /// Reads a scalar JSON value (quoted string, number, bool) following `key`
+  /// and returns its raw token text.
+  static std::string ExtractScalar(const std::string& s, const std::string& key) {
+    const std::string quoted = Extract(s, key);
+    if (!quoted.empty()) return quoted;
+    size_t p = s.find(key);
+    if (p == std::string::npos) return "";
+    p += key.size();
+    while (p < s.size() && (s[p] == ' ' || s[p] == '\t')) ++p;
+    size_t e = p;
+    while (e < s.size() && s[e] != ',' && s[e] != '}' && s[e] != ' ' && s[e] != '\n'
+           && s[e] != '\r') {
+      ++e;
+    }
+    return s.substr(p, e - p);
+  }
+
+  /// Reads the raw JSON value (object/array/primitive) following `key` by
+  /// balancing braces/brackets.
+  static std::string ExtractRaw(const std::string& s, const std::string& key) {
+    size_t p = s.find(key);
+    if (p == std::string::npos) return "";
+    p += key.size();
+    while (p < s.size() && (s[p] == ' ' || s[p] == '\t')) ++p;
+    if (p >= s.size()) return "";
+    if (s[p] != '{' && s[p] != '[') {
+      // Primitive: run to the next ',' or '}'.
+      size_t e = p;
+      while (e < s.size() && s[e] != ',' && s[e] != '}') ++e;
+      return s.substr(p, e - p);
+    }
+    const char open = s[p];
+    const char close = (open == '{') ? '}' : ']';
+    int depth = 0;
+    size_t e = p;
+    bool inStr = false;
+    for (; e < s.size(); ++e) {
+      const char c = s[e];
+      if (inStr) {
+        if (c == '\\') { ++e; continue; }
+        if (c == '"') inStr = false;
+        continue;
+      }
+      if (c == '"') { inStr = true; continue; }
+      if (c == open) ++depth;
+      else if (c == close) { if (--depth == 0) { ++e; break; } }
+    }
+    return s.substr(p, e - p);
+  }
+};

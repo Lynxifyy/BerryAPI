@@ -134,6 +134,10 @@ void Engine::OnGameTick(GameTick tick) {
   sched_.SetCurrentTick(tick);
   sched_.Tick(tick);
   Modules().TickAll(tick);
+  // Published after the modules have run, so a listener sees the tick's world
+  // state settled. The combat-state layer uses it to age hit predictions and
+  // record hitbox history; it carries the tick number as the payload.
+  EventBus::Instance().Emit("berry:tick", &tick, nullptr);
   ThreadModel::Instance().Leave();
 }
 
