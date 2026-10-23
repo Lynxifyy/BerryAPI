@@ -687,6 +687,54 @@ export type Crystal = {
   armed: () -> boolean,
 }
 
+-- Capability required: voice.
+export type Voice = {
+  -- The current tunables as {max_range, full_volume_range, master_volume, max_speakers, hold_ms, max_frame_bytes, min_send_interval_ms}.
+  config: () -> {[string]: any},
+  -- Sets how far a speaker is heard, in blocks. Must be finite and in (0, 128]; a bad value is refused.
+  set_max_range: (range: number) -> boolean,
+  -- Sets the distance within which a speaker plays at full volume. Must be finite and in [0, max_range]; a bad value is refused.
+  set_full_volume_range: (range: number) -> boolean,
+  -- Sets the playback master volume. Must be finite and in [0, 1]; a bad value is refused.
+  set_master_volume: (volume: number) -> boolean,
+  -- Sets how many speakers are mixed at once. Must be an integer in [1, 32]; a bad value is refused.
+  set_max_speakers: (n: number) -> boolean,
+  -- Sets how long a speaker stays listed as talking after its last frame, in ms. Must be a positive integer; a bad value is refused.
+  set_hold_ms: (ms: number) -> boolean,
+  -- Sets the largest inbound frame payload accepted, in bytes. Must be an integer in [1, 2048]; a bad value is refused.
+  set_max_frame_bytes: (n: number) -> boolean,
+  -- Sets the shortest gap between outgoing frames, in ms. Must be a positive integer; a bad value is refused.
+  set_min_send_interval_ms: (ms: number) -> boolean,
+  -- Starts a session as `self_id`. False when already running, when the id is malformed (empty, over 64 bytes, or carrying a control character), or when no transport is bound (there is nothing to talk over).
+  start: (self_id: string) -> boolean,
+  -- Stops the session and forgets the speakers. A no-op when not running.
+  stop: () -> (),
+  -- True while a session is running.
+  running: () -> boolean,
+  -- The local session id, or \"\" when not running.
+  self_id: () -> string,
+  -- Sets push-to-talk (or open-mic) state. Only a talking, unmuted session sends; the receive half runs either way.
+  set_talking: (talking: boolean) -> (),
+  -- True while the local client is sending.
+  talking: () -> boolean,
+  -- Sets the microphone mute. A muted session sends nothing.
+  set_muted: (muted: boolean) -> (),
+  -- True while the microphone is muted.
+  muted: () -> boolean,
+  -- Sets the local player's position, used to judge the proximity of what the listener hears.
+  set_position: (x: number, y: number, z: number) -> (),
+  -- How many speakers are currently heard.
+  speaker_count: () -> number,
+  -- The speaker at `index` in the activity list (loudest first) as {id, level, distance, last_ms}, or an empty table when out of range.
+  speaker: (index: number) -> {[string]: any},
+  -- The session counters as {frames_captured, frames_sent, frames_received, frames_dropped, frames_played, bytes_sent, bytes_received}.
+  stats: () -> {[string]: any},
+  -- Forgets the speaker state and the counters, keeping the config and the seams.
+  reset: () -> (),
+  -- The transport's short name (\"lan\" on device, \"\" when none is bound).
+  transport: () -> string,
+}
+
 export type AsyncFacade = {
   wait: (ticks: number) -> ((),
   eventsOnce: (channel: string) -> (unknown,

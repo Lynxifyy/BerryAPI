@@ -287,6 +287,36 @@ std::vector<EntitySnapshot> LiveEntities(const WorldHandle& world) {
   return out;
 }
 
+/// Resolves a voice speaker id to a world position from the listener's own view.
+///
+/// A speaker id is opaque to the transport (a peer names itself). The client
+/// maps it to an entity it already knows by, in order: the entity's display
+/// name, then the "<raw>:<runtime>" id spelling. A speaker the listener's world
+/// does not hold resolves to nothing, so the voice service drops the frame —
+/// this is what keeps proximity judged against the listener's own view and
+/// nothing else.
+bool ResolveSpeaker(const WorldHandle& world, const std::string& speakerId,
+                    Vec3* outPos) {
+  auto seam = world.Seam();
+  if (!seam) return false;
+  for (const EntityId& id : seam->AllEntities()) {
+    EntitySnapshot snap;
+    if (!seam->GetEntity(id, &snap) || !snap.alive) continue;
+    if (snap.name == speakerId) {
+      if (outPos) *outPos = snap.position;
+      return true;
+    }
+    const std::string idSpelling =
+        std::to_string((unsigned long long)id.raw) + ":" +
+        std::to_string((unsigned)id.runtime);
+    if (idSpelling == speakerId) {
+      if (outPos) *outPos = snap.position;
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 //----------------------------------------------------------------------------
@@ -448,6 +478,29 @@ void ScriptApi::InitFrameHook() {
             services_.modules->DrawOverlay(*services_.renderer, screen);
           }
         }
+        // The voice service pumps once per frame, on this thread. It is the
+        // production caller for the whole voice path: it sets the local
+        // player's position and the proximity resolver (both from the listener's
+        // own world view), then captures/sends while talking and always polls,
+        // decodes, gates by proximity and plays. Nothing here runs when no voice
+        // service is bound or no session is running (Pump is a no-op then).
+        if (services_.voice && services_.world) {
+          if (!voiceWired_) {
+            // Bind the resolver once: it closes over the world handle, which
+            // lives for the session, and reads only the seam the world already
+            // holds. A speaker the listener cannot see resolves to nothing.
+            WorldHandle* world = services_.world;
+            services_.voice->SetProximityResolver(
+                [world](const std::string& id, Vec3* out) {
+                  return world && ResolveSpeaker(*world, id, out);
+                });
+            voiceWired_ = true;
+          }
+          const EntitySnapshot self =
+              services_.world->GetEntity(services_.localPlayer);
+          if (self.alive) services_.voice->SetPosition(self.position);
+          services_.voice->Pump(NowMs(), 0);
+        }
         return EventResult::Continue;
       });
 }
@@ -478,6 +531,9 @@ void ScriptApi::RemoveHooks() {
 void ScriptApi::SetServices(const Services& services) {
   std::lock_guard<std::mutex> lk(mutex_);
   services_ = services;
+  // A new world (or a new voice service) must get a fresh proximity resolver:
+  // the old one closes over the previous world handle.
+  voiceWired_ = false;
 }
 
 bool ScriptApi::Install(const std::string& name,
@@ -3558,6 +3614,159 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
   install("crystal.armed", [crystal](ScriptContext&, const std::vector<ScriptValue>&) {
     CrystalOptimizer* o = crystal();
     return ScriptValue::Bool(o ? o->armed() : false);
+  });
+
+  //--- Voice (client-side proximity voice chat) ----------------------------
+  //
+  // A session is explicit: a script starts it, arms push-to-talk and lets the
+  // frame hook pump it. With no service bound every call fails closed (no
+  // session, nothing heard) and `transport` reports an empty name. The pump is
+  // the only place audio moves; it is driven from the frame hook, not a script
+  // call, so a script cannot spin the microphone.
+  auto voice = [this]() -> VoiceService* { return services_.voice; };
+  auto voiceConfigTable = [](const VoiceConfig& c) {
+    ScriptTable t;
+    t["max_range"] = ScriptValue::Num((f64)c.maxRange);
+    t["full_volume_range"] = ScriptValue::Num((f64)c.fullVolumeRange);
+    t["master_volume"] = ScriptValue::Num((f64)c.masterVolume);
+    t["max_speakers"] = ScriptValue::Num((f64)c.maxSpeakers);
+    t["hold_ms"] = ScriptValue::Num((f64)c.holdMs);
+    t["max_frame_bytes"] = ScriptValue::Num((f64)c.maxFrameBytes);
+    t["min_send_interval_ms"] = ScriptValue::Num((f64)c.minSendIntervalMs);
+    return ScriptValue::Tbl(std::move(t));
+  };
+  // Each setter copies the current config, changes one field and offers the
+  // whole thing back through SetConfig, so the one validator decides; a refused
+  // value leaves every field unchanged. With no service it reports false.
+  auto voiceSet = [voice](f64 v,
+                          void (*apply)(VoiceConfig&, f64)) {
+    VoiceService* s = voice();
+    if (!s) return false;
+    VoiceConfig c = s->config();
+    apply(c, v);
+    return s->SetConfig(c);
+  };
+  install("voice.config", [voice, voiceConfigTable](ScriptContext&, const std::vector<ScriptValue>&) {
+    VoiceConfig c;
+    if (VoiceService* s = voice()) c = s->config();
+    return voiceConfigTable(c);
+  });
+
+  install("voice.set_max_range", [voiceSet](ScriptContext&, const std::vector<ScriptValue>& args) {
+    return ScriptValue::Bool(voiceSet(args[0].AsNumber(),
+        [](VoiceConfig& c, f64 v) { c.maxRange = (f32)v; }));
+  });
+  install("voice.set_full_volume_range", [voiceSet](ScriptContext&, const std::vector<ScriptValue>& args) {
+    return ScriptValue::Bool(voiceSet(args[0].AsNumber(),
+        [](VoiceConfig& c, f64 v) { c.fullVolumeRange = (f32)v; }));
+  });
+  install("voice.set_master_volume", [voiceSet](ScriptContext&, const std::vector<ScriptValue>& args) {
+    return ScriptValue::Bool(voiceSet(args[0].AsNumber(),
+        [](VoiceConfig& c, f64 v) { c.masterVolume = (f32)v; }));
+  });
+  install("voice.set_max_speakers", [voiceSet](ScriptContext&, const std::vector<ScriptValue>& args) {
+    const f64 n = args[0].AsNumber();
+    if (n != std::floor(n)) return ScriptValue::Bool(false);   // a count is whole
+    return ScriptValue::Bool(voiceSet(n,
+        [](VoiceConfig& c, f64 v) { c.maxSpeakers = (size_t)v; }));
+  });
+  install("voice.set_hold_ms", [voiceSet](ScriptContext&, const std::vector<ScriptValue>& args) {
+    const f64 n = args[0].AsNumber();
+    if (n != std::floor(n)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(voiceSet(n,
+        [](VoiceConfig& c, f64 v) { c.holdMs = (u64)v; }));
+  });
+  install("voice.set_max_frame_bytes", [voiceSet](ScriptContext&, const std::vector<ScriptValue>& args) {
+    const f64 n = args[0].AsNumber();
+    if (n != std::floor(n)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(voiceSet(n,
+        [](VoiceConfig& c, f64 v) { c.maxFrameBytes = (size_t)v; }));
+  });
+  install("voice.set_min_send_interval_ms", [voiceSet](ScriptContext&, const std::vector<ScriptValue>& args) {
+    const f64 n = args[0].AsNumber();
+    if (n != std::floor(n)) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(voiceSet(n,
+        [](VoiceConfig& c, f64 v) { c.minSendIntervalMs = (u64)v; }));
+  });
+
+  install("voice.start", [voice](ScriptContext&, const std::vector<ScriptValue>& args) {
+    VoiceService* s = voice();
+    return ScriptValue::Bool(s ? s->Start(args[0].ToDisplay()) : false);
+  });
+  install("voice.stop", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (VoiceService* s = voice()) s->Stop();
+    return ScriptValue::Nil();
+  });
+  install("voice.running", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    VoiceService* s = voice();
+    return ScriptValue::Bool(s ? s->running() : false);
+  });
+  install("voice.self_id", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    VoiceService* s = voice();
+    return ScriptValue::Str(s ? s->selfId() : std::string());
+  });
+  install("voice.set_talking", [voice](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (VoiceService* s = voice()) s->SetTalking(args[0].Truthy());
+    return ScriptValue::Nil();
+  });
+  install("voice.talking", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    VoiceService* s = voice();
+    return ScriptValue::Bool(s ? s->talking() : false);
+  });
+  install("voice.set_muted", [voice](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (VoiceService* s = voice()) s->SetMuted(args[0].Truthy());
+    return ScriptValue::Nil();
+  });
+  install("voice.muted", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    VoiceService* s = voice();
+    return ScriptValue::Bool(s ? s->muted() : false);
+  });
+  install("voice.set_position", [voice](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (VoiceService* s = voice()) {
+      s->SetPosition(Vec3((f32)args[0].AsNumber(), (f32)args[1].AsNumber(),
+                          (f32)args[2].AsNumber()));
+    }
+    return ScriptValue::Nil();
+  });
+  install("voice.speaker_count", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    VoiceService* s = voice();
+    return ScriptValue::Num(s ? (f64)s->speakers().size() : 0.0);
+  });
+  install("voice.speaker", [voice](ScriptContext&, const std::vector<ScriptValue>& args) {
+    ScriptTable t;
+    VoiceService* s = voice();
+    const f64 idx = args[0].AsNumber();
+    if (!s || idx < 0.0 || idx != std::floor(idx)) return ScriptValue::Tbl(std::move(t));
+    const std::vector<VoiceSpeaker> sp = s->speakers();
+    if ((size_t)idx >= sp.size()) return ScriptValue::Tbl(std::move(t));
+    const VoiceSpeaker& e = sp[(size_t)idx];
+    t["id"] = ScriptValue::Str(e.id);
+    t["level"] = ScriptValue::Num((f64)e.level);
+    t["distance"] = ScriptValue::Num((f64)e.distance);
+    t["last_ms"] = ScriptValue::Num((f64)e.lastMs);
+    return ScriptValue::Tbl(std::move(t));
+  });
+  install("voice.stats", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    VoiceStats st;
+    if (VoiceService* s = voice()) st = s->stats();
+    ScriptTable t;
+    t["frames_captured"] = ScriptValue::Num((f64)st.framesCaptured);
+    t["frames_sent"] = ScriptValue::Num((f64)st.framesSent);
+    t["frames_received"] = ScriptValue::Num((f64)st.framesReceived);
+    t["frames_dropped"] = ScriptValue::Num((f64)st.framesDropped);
+    t["frames_played"] = ScriptValue::Num((f64)st.framesPlayed);
+    t["bytes_sent"] = ScriptValue::Num((f64)st.bytesSent);
+    t["bytes_received"] = ScriptValue::Num((f64)st.bytesReceived);
+    return ScriptValue::Tbl(std::move(t));
+  });
+  install("voice.reset", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (VoiceService* s = voice()) s->Reset();
+    return ScriptValue::Nil();
+  });
+  install("voice.transport", [voice](ScriptContext&, const std::vector<ScriptValue>&) {
+    VoiceService* s = voice();
+    if (!s || !s->transport()) return ScriptValue::Str(std::string());
+    return ScriptValue::Str(s->transport()->name());
   });
 
   //--- Fs (sandboxed file store) --------------------------------------------

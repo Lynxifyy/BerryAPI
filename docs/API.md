@@ -570,3 +570,32 @@ Capability: `combat`.
 | `crystal.arm() -> bool` | `combat` | Arms the advisor. While armed, the client's tick hook runs one advisory pass per game tick around the local player and fires `crystalAdvice` when the best spot changes. False when it is already armed. |
 | `crystal.disarm() -> nil` | `combat` | Disarms the advisor. A no-op when it is already disarmed. |
 | `crystal.armed() -> bool` | `combat` | True while the advisor runs its advisory pass on the game tick. |
+
+## Voice
+
+Capability: `voice`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `voice.config() -> Table` | `voice` | The current tunables as {max_range, full_volume_range, master_volume, max_speakers, hold_ms, max_frame_bytes, min_send_interval_ms}. |
+| `voice.set_max_range(range: number) -> bool` | `voice` | Sets how far a speaker is heard, in blocks. Must be finite and in (0, 128]; a bad value is refused. |
+| `voice.set_full_volume_range(range: number) -> bool` | `voice` | Sets the distance within which a speaker plays at full volume. Must be finite and in [0, max_range]; a bad value is refused. |
+| `voice.set_master_volume(volume: number) -> bool` | `voice` | Sets the playback master volume. Must be finite and in [0, 1]; a bad value is refused. |
+| `voice.set_max_speakers(n: number) -> bool` | `voice` | Sets how many speakers are mixed at once. Must be an integer in [1, 32]; a bad value is refused. |
+| `voice.set_hold_ms(ms: number) -> bool` | `voice` | Sets how long a speaker stays listed as talking after its last frame, in ms. Must be a positive integer; a bad value is refused. |
+| `voice.set_max_frame_bytes(n: number) -> bool` | `voice` | Sets the largest inbound frame payload accepted, in bytes. Must be an integer in [1, 2048]; a bad value is refused. |
+| `voice.set_min_send_interval_ms(ms: number) -> bool` | `voice` | Sets the shortest gap between outgoing frames, in ms. Must be a positive integer; a bad value is refused. |
+| `voice.start(self_id: string) -> bool` | `voice` | Starts a session as `self_id`. False when already running, when the id is malformed (empty, over 64 bytes, or carrying a control character), or when no transport is bound (there is nothing to talk over). |
+| `voice.stop() -> nil` | `voice` | Stops the session and forgets the speakers. A no-op when not running. |
+| `voice.running() -> bool` | `voice` | True while a session is running. |
+| `voice.self_id() -> string` | `voice` | The local session id, or \"\" when not running. |
+| `voice.set_talking(talking: bool) -> nil` | `voice` | Sets push-to-talk (or open-mic) state. Only a talking, unmuted session sends; the receive half runs either way. |
+| `voice.talking() -> bool` | `voice` | True while the local client is sending. |
+| `voice.set_muted(muted: bool) -> nil` | `voice` | Sets the microphone mute. A muted session sends nothing. |
+| `voice.muted() -> bool` | `voice` | True while the microphone is muted. |
+| `voice.set_position(x: number, y: number, z: number) -> nil` | `voice` | Sets the local player's position, used to judge the proximity of what the listener hears. |
+| `voice.speaker_count() -> number` | `voice` | How many speakers are currently heard. |
+| `voice.speaker(index: number) -> Table` | `voice` | The speaker at `index` in the activity list (loudest first) as {id, level, distance, last_ms}, or an empty table when out of range. |
+| `voice.stats() -> Table` | `voice` | The session counters as {frames_captured, frames_sent, frames_received, frames_dropped, frames_played, bytes_sent, bytes_received}. |
+| `voice.reset() -> nil` | `voice` | Forgets the speaker state and the counters, keeping the config and the seams. |
+| `voice.transport() -> string` | `voice` | The transport's short name (\"lan\" on device, \"\" when none is bound). |

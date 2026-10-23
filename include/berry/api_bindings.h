@@ -37,6 +37,7 @@
 #include "berry/replay_camera.h"
 #include "berry/radial.h"
 #include "berry/crystal.h"
+#include "berry/voice.h"
 #include "berry/cosmetic.h"
 #include "berry/event.h"
 #include "berry/fs.h"
@@ -200,6 +201,11 @@ class BERRY_API ScriptApi {
     /// skip the advisory overlay. It needs `world` for the entity list the
     /// analysis ranks against.
     CrystalOptimizer* crystal = nullptr;
+    /// Client-side proximity voice chat. Null makes the `voice.*` bindings fail
+    /// closed (no session, no frames) and the frame hook skip the voice pump.
+    /// The frame hook wires its proximity resolver to `world`/`localPlayer`, so
+    /// a speaker is only heard when the listener's own world view places them.
+    VoiceService* voice = nullptr;
   };
 
   ScriptApi();
@@ -318,6 +324,10 @@ class BERRY_API ScriptApi {
   /// Frame clock for the radial menu's open/close animation, kept separate for
   /// the same reason.
   u64 lastRadialMs_ = 0;
+  /// True once the frame hook has bound the voice proximity resolver. Reset when
+  /// the services are swapped, so a new world gets a fresh resolver rather than
+  /// a closure over the old handle.
+  bool voiceWired_ = false;
 
   // Immediate-mode UI frame state. A script's `ui.begin_frame` opens the frame
   // and `ui.end_frame` publishes it, so the embedder never calls

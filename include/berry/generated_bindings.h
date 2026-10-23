@@ -376,11 +376,33 @@ inline const BindingSpec* BindingSpecs() {
       {"crystal.arm", CapKind::Combat, 0, "Crystal"},
       {"crystal.disarm", CapKind::Combat, 0, "Crystal"},
       {"crystal.armed", CapKind::Combat, 0, "Crystal"},
+      {"voice.config", CapKind::Voice, 0, "Voice"},
+      {"voice.set_max_range", CapKind::Voice, 1, "Voice"},
+      {"voice.set_full_volume_range", CapKind::Voice, 1, "Voice"},
+      {"voice.set_master_volume", CapKind::Voice, 1, "Voice"},
+      {"voice.set_max_speakers", CapKind::Voice, 1, "Voice"},
+      {"voice.set_hold_ms", CapKind::Voice, 1, "Voice"},
+      {"voice.set_max_frame_bytes", CapKind::Voice, 1, "Voice"},
+      {"voice.set_min_send_interval_ms", CapKind::Voice, 1, "Voice"},
+      {"voice.start", CapKind::Voice, 1, "Voice"},
+      {"voice.stop", CapKind::Voice, 0, "Voice"},
+      {"voice.running", CapKind::Voice, 0, "Voice"},
+      {"voice.self_id", CapKind::Voice, 0, "Voice"},
+      {"voice.set_talking", CapKind::Voice, 1, "Voice"},
+      {"voice.talking", CapKind::Voice, 0, "Voice"},
+      {"voice.set_muted", CapKind::Voice, 1, "Voice"},
+      {"voice.muted", CapKind::Voice, 0, "Voice"},
+      {"voice.set_position", CapKind::Voice, 3, "Voice"},
+      {"voice.speaker_count", CapKind::Voice, 0, "Voice"},
+      {"voice.speaker", CapKind::Voice, 1, "Voice"},
+      {"voice.stats", CapKind::Voice, 0, "Voice"},
+      {"voice.reset", CapKind::Voice, 0, "Voice"},
+      {"voice.transport", CapKind::Voice, 0, "Voice"},
   };
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 355; }
+inline size_t BindingSpecCount() { return 377; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -808,6 +830,30 @@ inline const char* const kCrystalNames[] = {
     "crystal.disarm",
     "crystal.armed",
 };
+inline const char* const kVoiceNames[] = {
+    "voice.config",
+    "voice.set_max_range",
+    "voice.set_full_volume_range",
+    "voice.set_master_volume",
+    "voice.set_max_speakers",
+    "voice.set_hold_ms",
+    "voice.set_max_frame_bytes",
+    "voice.set_min_send_interval_ms",
+    "voice.start",
+    "voice.stop",
+    "voice.running",
+    "voice.self_id",
+    "voice.set_talking",
+    "voice.talking",
+    "voice.set_muted",
+    "voice.muted",
+    "voice.set_position",
+    "voice.speaker_count",
+    "voice.speaker",
+    "voice.stats",
+    "voice.reset",
+    "voice.transport",
+};
 
 inline const ModuleBindings* ModuleBindingTable() {
   static const ModuleBindings kModules[] = {
@@ -838,11 +884,12 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Replay", kReplayNames, 32},
       {"Radial", kRadialNames, 18},
       {"Crystal", kCrystalNames, 19},
+      {"Voice", kVoiceNames, 22},
   };
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 27; }
+inline size_t ModuleBindingCount() { return 28; }
 
 }  // namespace api
 }  // namespace Berry
