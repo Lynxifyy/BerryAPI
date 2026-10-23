@@ -36,6 +36,56 @@ class BERRY_API TcpSocket {
 };
 
 //----------------------------------------------------------------------------
+// UDP socket (IPv4)
+//
+// The datagram transport under the LAN cosmetic sync channel. A bound socket
+// sends to and receives from peers; datagrams are best-effort and unordered, so
+// the layer above frames and reassembles. This class only moves bytes.
+//----------------------------------------------------------------------------
+
+class BERRY_API UdpSocket {
+ public:
+  UdpSocket();
+  ~UdpSocket();
+  void Close();
+
+  /// Binds to `port` on `bindAddr` (default: any address). A port of 0 lets the
+  /// kernel choose one, which `localPort()` then reports. `broadcast` enables
+  /// SO_BROADCAST for sending to a subnet broadcast address.
+  bool Bind(u16 port = 0, const char* bindAddr = "0.0.0.0", bool broadcast = false);
+
+  /// Joins an IPv4 multicast group on `ifaceAddr`. Enables multicast loopback
+  /// so two sockets on one host see each other (and a host test runs on
+  /// loopback). Returns false (and records the error) on a bad group or a
+  /// failed join; the socket stays usable for unicast.
+  bool JoinMulticast(const char* group, const char* ifaceAddr = "127.0.0.1");
+  /// Sets the outgoing interface for multicast sends (default: any). Required on
+  /// some hosts before a send to a group is delivered to a local member.
+  bool SetMulticastInterface(const char* ifaceAddr);
+
+  /// Sends one datagram. Non-blocking: returns false immediately on error.
+  bool SendTo(const void* data, size_t len, const char* host, u16 port);
+
+  /// Receives one datagram, waiting up to `timeoutMs`. `fromHost` (optional)
+  /// receives the sender's numeric address, `fromPort` its port. Returns the
+  /// byte count, 0 on timeout, or -1 on error. A datagram larger than `len` is
+  /// truncated to `len` and reported at that length (the framing layer sizes its
+  /// buffer to the path MTU, so a peer cannot overrun it).
+  ssize_t RecvFrom(void* buf, size_t len, std::string* fromHost, u16* fromPort,
+                   int timeoutMs = 100);
+
+  /// The bound port, or 0 when unbound.
+  u16 localPort() const;
+  bool valid() const { return fd_ >= 0; }
+  const std::string& LastError() const { return err_; }
+  int fd() const { return fd_; }
+
+ private:
+  int fd_ = -1;
+  std::string err_;
+};
+
+//----------------------------------------------------------------------------
 // HTTP client (HTTP/1.1, no external deps)
 //----------------------------------------------------------------------------
 
