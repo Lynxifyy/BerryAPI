@@ -24,6 +24,7 @@ CORE_SRC := \
   core/modules/world.cpp \
   core/modules/world_query.cpp \
   core/modules/hud.cpp \
+  core/modules/ui.cpp \
   core/modules/input.cpp \
   core/modules/pvp.cpp \
   core/modules/cosmetic.cpp \
@@ -94,6 +95,7 @@ TEST_SRC := \
   tests/test_luau.cpp \
   tests/test_idl.cpp \
   tests/test_hud.cpp \
+  tests/test_ui.cpp \
   tests/test_governor.cpp \
   tests/test_url.cpp \
   tests/test_loader.cpp \
