@@ -514,6 +514,8 @@ module Events {
   event combatConfirmed(hit: string)
   doc "A predicted hit that was never confirmed within the prediction window. Carries \"<attacker>:<victim>\"."
   event combatMissed(hit: string)
+  doc "The label of the radial-menu item the player committed, fired once on the release that selects it."
+  event radialSelected(label: string)
 }
 
 module Intent {
@@ -642,4 +644,45 @@ module Replay {
   fn export_frame() -> number
   doc "The export frame rate, or 0 when not exporting."
   fn export_fps() -> number
+}
+
+module Radial {
+  capability hud
+  doc "Client-side radial (pie) menu: a script fills it with items, opens it, and reads which item the player picked. It draws through the render layer like the immediate-mode UI and the retained HUD, and holds no engine pointers of its own. The interaction is the standard one: the menu opens at the screen centre, the pointer's angle picks a sector, and releasing the select button (right mouse) over an enabled sector commits that item and fires `radialSelected` once. Everything here is local — the player's own pointer over the player's own menu — so nothing is revealed that the client was not already shown. The sector geometry is pure (`sector_at`), so a test can pin it without a renderer, and every feed is bounded (item count, label length) and every bad value refused rather than clamped."
+  doc "Appends an item. False when the label is empty, longer than 32 bytes or non-printable, or the menu already holds its maximum of 12 items."
+  fn add_item(label: string, enabled: bool) -> bool
+  doc "Removes the item at `index`. False when out of range."
+  fn remove_item(index: number) -> bool
+  doc "Removes every item and closes the menu."
+  fn clear() -> nil
+  doc "How many items the menu holds."
+  fn count() -> number
+  doc "The label at `index`, or an empty string when out of range."
+  fn item_label(index: number) -> string
+  doc "Whether the item at `index` is enabled; false when out of range."
+  fn item_enabled(index: number) -> bool
+  doc "Enables or disables an item. False when out of range."
+  fn set_item_enabled(index: number, enabled: bool) -> bool
+  doc "Opens the menu. False when it holds no items (an empty menu is not worth showing) or is already open."
+  fn open() -> bool
+  doc "Closes the menu and clears the hover and selection."
+  fn close() -> nil
+  doc "True while the menu is open."
+  fn is_open() -> bool
+  doc "The outer radius in pixels."
+  fn radius() -> number
+  doc "Sets the outer radius. Must be finite and positive and greater than the inner radius; a bad value is refused."
+  fn set_radius(radius: number) -> bool
+  doc "The inner (dead-zone) radius in pixels."
+  fn inner_radius() -> number
+  doc "Sets the inner radius. Must be finite, non-negative and less than the outer radius; a bad value is refused."
+  fn set_inner_radius(radius: number) -> bool
+  doc "The open/close animation duration in milliseconds."
+  fn open_ms() -> number
+  doc "Sets the open animation duration. Must be finite and positive; a bad value is refused."
+  fn set_open_ms(ms: number) -> bool
+  doc "The current menu state as {open, hovered, selected, progress, items}. `hovered`/`selected` are -1 when none."
+  fn state() -> Table
+  doc "The sector under a pointer relative to a centre for `count` sectors, or -1 for the dead zone or outside the ring. Pure: it reads no state, so it pins the geometry."
+  fn sector_at(pointer_x: number, pointer_y: number, center_x: number, center_y: number, inner_radius: number, outer_radius: number, count: number) -> number
 }

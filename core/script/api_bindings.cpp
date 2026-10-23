@@ -388,6 +388,33 @@ void ScriptApi::InitFrameHook() {
             services_.ui->Present(*services_.renderer, in);
           }
         }
+        // The radial menu draws over the UI, centred on the screen. The frame
+        // hook owns its clock and hit-test: it reads the pointer and the select
+        // button (right mouse) from the input snapshot, advances the open/close
+        // animation, resolves the hovered sector, commits on a release, and
+        // draws the open menu. A menu with no items draws nothing.
+        if (services_.radial && services_.renderer) {
+          const Vec2 screen = screenSize();
+          if (screen.x > 0 && screen.y > 0) {
+            const u64 now = NowMs();
+            f32 dt = 0.0f;
+            if (lastRadialMs_ != 0 && now > lastRadialMs_) {
+              dt = (f32)(now - lastRadialMs_) / 1000.0f;
+              if (dt > 0.1f) dt = 0.1f;   // a stall must not fast-forward the menu
+            }
+            lastRadialMs_ = now;
+            Vec2 pointer(screen.x * 0.5f, screen.y * 0.5f);
+            bool held = false;
+            if (services_.input) {
+              const InputState& st = services_.input->state();
+              pointer = st.pointer;
+              held = st.use;
+            }
+            const Vec2 center(screen.x * 0.5f, screen.y * 0.5f);
+            services_.radial->Update(dt, center, pointer, held);
+            services_.radial->Draw(*services_.renderer, center);
+          }
+        }
         // The script-module overlay draws last, on top, when a user turned it
         // on. It reads a snapshot, so a module declared this frame is next
         // frame's line rather than a torn draw.
@@ -3194,6 +3221,136 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
   install("replay.export_fps", [this](ScriptContext&, const std::vector<ScriptValue>&) {
     if (!services_.replayCamera) return ScriptValue::Num(0);
     return ScriptValue::Num((f64)services_.replayCamera->exportFps());
+  });
+
+  //--- Radial (client-side pie menu) ---------------------------------------
+  //
+  // The script authors the item list and opens/closes the menu; the frame hook
+  // drives the animation and the hit-test on the render thread and publishes a
+  // committed item as `radialSelected`. A call with no menu bound fails closed
+  // (the HUD convention, not an error): the item edits report false, `state` is
+  // an inert table, and `sector_at` still answers, because it is pure geometry
+  // with no service behind it. Failing closed rather than raising lets a script
+  // that expects a menu run unchanged against a host that has none.
+  auto radial = [this]() -> RadialMenu* { return services_.radial; };
+
+  install("radial.add_item", [radial](ScriptContext&, const std::vector<ScriptValue>& args) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(m->AddItem(args[0].ToDisplay(), args[1].Truthy()));
+  });
+
+  install("radial.remove_item", [radial](ScriptContext&, const std::vector<ScriptValue>& args) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Bool(false);
+    const f64 i = args[0].AsNumber();
+    if (!std::isfinite(i) || i < 0.0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(m->RemoveItem((size_t)i));
+  });
+
+  install("radial.clear", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.radial) services_.radial->Clear();
+    return ScriptValue::Nil();
+  });
+
+  install("radial.count", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.radial) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.radial->itemCount());
+  });
+
+  install("radial.item_label", [radial](ScriptContext&, const std::vector<ScriptValue>& args) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Str("");
+    const f64 i = args[0].AsNumber();
+    if (!std::isfinite(i) || i < 0.0) return ScriptValue::Str("");
+    return ScriptValue::Str(m->itemLabel((size_t)i));
+  });
+
+  install("radial.item_enabled", [radial](ScriptContext&, const std::vector<ScriptValue>& args) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Bool(false);
+    const f64 i = args[0].AsNumber();
+    if (!std::isfinite(i) || i < 0.0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(m->itemEnabled((size_t)i));
+  });
+
+  install("radial.set_item_enabled", [radial](ScriptContext&, const std::vector<ScriptValue>& args) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Bool(false);
+    const f64 i = args[0].AsNumber();
+    if (!std::isfinite(i) || i < 0.0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(m->SetItemEnabled((size_t)i, args[1].Truthy()));
+  });
+
+  install("radial.open", [radial](ScriptContext&, const std::vector<ScriptValue>&) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(m->Open());
+  });
+
+  install("radial.close", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.radial) services_.radial->Close();
+    return ScriptValue::Nil();
+  });
+
+  install("radial.is_open", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.radial) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.radial->open());
+  });
+
+  install("radial.radius", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.radial) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.radial->config().radius);
+  });
+
+  install("radial.set_radius", [radial](ScriptContext&, const std::vector<ScriptValue>& args) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(m->SetRadius((f32)args[0].AsNumber()));
+  });
+
+  install("radial.inner_radius", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.radial) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.radial->config().innerRadius);
+  });
+
+  install("radial.set_inner_radius", [radial](ScriptContext&, const std::vector<ScriptValue>& args) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(m->SetInnerRadius((f32)args[0].AsNumber()));
+  });
+
+  install("radial.open_ms", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.radial) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.radial->config().openMs);
+  });
+
+  install("radial.set_open_ms", [radial](ScriptContext&, const std::vector<ScriptValue>& args) {
+    RadialMenu* m = radial();
+    if (!m) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(m->SetOpenMs((f32)args[0].AsNumber()));
+  });
+
+  install("radial.state", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    RadialState s;
+    if (services_.radial) s = services_.radial->state();
+    ScriptTable t;
+    t["open"] = ScriptValue::Bool(s.open);
+    t["hovered"] = ScriptValue::Num((f64)s.hovered);
+    t["selected"] = ScriptValue::Num((f64)s.selected);
+    t["progress"] = ScriptValue::Num((f64)s.progress);
+    t["items"] = ScriptValue::Num((f64)s.items);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("radial.sector_at", [](ScriptContext&, const std::vector<ScriptValue>& args) {
+    const Vec2 pointer((f32)args[0].AsNumber(), (f32)args[1].AsNumber());
+    const Vec2 center((f32)args[2].AsNumber(), (f32)args[3].AsNumber());
+    const f32 inner = (f32)args[4].AsNumber();
+    const f32 outer = (f32)args[5].AsNumber();
+    const f64 count = args[6].AsNumber();
+    if (!std::isfinite(count) || count < 0.0 || count > 64.0) return ScriptValue::Num(-1);
+    return ScriptValue::Num((f64)RadialMenu::SectorFor(pointer, center, inner, outer, (size_t)count));
   });
 
   //--- Fs (sandboxed file store) --------------------------------------------

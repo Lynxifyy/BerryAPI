@@ -605,6 +605,46 @@ export interface Replay {
   export_fps(): number;
 }
 
+/** Capability required: hud. */
+export interface Radial {
+  /** Appends an item. False when the label is empty, longer than 32 bytes or non-printable, or the menu already holds its maximum of 12 items. */
+  add_item(label: string, enabled: boolean): boolean;
+  /** Removes the item at `index`. False when out of range. */
+  remove_item(index: number): boolean;
+  /** Removes every item and closes the menu. */
+  clear(): void;
+  /** How many items the menu holds. */
+  count(): number;
+  /** The label at `index`, or an empty string when out of range. */
+  item_label(index: number): string;
+  /** Whether the item at `index` is enabled; false when out of range. */
+  item_enabled(index: number): boolean;
+  /** Enables or disables an item. False when out of range. */
+  set_item_enabled(index: number, enabled: boolean): boolean;
+  /** Opens the menu. False when it holds no items (an empty menu is not worth showing) or is already open. */
+  open(): boolean;
+  /** Closes the menu and clears the hover and selection. */
+  close(): void;
+  /** True while the menu is open. */
+  is_open(): boolean;
+  /** The outer radius in pixels. */
+  radius(): number;
+  /** Sets the outer radius. Must be finite and positive and greater than the inner radius; a bad value is refused. */
+  set_radius(radius: number): boolean;
+  /** The inner (dead-zone) radius in pixels. */
+  inner_radius(): number;
+  /** Sets the inner radius. Must be finite, non-negative and less than the outer radius; a bad value is refused. */
+  set_inner_radius(radius: number): boolean;
+  /** The open/close animation duration in milliseconds. */
+  open_ms(): number;
+  /** Sets the open animation duration. Must be finite and positive; a bad value is refused. */
+  set_open_ms(ms: number): boolean;
+  /** The current menu state as {open, hovered, selected, progress, items}. `hovered`/`selected` are -1 when none. */
+  state(): Record<string, unknown>;
+  /** The sector under a pointer relative to a centre for `count` sectors, or -1 for the dead zone or outside the ring. Pure: it reads no state, so it pins the geometry. */
+  sector_at(pointer_x: number, pointer_y: number, center_x: number, center_y: number, inner_radius: number, outer_radius: number, count: number): number;
+}
+
 /** Coroutine-native async facade (Phase 4). */
 export interface AsyncFacade {
   /** Suspend until `ticks` game ticks have elapsed. */
@@ -640,4 +680,5 @@ declare const Shader: Shader;
 declare const Package: Package;
 declare const Record: Record;
 declare const Replay: Replay;
+declare const Radial: Radial;
 declare const async: AsyncFacade;

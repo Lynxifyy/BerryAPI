@@ -35,6 +35,7 @@
 #include "berry/combat_state.h"
 #include "berry/animator.h"
 #include "berry/replay_camera.h"
+#include "berry/radial.h"
 #include "berry/cosmetic.h"
 #include "berry/event.h"
 #include "berry/fs.h"
@@ -190,6 +191,9 @@ class BERRY_API ScriptApi {
     /// scripted viewpoint instead of the player's. Null makes the `replay.*`
     /// bindings fail closed.
     ReplayCamera* replayCamera = nullptr;
+    /// Client-side radial (pie) menu. Null makes the `radial.*` bindings fail
+    /// closed and the frame hook skip the menu.
+    RadialMenu* radial = nullptr;
   };
 
   ScriptApi();
@@ -299,6 +303,9 @@ class BERRY_API ScriptApi {
   u64 lastAnimatorMs_ = 0;
   /// Frame clock for replay-camera playback, kept separate for the same reason.
   u64 lastReplayMs_ = 0;
+  /// Frame clock for the radial menu's open/close animation, kept separate for
+  /// the same reason.
+  u64 lastRadialMs_ = 0;
 
   // Immediate-mode UI frame state. A script's `ui.begin_frame` opens the frame
   // and `ui.end_frame` publishes it, so the embedder never calls

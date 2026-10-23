@@ -414,6 +414,7 @@ Events (await with `Events.once`):
 - `combatPredicted(hit: string)` — A hit the local client predicted (the swing it believes will land). Carries \"<attacker>:<victim>\".
 - `combatConfirmed(hit: string)` — A predicted hit the engine then confirmed. Carries \"<attacker>:<victim>\".
 - `combatMissed(hit: string)` — A predicted hit that was never confirmed within the prediction window. Carries \"<attacker>:<victim>\".
+- `radialSelected(label: string)` — The label of the radial-menu item the player committed, fired once on the release that selects it.
 
 ## Intent
 
@@ -517,3 +518,28 @@ Capability: `world`.
 | `replay.exporting() -> bool` | `world` | - |
 | `replay.export_frame() -> number` | `world` | How many frames the current export has yielded. |
 | `replay.export_fps() -> number` | `world` | The export frame rate, or 0 when not exporting. |
+
+## Radial
+
+Capability: `hud`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `radial.add_item(label: string, enabled: bool) -> bool` | `hud` | Appends an item. False when the label is empty, longer than 32 bytes or non-printable, or the menu already holds its maximum of 12 items. |
+| `radial.remove_item(index: number) -> bool` | `hud` | Removes the item at `index`. False when out of range. |
+| `radial.clear() -> nil` | `hud` | Removes every item and closes the menu. |
+| `radial.count() -> number` | `hud` | How many items the menu holds. |
+| `radial.item_label(index: number) -> string` | `hud` | The label at `index`, or an empty string when out of range. |
+| `radial.item_enabled(index: number) -> bool` | `hud` | Whether the item at `index` is enabled; false when out of range. |
+| `radial.set_item_enabled(index: number, enabled: bool) -> bool` | `hud` | Enables or disables an item. False when out of range. |
+| `radial.open() -> bool` | `hud` | Opens the menu. False when it holds no items (an empty menu is not worth showing) or is already open. |
+| `radial.close() -> nil` | `hud` | Closes the menu and clears the hover and selection. |
+| `radial.is_open() -> bool` | `hud` | True while the menu is open. |
+| `radial.radius() -> number` | `hud` | The outer radius in pixels. |
+| `radial.set_radius(radius: number) -> bool` | `hud` | Sets the outer radius. Must be finite and positive and greater than the inner radius; a bad value is refused. |
+| `radial.inner_radius() -> number` | `hud` | The inner (dead-zone) radius in pixels. |
+| `radial.set_inner_radius(radius: number) -> bool` | `hud` | Sets the inner radius. Must be finite, non-negative and less than the outer radius; a bad value is refused. |
+| `radial.open_ms() -> number` | `hud` | The open/close animation duration in milliseconds. |
+| `radial.set_open_ms(ms: number) -> bool` | `hud` | Sets the open animation duration. Must be finite and positive; a bad value is refused. |
+| `radial.state() -> Table` | `hud` | The current menu state as {open, hovered, selected, progress, items}. `hovered`/`selected` are -1 when none. |
+| `radial.sector_at(pointer_x: number, pointer_y: number, center_x: number, center_y: number, inner_radius: number, outer_radius: number, count: number) -> number` | `hud` | The sector under a pointer relative to a centre for `count` sectors, or -1 for the dead zone or outside the ring. Pure: it reads no state, so it pins the geometry. |

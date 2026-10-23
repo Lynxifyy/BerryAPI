@@ -339,11 +339,29 @@ inline const BindingSpec* BindingSpecs() {
       {"replay.exporting", CapKind::World, 0, "Replay"},
       {"replay.export_frame", CapKind::World, 0, "Replay"},
       {"replay.export_fps", CapKind::World, 0, "Replay"},
+      {"radial.add_item", CapKind::Hud, 2, "Radial"},
+      {"radial.remove_item", CapKind::Hud, 1, "Radial"},
+      {"radial.clear", CapKind::Hud, 0, "Radial"},
+      {"radial.count", CapKind::Hud, 0, "Radial"},
+      {"radial.item_label", CapKind::Hud, 1, "Radial"},
+      {"radial.item_enabled", CapKind::Hud, 1, "Radial"},
+      {"radial.set_item_enabled", CapKind::Hud, 2, "Radial"},
+      {"radial.open", CapKind::Hud, 0, "Radial"},
+      {"radial.close", CapKind::Hud, 0, "Radial"},
+      {"radial.is_open", CapKind::Hud, 0, "Radial"},
+      {"radial.radius", CapKind::Hud, 0, "Radial"},
+      {"radial.set_radius", CapKind::Hud, 1, "Radial"},
+      {"radial.inner_radius", CapKind::Hud, 0, "Radial"},
+      {"radial.set_inner_radius", CapKind::Hud, 1, "Radial"},
+      {"radial.open_ms", CapKind::Hud, 0, "Radial"},
+      {"radial.set_open_ms", CapKind::Hud, 1, "Radial"},
+      {"radial.state", CapKind::Hud, 0, "Radial"},
+      {"radial.sector_at", CapKind::Hud, 7, "Radial"},
   };
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 318; }
+inline size_t BindingSpecCount() { return 336; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -730,6 +748,26 @@ inline const char* const kReplayNames[] = {
     "replay.export_frame",
     "replay.export_fps",
 };
+inline const char* const kRadialNames[] = {
+    "radial.add_item",
+    "radial.remove_item",
+    "radial.clear",
+    "radial.count",
+    "radial.item_label",
+    "radial.item_enabled",
+    "radial.set_item_enabled",
+    "radial.open",
+    "radial.close",
+    "radial.is_open",
+    "radial.radius",
+    "radial.set_radius",
+    "radial.inner_radius",
+    "radial.set_inner_radius",
+    "radial.open_ms",
+    "radial.set_open_ms",
+    "radial.state",
+    "radial.sector_at",
+};
 
 inline const ModuleBindings* ModuleBindingTable() {
   static const ModuleBindings kModules[] = {
@@ -758,11 +796,12 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Package", kPackageNames, 6},
       {"Record", kRecordNames, 14},
       {"Replay", kReplayNames, 32},
+      {"Radial", kRadialNames, 18},
   };
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 25; }
+inline size_t ModuleBindingCount() { return 26; }
 
 }  // namespace api
 }  // namespace Berry
