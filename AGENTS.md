@@ -116,6 +116,18 @@ make lib             # builds build/libBerryAPI.so
   `Save`/`Load` use the versioned `berry-animator` document; `Load` refuses a
   wrong version, a duplicate name, an unknown bone or an out-of-range key, and
   parses into a scratch list so a bad document never disturbs the live clips.
+- `ReplayCamera` (`replay_camera.h`) is the client feature on top of the tape:
+  a keyframed camera timeline over replay ticks. Like the animator it owns no
+  clock (`Advance(dtSeconds)` is the only time input), and the `ScriptApi`
+  frame hook is its real caller — while `active()` it builds the frame's
+  `CameraState` and hands it to the renderer *before* any overlay draws, so
+  world-to-screen/3D geometry project through the replay pose. Sampling is
+  `Linear` or `Smooth` (Catmull-Rom position; angles/FOV always a shorter-arc
+  eased lerp, never a spline, so aim never overshoots). Keys are unique per
+  tick and kept sorted. `ExportBegin`/`ExportStep` walk the timeline at a fixed
+  fps so an offline render has a deterministic length; the frame hook steps it
+  instead of wall time. Everything is bounded (`kMaxKeys`, FOV `[1,179]`,
+  `kMaxSpeed`) and every bad value is refused, not clamped.
 
 ## Conventions
 

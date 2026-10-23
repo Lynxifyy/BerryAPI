@@ -931,6 +931,58 @@ whole surface carries the `world` grant, since it reads the world stream and
 nothing more; `save` returns one JSON document a script can hand to `fs.write`.
 Every binding fails closed when no recorder is bound.
 
+### The replay camera (`replay_camera.h`)
+
+A tape is only worth watching if the viewpoint is scripted. `ReplayCamera`
+(`replay_camera.h`) is the client feature on top of the replay: a keyframed
+camera path over the tape's ticks. A key is where the camera is and how it is
+aimed — position, pitch, yaw, roll and FOV — at a tick:
+
+```
+cam.AddKey(CameraKey{0,  Vec3(10, 65, 10), 0, 0,  0, 70});
+cam.AddKey(CameraKey{60, Vec3(20, 70, 20), -10, 45, 0, 70});
+cam.SetActive(true);   // the frame hook now draws from this timeline
+cam.Play();            // and the playhead advances on the frame clock
+```
+
+Sampling between keys is `Linear` (a straight lerp) or `Smooth` (a
+Catmull-Rom path through the neighbouring keys, so a pan curves instead of
+turning at each key). Angles and FOV always interpolate with a shorter-arc
+eased lerp, never a spline: an aim direction must not swing past its target.
+Before the first key a sample holds the first, past the last it holds the last,
+so a timeline has no gaps.
+
+Like the animator, the camera owns no clock: `Advance(dtSeconds)` is the whole
+time input, so playback is deterministic in a test and a paused client does not
+advance. The frame hook calls it while a timeline is active, then builds the
+frame's `CameraState` from the sample and hands it to the renderer — before any
+overlay draws, so world-to-screen, 3D debug geometry and billboards all project
+through the replay pose rather than the player's. Deactivating gives the camera
+back. `SetFovOverride` pins the FOV independent of the keys, which is what a
+zoom or a cinematic pass needs.
+
+The export path renders offline. `ExportBegin(fps, aspect, w, h)` starts a
+walk from the first key at a fixed rate, and while it runs the frame hook steps
+it with `ExportStep` instead of wall time, so each rendered frame is exactly one
+video frame regardless of how fast the machine is. A ten-second timeline at
+60 fps is 601 frames on any machine; the export's length is a property of the
+timeline, not the renderer.
+
+It is bounded like everything else — `kMaxKeys`, an FOV range of `[1, 179]`, a
+speed cap — and every bad value is refused rather than clamped: a non-finite
+position, an out-of-range FOV, a second key at an occupied tick, a negative
+tick. Every read fails closed, so a script cannot leave the renderer with a
+camera it cannot trust. It is client-side and read-only with respect to the
+world: it changes where this client looks while replaying what it already
+recorded, and reveals nothing the client was not already sent.
+
+Scripts reach it through the `replay.*` bindings: `add_key`/`remove_key`/
+`clear`, the `key_count`/`first_tick`/`last_tick`/`duration_ticks`/`has_key`
+reads, `smoothing`/`set_smoothing`, `activate`/`deactivate`, `play`/`pause`/
+`stop`/`playing`, `speed`/`set_speed`, `playhead`/`seek`, `sample`/`sample_now`,
+`fov_override`/`set_fov_override`, and `export_begin`/`export_end`/`exporting`/
+`export_frame`/`export_fps`. The whole surface carries the `world` grant.
+
 ## Local RPC & REPL (`rpc.h`)
 
 Tooling needs a way to talk to a running client: a VS Code extension, a
