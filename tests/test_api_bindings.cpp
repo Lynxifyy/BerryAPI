@@ -2705,6 +2705,201 @@ static void TestFrameHookDrawsRadialMenu() {
   CHECK(seam.texts == 3);      // one label per item
 }
 
+static void TestCrystalBindings() {
+  std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
+  WorldHandle* world = worldMod->Service<WorldHandle>();
+  CHECK(world != nullptr);
+
+  auto shim = std::make_shared<Berry::Test::ShimLevel>();
+  EntityId self{1, 1};
+  EntitySnapshot me;
+  me.id = self;
+  me.type = EntityType::Player;
+  me.position = Vec3(0.5f, 0, 0.5f);
+  me.alive = true;
+  shim->AddEntity(self, me);
+  EntityId enemy{7, 7};
+  EntitySnapshot foe;
+  foe.id = enemy;
+  foe.type = EntityType::Player;
+  foe.position = Vec3(2.5f, 0, 0.5f);
+  foe.alive = true;
+  shim->AddEntity(enemy, foe);
+  world->SetSeam(shim);
+
+  CrystalOptimizer crystal;
+  ScriptApi::Services services;
+  services.world = world;
+  services.crystal = &crystal;
+  services.localPlayer = self;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+
+  //--- configuration reads and validated writes ---
+  CHECK(Call(bindings, "crystal.config", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(std::fabs(out.AsTable()->at("blast_radius").AsNumber() - 6.0) < 1e-6);
+  CHECK(Call(bindings, "crystal.set_blast_radius", {ScriptValue::Num(8)}, {"combat"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(std::fabs(crystal.config().blastRadius - 8.0f) < 1e-5f);
+  // A bad value is refused and changes nothing.
+  CHECK(Call(bindings, "crystal.set_blast_radius", {ScriptValue::Num(-1)}, {"combat"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(std::fabs(crystal.config().blastRadius - 8.0f) < 1e-5f);
+  // A fractional count cannot name targets.
+  CHECK(Call(bindings, "crystal.set_min_targets", {ScriptValue::Num(1.5)}, {"combat"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "crystal.set_levels", {ScriptValue::Num(1)}, {"combat"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  //--- the pure estimate ---
+  CHECK(Call(bindings, "crystal.estimate",
+             {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(4), ScriptValue::Num(0), ScriptValue::Num(0)},
+             {"combat"}, &out) == ScriptStatus::Ok);
+  // 8-block radius, 12 max damage, at distance 4 -> 6.
+  CHECK(std::fabs(out.AsNumber() - 6.0) < 1e-4);
+
+  //--- a full analysis ---
+  CHECK(Call(bindings, "crystal.analyze",
+             {ScriptValue::Num(0.5), ScriptValue::Num(0), ScriptValue::Num(0.5)},
+             {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() > 0);
+  CHECK(Call(bindings, "crystal.count", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  const f64 count = out.AsNumber();
+  CHECK(count > 0);
+
+  CHECK(Call(bindings, "crystal.best", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("ok").Truthy());
+  CHECK(out.AsTable()->at("targets").AsNumber() >= 1);
+  CHECK(out.AsTable()->at("best_damage").AsNumber() > 0);
+
+  // Every index in range resolves; one out of range is an empty table, not an
+  // error and not a fabricated placement.
+  CHECK(Call(bindings, "crystal.placement", {ScriptValue::Num(0)}, {"combat"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("ok").Truthy());
+  CHECK(Call(bindings, "crystal.placement", {ScriptValue::Num(count + 100)}, {"combat"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsTable()->find("ok") == out.AsTable()->end());
+
+  CHECK(Call(bindings, "crystal.stats", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("analyses").AsNumber() == 1);
+  CHECK(out.AsTable()->at("candidates").AsNumber() > 0);
+
+  //--- the capability gate ---
+  CHECK(Call(bindings, "crystal.analyze",
+             {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0)},
+             {"world"}, &out) == ScriptStatus::CapabilityDenied);
+
+  //--- reset ---
+  CHECK(Call(bindings, "crystal.reset", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.count", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+}
+
+static void TestCrystalFailsClosedWithoutService() {
+  ScriptApi::Services services;   // no crystal, no world
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  // An analysis recommends nothing when no advisor is bound.
+  CHECK(Call(bindings, "crystal.analyze",
+             {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0)},
+             {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "crystal.count", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "crystal.best", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.AsTable()->at("ok").Truthy());
+  // Writes report false; reads report the inert default.
+  CHECK(Call(bindings, "crystal.set_range", {ScriptValue::Num(4)}, {"combat"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "crystal.arm", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "crystal.armed", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  // The pure estimate still answers with the default tunables.
+  CHECK(Call(bindings, "crystal.estimate",
+             {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(3), ScriptValue::Num(0), ScriptValue::Num(0)},
+             {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(std::fabs(out.AsNumber() - 6.0) < 1e-4);
+}
+
+static void TestCrystalTickHook() {
+  std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
+  WorldHandle* world = worldMod->Service<WorldHandle>();
+  auto shim = std::make_shared<Berry::Test::ShimLevel>();
+  EntityId self{1, 1};
+  EntitySnapshot me;
+  me.id = self;
+  me.type = EntityType::Player;
+  me.position = Vec3(0.5f, 0, 0.5f);
+  me.alive = true;
+  shim->AddEntity(self, me);
+  EntityId enemy{7, 7};
+  EntitySnapshot foe;
+  foe.id = enemy;
+  foe.type = EntityType::Player;
+  foe.position = Vec3(2.5f, 0, 0.5f);
+  foe.alive = true;
+  shim->AddEntity(enemy, foe);
+  world->SetSeam(shim);
+
+  CrystalOptimizer crystal;
+  ScriptApi::Services services;
+  services.world = world;
+  services.crystal = &crystal;
+  services.localPlayer = self;
+  ScriptApi api(services);
+
+  int adviceEvents = 0;
+  std::string advicePayload;
+  EventBus::ListenerId id = EventBus::Instance().On(
+      "crystalAdvice", [&](const EventContext& e) {
+        ++adviceEvents;
+        if (e.data) advicePayload = *(const char* const*)e.data;
+        return EventResult::Continue;
+      });
+
+  // Disarmed: a tick runs no pass.
+  GameTick t = 1;
+  EventBus::Instance().Emit("berry:tick", &t, nullptr);
+  CHECK(crystal.stats().analyses == 0);
+  CHECK(adviceEvents == 0);
+
+  // Armed: the tick runs one pass and publishes the best spot once.
+  CHECK(crystal.Arm());
+  EventBus::Instance().Emit("berry:tick", &t, nullptr);
+  CHECK(crystal.stats().analyses == 1);
+  CHECK(adviceEvents == 1);
+  CHECK(!advicePayload.empty());
+
+  // A second tick with the same world does not re-publish the same answer.
+  t = 2;
+  EventBus::Instance().Emit("berry:tick", &t, nullptr);
+  CHECK(crystal.stats().analyses == 2);
+  CHECK(adviceEvents == 1);
+
+  // Disarm: further ticks do nothing.
+  crystal.Disarm();
+  t = 3;
+  EventBus::Instance().Emit("berry:tick", &t, nullptr);
+  CHECK(crystal.stats().analyses == 2);
+
+  EventBus::Instance().Off("crystalAdvice", id);
+}
+
 int main() {
   TestEveryIdlBindingIsInstalled();
   TestCapabilityGateOnDeclaredBindings();
@@ -2737,6 +2932,9 @@ int main() {
   TestRadialBindings();
   TestRadialFailsClosedWithoutService();
   TestFrameHookDrawsRadialMenu();
+  TestCrystalBindings();
+  TestCrystalFailsClosedWithoutService();
+  TestCrystalTickHook();
   TestPublishedReads();
   TestGovernorAndZoomWrites();
   TestCombatAndInputReads();
