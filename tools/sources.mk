@@ -35,6 +35,8 @@ CORE_SRC := \
   core/net/net.cpp \
   core/net/ws_client.cpp \
   core/net/cosmetic_sync.cpp \
+  core/net/lan_transport.cpp \
+  core/net/lan_discovery.cpp \
   core/script/crypto.cpp \
   core/script/ed25519.cpp \
   core/script/manifest.cpp \
@@ -82,6 +84,7 @@ TEST_SRC := \
   tests/test_math.cpp \
   tests/test_modules.cpp \
   tests/test_net.cpp \
+  tests/test_lan_transport.cpp \
   tests/test_jsonrpc.cpp \
   tests/test_render.cpp \
   tests/test_sample.cpp \
