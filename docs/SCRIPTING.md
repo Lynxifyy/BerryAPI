@@ -525,8 +525,10 @@ reused. The cache is bounded and LRU-evicted, and a seam swap clears it.
 Seeing another player's cosmetics needs a channel, and that channel is the
 security boundary. `CosmeticSyncChannel` signs a canonical `(player, loadout)`
 payload (Ed25519 in production, HMAC for local development), frames it with a
-versioned envelope and hands it to a `CosmeticSyncTransport` (a WebSocket on
-device). Receiving fails closed at every step — bad framing, unknown or
+versioned envelope and hands it to a `CosmeticSyncTransport`. On device the
+concrete transport is `LanCosmeticTransport` (`lan_transport.h`): a UDP socket
+bound to a private multicast group. Receiving fails closed at every step — bad
+framing, unknown or
 mismatched algorithm, a signature that does not verify over the exact bytes, or
 a loadout body that does not parse all drop the message with no state change.
 Even a validly signed loadout is applied through
@@ -550,6 +552,46 @@ token or fills the window. `Verify` stays a pure signature/shape check with no
 side effects; the defences live in `Receive`. Limits are set through
 `CosmeticSyncConfig`, and the clock is injectable so the TTL and the limiter are
 deterministic in tests.
+
+The transport is the LAN half of that boundary. `LanCosmeticTransport`
+(`lan_transport.h`) opens one UDP socket, binds a fixed port and joins a private
+IPv4 multicast group, so one send reaches every client on the subnet and no
+central server is needed. A signed envelope is usually far larger than one
+datagram, so the transport frames a message into `mtu - 24`-byte fragments, each
+with a 24-byte big-endian header carrying the message id, fragment index and
+count, total length, the fragment payload size, and a per-instance sender tag.
+The receiver reassembles per `(peer, message id)` and delivers a message only
+when every fragment arrived and the declared length matched; a missing fragment,
+a shape mismatch, or a payload past the declared length drops the whole message,
+never a partial apply. Because the sender states the fragment payload size, a
+receiver with a different MTU still computes the right offsets instead of
+guessing. The sender's tag lets a client skip the copy of its own datagram that
+multicast loops back — the tag is assigned at `Open`, so this holds even before
+the client announces. Reassembly buffers and peers both expire on a TTL, and the
+per-sender partial count and the peer table are bounded, so a peer that sends
+half a message or a flood of distinct ids cannot grow memory without limit.
+
+Peers are found two ways. `Announce(playerId)` multicasts a datagram the peer
+table records, and `LanDiscovery` (`lan_discovery.h`) is a small mDNS responder
+and browser for `_berry._udp.local`: it publishes the local client (PTR/SRV/TXT/A)
+and browses for peers, caching what it hears with a TTL, so a client learns who
+is on the subnet and on what port without a central server. It uses the standard
+mDNS group and port and follows compression pointers when reading (other
+responders compress; it never writes one). `SendTo(host, port, message)` sends
+straight to a discovered peer, bypassing the group. Discovery and the transport
+carry no trust: a peer found or reached this way is still verified by the
+channel before anything it says is applied. A malformed datagram is a dropped
+datagram, never a crash.
+
+Multicast reaches every client on the subnet without a server, which is the
+whole point; a relay is unnecessary when the group works, and a client that
+cannot join the group still has `SendTo` to a known address. An in-game-chat
+signaling fallback — carrying an address or a discovery hint in a chat message —
+is deliberately not implemented here: the library owns no chat seam, so a
+transport cannot read or write chat without the embedder. The seam is one
+virtual `Send`, so an embedder that has a chat hook can wrap it in its own
+`CosmeticSyncTransport` (base64 the envelope into a message) and register it
+with `CosmeticSyncChannel::SetTransport` alongside the LAN one.
 
 Scripts reach the local loadout through the `cosmetic.*` bindings (see
 [API.md](API.md)): `equip`, `unequip`, `equipped`, `list`, `save_preset`,

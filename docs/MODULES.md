@@ -117,3 +117,12 @@ are deliberately **not** added to the strict module set. See
 - `CosmeticSyncChannel` (`cosmetic_sync.h`) — optional signed loadout channel so
   other clients can see your cosmetics; verification fails closed and applied
   loadouts are gated on provable ownership.
+- `LanCosmeticTransport` (`lan_transport.h`) — the concrete
+  `CosmeticSyncTransport` for a LAN: a UDP socket bound to a private multicast
+  group, signed envelopes framed into MTU-sized fragments and reassembled
+  per-sender, with a bounded peer table fed by announce datagrams. It moves
+  bytes only; the channel still verifies before anything is applied.
+- `LanDiscovery` (`lan_discovery.h`) — mDNS (`_berry._udp.local`) responder and
+  browser, so a client learns which peers are on the subnet and on what port
+  without a central server. Discovery carries no trust; a peer found here is
+  still verified by the channel.

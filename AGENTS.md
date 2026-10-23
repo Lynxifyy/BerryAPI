@@ -89,6 +89,21 @@ make lib             # builds build/libBerryAPI.so
   key/slot/bone, or repeats an id registers nothing. `LoadDirectory()` reads only
   `*.pack.json`. `RealScriptFileSystem`/`MemoryScriptFileSystem` both implement
   `ListDir`; a seam without a listing simply finds no packs.
+- `LanCosmeticTransport` (`lan_transport.h`) is the concrete
+  `CosmeticSyncTransport` for a LAN: one UDP socket on a private multicast
+  group, messages framed into MTU-sized fragments and reassembled per sender.
+  The fragment header is 24 bytes and carries the fragment payload size, so a
+  receiver with a different MTU computes the right offsets instead of guessing;
+  the sender tag is assigned at `Open` (not at `Announce`), so a client skips
+  its own multicast loopback copy even before it announces. It moves bytes only
+  — the channel still verifies before anything is applied.
+- `LanDiscovery` (`lan_discovery.h`) is a minimal mDNS (`_berry._udp.local`)
+  responder+browser: it publishes PTR/SRV/TXT/A and caches peers with a TTL. It
+  follows compression pointers on read and never writes one. Discovery carries
+  no trust; a found peer is still verified by the channel. `SendTo` sends
+  straight to a discovered peer. There is no chat seam in the library, so an
+  in-game-chat signaling fallback belongs to the embedder (wrap the one-virtual
+  `Send` seam), not to the transport.
 
 ## Conventions
 
