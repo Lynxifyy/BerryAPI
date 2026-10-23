@@ -19,6 +19,7 @@ CORE_SRC := \
   core/modules/combat_state.cpp \
   core/modules/animator.cpp \
   core/modules/replay_camera.cpp \
+  core/modules/radial.cpp \
   core/modules/render.cpp \
   core/modules/render_backend.cpp \
   core/modules/pipeline.cpp \
@@ -124,7 +125,8 @@ TEST_SRC := \
   tests/test_combat_state.cpp \
   tests/test_pipeline.cpp \
   tests/test_animator.cpp \
-  tests/test_replay_camera.cpp
+  tests/test_replay_camera.cpp \
+  tests/test_radial.cpp
 # Vendored Luau (MIT). See third_party/luau/PROVENANCE.md for the pinned
 # version and why these units and not the CLI. Compiled with -w because upstream
 # is only warning-clean under its own flag set; our code stays -Wall -Wextra clean.
