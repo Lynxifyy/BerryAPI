@@ -3636,9 +3636,16 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Bool(o->SetConfig(c));
   });
 
-  install("crystal.analyze", [this, crystal](ScriptContext&, const std::vector<ScriptValue>& args) {
+  install("crystal.analyze", [this, crystal](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
     CrystalOptimizer* o = crystal();
     if (!o || !services_.world) return ScriptValue::Num(0);
+    // The advisor is a client-side intent with its own policy group: a server
+    // that bans the crystal-advisor feature disables it here, before any world
+    // read happens. Read-only, so the refusal is a quiet zero.
+    if (!IntentAllows(IntentKind::CrystalAdvise)) {
+      ctx.RaiseError("crystal.analyze: crystal advisor disabled by server policy");
+      return ScriptValue::Num(0);
+    }
     const Vec3 origin((f32)args[0].AsNumber(), (f32)args[1].AsNumber(), (f32)args[2].AsNumber());
     const std::vector<EntitySnapshot> targets = LiveEntities(*services_.world);
     // The block query the advisor tests each spot against is the same seam the
@@ -3695,9 +3702,15 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Nil();
   });
 
-  install("crystal.arm", [crystal](ScriptContext&, const std::vector<ScriptValue>&) {
+  install("crystal.arm", [this, crystal](ScriptContext& ctx, const std::vector<ScriptValue>&) {
     CrystalOptimizer* o = crystal();
     if (!o) return ScriptValue::Bool(false);
+    // Arming starts a per-tick advisory pass, so the policy gate applies here
+    // too, not only to the one-shot analyze.
+    if (!IntentAllows(IntentKind::CrystalAdvise)) {
+      ctx.RaiseError("crystal.arm: crystal advisor disabled by server policy");
+      return ScriptValue::Bool(false);
+    }
     return ScriptValue::Bool(o->Arm());
   });
 
@@ -4888,6 +4901,9 @@ void ScriptApi::InitCombatStateHook() {
       "berry:tick", [this](const EventContext& e) {
         if (!services_.crystal || !services_.world) return EventResult::Continue;
         if (!services_.crystal->armed()) return EventResult::Continue;
+        // A profile can change mid-session (a server switch re-selects it), so
+        // the group is re-checked here, not only when the advisor was armed.
+        if (!IntentAllows(IntentKind::CrystalAdvise)) return EventResult::Continue;
         const GameTick* t = static_cast<const GameTick*>(e.data);
         if (!t) return EventResult::Continue;
         // The placer is the local player, whose own state the world already

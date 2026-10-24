@@ -489,7 +489,7 @@ export type Animator = {
 
 -- Capability required: input.
 export type Intent = {
-  -- Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share.
+  -- Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound, crystal_advise) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share.
   allowed: (name: string) -> boolean,
   classify: (name: string) -> string,
   server: () -> string,
@@ -653,7 +653,7 @@ export type Radial = {
   sector_at: (pointer_x: number, pointer_y: number, center_x: number, center_y: number, inner_radius: number, outer_radius: number, count: number) -> number,
 }
 
--- Capability required: combat.
+-- Capability required: crystal.
 export type Crystal = {
   -- The current tunables as {place_range, blast_radius, max_damage, min_targets, self_damage_weight, max_self_damage, levels, max_results}.
   config: () -> {[string]: any},

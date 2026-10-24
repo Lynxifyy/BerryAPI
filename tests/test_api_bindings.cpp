@@ -2755,22 +2755,22 @@ static void TestCrystalBindings() {
   ScriptValue out;
 
   //--- configuration reads and validated writes ---
-  CHECK(Call(bindings, "crystal.config", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.config", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(std::fabs(out.AsTable()->at("blast_radius").AsNumber() - 6.0) < 1e-6);
-  CHECK(Call(bindings, "crystal.set_blast_radius", {ScriptValue::Num(8)}, {"combat"}, &out) ==
+  CHECK(Call(bindings, "crystal.set_blast_radius", {ScriptValue::Num(8)}, {"crystal"}, &out) ==
         ScriptStatus::Ok);
   CHECK(out.Truthy());
   CHECK(std::fabs(crystal.config().blastRadius - 8.0f) < 1e-5f);
   // A bad value is refused and changes nothing.
-  CHECK(Call(bindings, "crystal.set_blast_radius", {ScriptValue::Num(-1)}, {"combat"}, &out) ==
+  CHECK(Call(bindings, "crystal.set_blast_radius", {ScriptValue::Num(-1)}, {"crystal"}, &out) ==
         ScriptStatus::Ok);
   CHECK(!out.Truthy());
   CHECK(std::fabs(crystal.config().blastRadius - 8.0f) < 1e-5f);
   // A fractional count cannot name targets.
-  CHECK(Call(bindings, "crystal.set_min_targets", {ScriptValue::Num(1.5)}, {"combat"}, &out) ==
+  CHECK(Call(bindings, "crystal.set_min_targets", {ScriptValue::Num(1.5)}, {"crystal"}, &out) ==
         ScriptStatus::Ok);
   CHECK(!out.Truthy());
-  CHECK(Call(bindings, "crystal.set_levels", {ScriptValue::Num(1)}, {"combat"}, &out) ==
+  CHECK(Call(bindings, "crystal.set_levels", {ScriptValue::Num(1)}, {"crystal"}, &out) ==
         ScriptStatus::Ok);
   CHECK(out.Truthy());
 
@@ -2778,34 +2778,34 @@ static void TestCrystalBindings() {
   CHECK(Call(bindings, "crystal.estimate",
              {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
               ScriptValue::Num(4), ScriptValue::Num(0), ScriptValue::Num(0)},
-             {"combat"}, &out) == ScriptStatus::Ok);
+             {"crystal"}, &out) == ScriptStatus::Ok);
   // 8-block radius, 12 max damage, at distance 4 -> 6.
   CHECK(std::fabs(out.AsNumber() - 6.0) < 1e-4);
 
   //--- a full analysis ---
   CHECK(Call(bindings, "crystal.analyze",
              {ScriptValue::Num(0.5), ScriptValue::Num(0), ScriptValue::Num(0.5)},
-             {"combat"}, &out) == ScriptStatus::Ok);
+             {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(out.AsNumber() > 0);
-  CHECK(Call(bindings, "crystal.count", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.count", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   const f64 count = out.AsNumber();
   CHECK(count > 0);
 
-  CHECK(Call(bindings, "crystal.best", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.best", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(out.AsTable()->at("ok").Truthy());
   CHECK(out.AsTable()->at("targets").AsNumber() >= 1);
   CHECK(out.AsTable()->at("best_damage").AsNumber() > 0);
 
   // Every index in range resolves; one out of range is an empty table, not an
   // error and not a fabricated placement.
-  CHECK(Call(bindings, "crystal.placement", {ScriptValue::Num(0)}, {"combat"}, &out) ==
+  CHECK(Call(bindings, "crystal.placement", {ScriptValue::Num(0)}, {"crystal"}, &out) ==
         ScriptStatus::Ok);
   CHECK(out.AsTable()->at("ok").Truthy());
-  CHECK(Call(bindings, "crystal.placement", {ScriptValue::Num(count + 100)}, {"combat"}, &out) ==
+  CHECK(Call(bindings, "crystal.placement", {ScriptValue::Num(count + 100)}, {"crystal"}, &out) ==
         ScriptStatus::Ok);
   CHECK(out.AsTable()->find("ok") == out.AsTable()->end());
 
-  CHECK(Call(bindings, "crystal.stats", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.stats", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(out.AsTable()->at("analyses").AsNumber() == 1);
   CHECK(out.AsTable()->at("candidates").AsNumber() > 0);
 
@@ -2815,8 +2815,8 @@ static void TestCrystalBindings() {
              {"world"}, &out) == ScriptStatus::CapabilityDenied);
 
   //--- reset ---
-  CHECK(Call(bindings, "crystal.reset", {}, {"combat"}, &out) == ScriptStatus::Ok);
-  CHECK(Call(bindings, "crystal.count", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.reset", {}, {"crystal"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.count", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(out.AsNumber() == 0);
 }
 
@@ -2830,25 +2830,25 @@ static void TestCrystalFailsClosedWithoutService() {
   // An analysis recommends nothing when no advisor is bound.
   CHECK(Call(bindings, "crystal.analyze",
              {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0)},
-             {"combat"}, &out) == ScriptStatus::Ok);
+             {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(out.AsNumber() == 0);
-  CHECK(Call(bindings, "crystal.count", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.count", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(out.AsNumber() == 0);
-  CHECK(Call(bindings, "crystal.best", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.best", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(!out.AsTable()->at("ok").Truthy());
   // Writes report false; reads report the inert default.
-  CHECK(Call(bindings, "crystal.set_range", {ScriptValue::Num(4)}, {"combat"}, &out) ==
+  CHECK(Call(bindings, "crystal.set_range", {ScriptValue::Num(4)}, {"crystal"}, &out) ==
         ScriptStatus::Ok);
   CHECK(!out.Truthy());
-  CHECK(Call(bindings, "crystal.arm", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.arm", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(!out.Truthy());
-  CHECK(Call(bindings, "crystal.armed", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.armed", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(!out.Truthy());
   // The pure estimate still answers with the default tunables.
   CHECK(Call(bindings, "crystal.estimate",
              {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
               ScriptValue::Num(3), ScriptValue::Num(0), ScriptValue::Num(0)},
-             {"combat"}, &out) == ScriptStatus::Ok);
+             {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(std::fabs(out.AsNumber() - 6.0) < 1e-4);
 }
 
@@ -2914,6 +2914,72 @@ static void TestCrystalTickHook() {
   CHECK(crystal.stats().analyses == 2);
 
   EventBus::Instance().Off("crystalAdvice", id);
+}
+
+static void TestCrystalPolicyGate() {
+  std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
+  WorldHandle* world = worldMod->Service<WorldHandle>();
+  auto shim = std::make_shared<Berry::Test::ShimLevel>();
+  EntityId self{1, 1};
+  EntitySnapshot me;
+  me.id = self;
+  me.type = EntityType::Player;
+  me.position = Vec3(0.5f, 0, 0.5f);
+  me.alive = true;
+  shim->AddEntity(self, me);
+  EntityId enemy{7, 7};
+  EntitySnapshot foe;
+  foe.id = enemy;
+  foe.type = EntityType::Player;
+  foe.position = Vec3(2.5f, 0, 0.5f);
+  foe.alive = true;
+  shim->AddEntity(enemy, foe);
+  world->SetSeam(shim);
+
+  CrystalOptimizer crystal;
+  IntentValidator intents;
+  ScriptApi::Services services;
+  services.world = world;
+  services.crystal = &crystal;
+  services.intents = &intents;
+  services.localPlayer = self;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  // Opt in explicitly: the default profile denies the crystal group, so the
+  // test first installs a profile that enables it.
+  ServerPolicyProfile open;
+  open.name = "open";
+  open.serverMatch = "*";
+  intents.SetProfile(open);
+  CHECK(Call(bindings, "crystal.analyze",
+             {ScriptValue::Num(0.5), ScriptValue::Num(0), ScriptValue::Num(0.5)},
+             {"crystal"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() > 0);
+  CHECK(crystal.stats().analyses == 1);
+
+  // A server that disables the crystal group refuses the analysis: the call
+  // errors and never reaches the world.
+  ServerPolicyProfile p;
+  p.name = "no-crystal";
+  p.serverMatch = "*";
+  p.disabledGroups = IntentGroupMask(IntentGroup::Crystal);
+  intents.SetProfile(p);
+  CHECK(Call(bindings, "crystal.analyze",
+             {ScriptValue::Num(0.5), ScriptValue::Num(0), ScriptValue::Num(0.5)},
+             {"crystal"}, &out) == ScriptStatus::Error);
+  CHECK(crystal.stats().analyses == 1);   // unchanged: the gate ran first
+  // Arming is refused too.
+  CHECK(Call(bindings, "crystal.arm", {}, {"crystal"}, &out) == ScriptStatus::Error);
+  CHECK(!crystal.armed());
+
+  // Re-enabling the group allows it again.
+  open.name = "open-again";
+  intents.SetProfile(open);
+  CHECK(Call(bindings, "crystal.arm", {}, {"crystal"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
 }
 
 static void TestVoiceBindings() {
@@ -3133,6 +3199,7 @@ int main() {
   TestCrystalBindings();
   TestCrystalFailsClosedWithoutService();
   TestCrystalTickHook();
+  TestCrystalPolicyGate();
   TestVoiceBindings();
   TestVoiceFailsClosedWithoutService();
   TestFrameHookPumpsVoice();

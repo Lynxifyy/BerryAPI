@@ -120,6 +120,19 @@ static void TestCapabilities() {
   CHECK(a.Covers(need));
   CHECK(!need.Covers(a));
   CHECK(a.ToModuleMask() == (kCapWorld | kCapCombat));
+
+  // The crystal advisor has its own grant, separate from combat: a script that
+  // asks for combat does not thereby get the advisor, and vice versa.
+  CHECK(IsGrantableKind(CapKind::Crystal));
+  CHECK(CapKindFromName("crystal") == CapKind::Crystal);
+  CHECK(std::string(CapKindName(CapKind::Crystal)) == "crystal");
+  CapabilitySet crystal;
+  CHECK(crystal.Add("crystal"));
+  CHECK(crystal.CoversCap([] { Capability c; c.kind = CapKind::Crystal; return c; }()));
+  CapabilitySet combat;
+  CHECK(combat.Add("combat"));
+  CHECK(!combat.CoversCap([] { Capability c; c.kind = CapKind::Crystal; return c; }()));
+  CHECK(!crystal.CoversCap([] { Capability c; c.kind = CapKind::Combat; return c; }()));
 }
 
 static const char* kManifestJson =

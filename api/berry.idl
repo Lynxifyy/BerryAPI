@@ -530,7 +530,7 @@ module Events {
 
 module Intent {
   capability input
-  doc "Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share."
+  doc "Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound, crystal_advise) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share."
   fn allowed(name: string) -> bool
   fn classify(name: string) -> string
   fn server() -> string
@@ -698,7 +698,7 @@ module Radial {
 }
 
 module Crystal {
-  capability combat
+  capability crystal
   doc "Client-side crystal-placement advisor. It answers one question a crystal-PvP player asks every fight: where is the best place to drop a crystal from here? It reads the entities the world grid already delivered and the blocks the level seam already answers, ranks candidate spots by the damage they would deal, and reports the ranking to the script. It never places a block, never sends a packet and never writes to the game: a crystal blast is an explosion the player triggers, and this only measures where it would hurt most. The damage figure is an ESTIMATE, not the engine's number — a crystal's blast falls off linearly with distance, so the model is `maxDamage * clamp(1 - distance / blastRadius, 0, 1)` measured to each target's hitbox, and a script must not treat it as authoritative. The self-damage term uses the same falloff from the placer, so a spot that would blow the placer up ranks below one that will not. Candidate generation is bounded (place range, level count, total candidates) and every bad value is refused rather than clamped, so one call can never walk the world."
   doc "The current tunables as {place_range, blast_radius, max_damage, min_targets, self_damage_weight, max_self_damage, levels, max_results}."
   fn config() -> Table

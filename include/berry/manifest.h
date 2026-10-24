@@ -48,6 +48,7 @@ enum class CapKind : u32 {
   Cosmetic,  // register cosmetics
   Packets,   // read-only packet metadata inspection (headers, never payloads)
   Voice,     // proximity voice chat: microphone capture and LAN playback
+  Crystal,   // client-side crystal-placement advisor (read-only, policy-gated)
 };
 
 const char* CapKindName(CapKind k);

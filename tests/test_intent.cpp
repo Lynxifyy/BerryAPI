@@ -58,6 +58,8 @@ static void TestClassification() {
   CHECK(ClassifyIntent(IntentKind::Nametag) == IntentClass::ClientSide);
   CHECK(ClassifyIntent(IntentKind::Cosmetic) == IntentClass::ClientSide);
   CHECK(ClassifyIntent(IntentKind::Sound) == IntentClass::ClientSide);
+  // The crystal advisor is read-only and client-side, not a world write.
+  CHECK(ClassifyIntent(IntentKind::CrystalAdvise) == IntentClass::ClientSide);
 
   // Every world write classifies as world-write.
   CHECK(ClassifyIntent(IntentKind::PlaceBlock) == IntentClass::WorldWrite);
@@ -94,6 +96,7 @@ static void TestGroups() {
   CHECK(IntentGroupOf(IntentKind::Nametag) == IntentGroup::Hud);
   CHECK(IntentGroupOf(IntentKind::Cosmetic) == IntentGroup::Cosmetic);
   CHECK(IntentGroupOf(IntentKind::Sound) == IntentGroup::Audio);
+  CHECK(IntentGroupOf(IntentKind::CrystalAdvise) == IntentGroup::Crystal);
   CHECK(IntentGroupOf(IntentKind::PlaceBlock) == IntentGroup::World);
   CHECK(IntentGroupOf(IntentKind::Unknown) == IntentGroup::Unknown);
 
@@ -103,12 +106,16 @@ static void TestGroups() {
                    IntentGroupMask(IntentGroup::Cosmetic);
   CHECK(IntentGroupList(mask) == "camera,cosmetic");
   CHECK(IntentGroupList(0).empty());
+  // The crystal group lists after cosmetic and before world, in table order.
+  CHECK(IntentGroupList(IntentGroupMask(IntentGroup::Crystal) |
+                        IntentGroupMask(IntentGroup::World)) == "crystal,world");
 
   // Each group names the capability its actions need.
   CHECK(IntentGroupCapability(IntentGroup::Camera) == CapKind::Input);
   CHECK(IntentGroupCapability(IntentGroup::Hud) == CapKind::Hud);
   CHECK(IntentGroupCapability(IntentGroup::Cosmetic) == CapKind::Cosmetic);
   CHECK(IntentGroupCapability(IntentGroup::Audio) == CapKind::Audio);
+  CHECK(IntentGroupCapability(IntentGroup::Crystal) == CapKind::Crystal);
   CHECK(IntentGroupCapability(IntentGroup::Unknown) == CapKind::NoCap);
 }
 
@@ -187,11 +194,11 @@ static void TestPolicySelection() {
   policy.Clear();
   CHECK(policy.ProfileCount() == 0);
 
-  // Builtins: an open default plus the documented strict template.
+  // Builtins: a default (crystal opt-in) plus the documented strict template.
   const auto builtins = IntentPolicy::BuiltinProfiles();
   CHECK(builtins.size() == 2);
-  CHECK(builtins[0].name == "open");
-  CHECK(builtins[0].disabledGroups == 0);
+  CHECK(builtins[0].name == "default");
+  CHECK((builtins[0].disabledGroups & IntentGroupMask(IntentGroup::Crystal)) != 0);
   CHECK(builtins[1].name == "strict");
   CHECK(builtins[1].disabledGroups != 0);
 }
@@ -237,6 +244,80 @@ static void TestValidator() {
   CHECK(v.Validate(IntentKind::Cosmetic, cosmetic) == IntentResult::Ok);
 }
 
+// The crystal advisor is its own policy group with its own capability: the
+// default denies it (opt-in), a profile that enables it allows it, a profile
+// that disables it refuses it, and the group's capability is separate from
+// combat.
+static void TestCrystalPolicyGroup() {
+  // The default denies the crystal group: an unknown server does not silently
+  // enable a combat aid.
+  IntentValidator v;
+  CHECK(!v.Allowed(IntentKind::CrystalAdvise));
+  CHECK(v.Validate(IntentKind::CrystalAdvise) == IntentResult::GroupDisabled);
+  // Other client-side groups are unaffected by the default.
+  CHECK(v.Allowed(IntentKind::Zoom));
+  CHECK(v.Allowed(IntentKind::Cosmetic));
+  CHECK(v.Allowed(IntentKind::Sound));
+
+  // A profile that explicitly enables everything allows the advisor.
+  ServerPolicyProfile open;
+  open.name = "open";
+  open.serverMatch = "*";
+  open.disabledGroups = 0;
+  v.SetProfile(open);
+  CHECK(v.Allowed(IntentKind::CrystalAdvise));
+  const CapabilitySet combatOnly = Grant({"combat"});
+  CHECK(v.Validate(IntentKind::CrystalAdvise, combatOnly) ==
+        IntentResult::NoCapability);
+  const CapabilitySet crystalOnly = Grant({"crystal"});
+  CHECK(v.Validate(IntentKind::CrystalAdvise, crystalOnly) == IntentResult::Ok);
+
+  // A server that disables the crystal group denies the advisor and leaves the
+  // other client-side groups alone.
+  ServerPolicyProfile noCrystal;
+  noCrystal.name = "no-crystal";
+  noCrystal.serverMatch = "*";
+  noCrystal.disabledGroups = IntentGroupMask(IntentGroup::Crystal);
+  v.SetProfile(noCrystal);
+  CHECK(v.Validate(IntentKind::CrystalAdvise) == IntentResult::GroupDisabled);
+  CHECK(!v.groupEnabled(IntentGroup::Crystal));
+  CHECK(v.Allowed(IntentKind::Zoom));
+  CHECK(v.Allowed(IntentKind::Cosmetic));
+  CHECK(v.Allowed(IntentKind::Sound));
+  // A world write is still refused by classification, not by the group.
+  CHECK(v.Validate(IntentKind::PlaceBlock) == IntentResult::WorldWrite);
+
+  // The capability check does not override a disabled group.
+  CHECK(v.Validate(IntentKind::CrystalAdvise, crystalOnly) ==
+        IntentResult::GroupDisabled);
+}
+
+// A profile selected for a server that bans client mods must genuinely disable
+// the crystal group for that host, and a later switch re-enables it.
+static void TestCrystalGroupSelectedForServer() {
+  IntentPolicy policy;
+  for (const auto& p : IntentPolicy::BuiltinProfiles()) policy.AddProfile(p);
+
+  ServerPolicyProfile allowCrystal;
+  allowCrystal.name = "allow-crystal";
+  allowCrystal.serverMatch = "*.crystal-allowed.example";
+  allowCrystal.disabledGroups = 0;   // explicitly opt in
+  policy.AddProfile(allowCrystal);
+
+  // An unknown server falls back to the default, which denies the crystal group
+  // even though it allows the other client-side groups.
+  IntentValidator v;
+  v.SelectFor("some.unknown.example", policy);
+  CHECK(v.profile().name == "default");
+  CHECK(!v.Allowed(IntentKind::CrystalAdvise));
+  CHECK(v.Allowed(IntentKind::Zoom));
+
+  // A server whose profile explicitly opts in allows the advisor.
+  v.SelectFor("play.crystal-allowed.example", policy);
+  CHECK(v.profile().name == "allow-crystal");
+  CHECK(v.Allowed(IntentKind::CrystalAdvise));
+}
+
 static void TestSelectForServer() {
   IntentPolicy policy;
   for (const auto& p : IntentPolicy::BuiltinProfiles()) policy.AddProfile(p);
@@ -255,10 +336,12 @@ static void TestSelectForServer() {
   CHECK(!v.Allowed(IntentKind::Cosmetic));
   CHECK(v.Allowed(IntentKind::Zoom));
 
-  // Moving to a different server re-selects.
+  // Moving to a different server re-selects. An unknown server gets the
+  // default profile, which denies the crystal group but allows cosmetic.
   v.SelectFor("fun.server.net", policy);
-  CHECK(v.profile().name == "open");
+  CHECK(v.profile().name == "default");
   CHECK(v.Allowed(IntentKind::Cosmetic));
+  CHECK(!v.Allowed(IntentKind::CrystalAdvise));
 }
 
 //----------------------------------------------------------------------------
@@ -357,6 +440,8 @@ int main() {
   TestProfileMatching();
   TestPolicySelection();
   TestValidator();
+  TestCrystalPolicyGroup();
+  TestCrystalGroupSelectedForServer();
   TestSelectForServer();
   TestIntentBindings();
   TestIntentGatesZoom();

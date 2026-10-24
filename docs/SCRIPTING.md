@@ -665,7 +665,7 @@ a static table (`ClassifyIntent`, pure — no per-call-site drift):
 
 * **ClientSide** — what normal player input could do or what stays on this
   screen: `zoom`, `freelook`, `fov`, `perspective`, `keybind`, `hud`, `nametag`,
-  `cosmetic`, `sound`. Allowed.
+  `cosmetic`, `sound`, `crystal_advise`. Allowed.
 * **WorldWrite** — anything that would mutate the world or the player's
   authoritative state: `place_block`, `break_block`, `attack`, `interact`,
   `move`, `set_time`, `set_weather`. Denied. The client is not a second
@@ -673,13 +673,20 @@ a static table (`ClassifyIntent`, pure — no per-call-site drift):
 * **Unknown** — an action the table does not name. Denied, so a typo or a future
   name fails closed.
 
-Intents are grouped (Camera, Input, Hud, Audio, Cosmetic, World). A
+Intents are grouped (Camera, Input, Hud, Audio, Cosmetic, Crystal, World). A
 `ServerPolicyProfile` matches a server address (`"*"`, an exact host, or a `*.`
 suffix wildcard) and disables whole groups. `IntentPolicy::ForServer` picks the
 most specific match — exact host beats a longer wildcard beats `"*"` — and
 `IntentValidator::SelectFor` installs it for the session, so the profile follows
 the server the client connects to. `BuiltinProfiles()` supplies an open default
 plus the documented strict template.
+
+The crystal-placement advisor is its own group (`Crystal`) and its own
+capability (`crystal`, distinct from `combat`), so a server that bans the
+advisor disables it without touching combat telemetry, and a script granted
+`combat` does not thereby gain the advisor. The `crystal.analyze` and
+`crystal.arm` bindings consult the group before any world read, and the tick
+hook re-checks it, so a profile change mid-session takes effect.
 
 The two layers are independent: classification says what may ever be done, the
 profile says what may be done *here*. A profile cannot re-enable a world write —

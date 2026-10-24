@@ -291,6 +291,13 @@ class BERRY_API ScriptApi {
   void SetWidgetId(u64 handle, WidgetId id);
   bool ResolveWidgetId(u64 handle, WidgetId* out);
 
+  /// True when the active server policy allows a client-side intent. An unbound
+  /// validator is permissive (the policy layer is opt-in); a bound one gates, so
+  /// a profile that disables a group genuinely disables the action.
+  bool IntentAllows(IntentKind kind) const {
+    return !services_.intents || services_.intents->Allowed(kind);
+  }
+
   Services services_;
   RenderCommandQueue queue_;
   std::vector<std::string> installed_;
