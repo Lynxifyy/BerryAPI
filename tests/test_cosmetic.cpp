@@ -15,6 +15,7 @@
 #include "berry/api_bindings.h"
 #include "berry/cosmetic.h"
 #include "berry/cosmetic_sync.h"
+#include "berry/lan_discovery.h"
 #include "berry/generated_bindings.h"
 #include "berry/manifest.h"
 #include "berry/script.h"
@@ -1051,6 +1052,84 @@ static void TestCosmeticBindings() {
         ScriptStatus::Error);
 }
 
+// The LAN discovery + sync surface: `cosmetic.peers`/`cosmetic.peer` read the
+// client's own mDNS cache, and `cosmetic.sync_stats` reads the channel counters.
+// Both fail closed with no service bound, so a script never reads a fabricated
+// peer or a stale success.
+static void TestLanSyncBindings() {
+  LanDiscoveryConfig dcfg;
+  dcfg.iface = "127.0.0.1";
+  LanDiscovery discovery;
+  CHECK(discovery.Open(dcfg));
+  CHECK(discovery.Publish("alice", 47823, "sync=1"));
+
+  CosmeticSyncChannel ch;
+  ch.SetVerifyKey(CosmeticSyncKey::HmacSecret("shared"));
+
+  ScriptApi::Services services;
+  services.discovery = &discovery;
+  services.sync = &ch;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"cosmetic"};
+
+  // The channel is configured but nothing has been accepted or refused yet.
+  CHECK(CallBinding(bindings, "cosmetic.sync_stats", {}, caps, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsTable()->at("configured").Truthy());
+  CHECK(out.AsTable()->at("accepted").AsNumber() == 0);
+  CHECK(out.AsTable()->at("rejected").AsNumber() == 0);
+
+  // Discovery names this client's own published service once it is polled (a
+  // local responder answers its own query on loopback).
+  CHECK(CallBinding(bindings, "cosmetic.peers", {}, caps, &out) ==
+        ScriptStatus::Ok);
+  const f64 before = out.AsNumber();
+  for (int i = 0; i < 40; ++i) {
+    discovery.Query();
+    discovery.Poll(5);
+    CHECK(CallBinding(bindings, "cosmetic.peers", {}, caps, &out) ==
+          ScriptStatus::Ok);
+    if (out.AsNumber() > 0) break;
+  }
+  CHECK(out.AsNumber() >= before);
+
+  // `cosmetic.peer` returns a table for a live index and an empty one (no
+  // fabricated fields) out of range.
+  CHECK(CallBinding(bindings, "cosmetic.peer", {ScriptValue::Num(0)}, caps, &out) ==
+        ScriptStatus::Ok);
+  if (out.AsTable()->find("instance") != out.AsTable()->end()) {
+    CHECK(out.AsTable()->at("port").AsNumber() == 47823);
+  }
+  CHECK(CallBinding(bindings, "cosmetic.peer", {ScriptValue::Num(9999)}, caps, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsTable()->find("instance") == out.AsTable()->end());
+
+  // Without the cosmetic grant the calls are denied.
+  CHECK(CallBinding(bindings, "cosmetic.peers", {}, {"render"}, &out) ==
+        ScriptStatus::CapabilityDenied);
+
+  // A missing service fails closed: 0 peers, empty peer, unconfigured stats.
+  ScriptApi::Services none;
+  ScriptApi bare(none);
+  ScriptBindings bareBindings;
+  bare.InstallBindings(&bareBindings);
+  CHECK(CallBinding(bareBindings, "cosmetic.peers", {}, caps, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(CallBinding(bareBindings, "cosmetic.peer", {ScriptValue::Num(0)}, caps, &out) ==
+        ScriptStatus::Error);
+  CHECK(CallBinding(bareBindings, "cosmetic.sync_stats", {}, caps, &out) ==
+        ScriptStatus::Ok);
+  CHECK(!out.AsTable()->at("configured").Truthy());
+  CHECK(out.AsTable()->at("accepted").AsNumber() == 0);
+
+  discovery.Close();
+}
+
 // input.velocity returns the local player's core motion as a Vec3 table. It is
 // capability-gated like the rest of the module, and it fails closed: a missing
 // source reports a zero (stationary) vector, never a stale or fabricated one.
@@ -1219,6 +1298,7 @@ int main() {
   TestSyncPeerTableBounded();
   TestSyncRevocation();
   TestCosmeticBindings();
+  TestLanSyncBindings();
   TestVelocityBinding();
   TestDrawThroughRenderer();
   TestDrawRemoteGated();

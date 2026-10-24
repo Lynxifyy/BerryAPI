@@ -39,6 +39,8 @@
 #include "berry/crystal.h"
 #include "berry/voice.h"
 #include "berry/cosmetic.h"
+#include "berry/cosmetic_sync.h"
+#include "berry/lan_discovery.h"
 #include "berry/event.h"
 #include "berry/fs.h"
 #include "berry/hud.h"
@@ -212,6 +214,16 @@ class BERRY_API ScriptApi {
     /// The frame hook wires its proximity resolver to `world`/`localPlayer`, so
     /// a speaker is only heard when the listener's own world view places them.
     VoiceService* voice = nullptr;
+    /// LAN peer discovery (mDNS `_berry._udp.local`). Null makes the
+    /// `cosmetic.peers`/`cosmetic.peer` bindings fail closed (0 peers). The
+    /// client's own discovery instance is bound here when sync is enabled;
+    /// discovery only names peers, and a loadout from one is still verified by
+    /// the sync channel before anything is applied.
+    LanDiscovery* discovery = nullptr;
+    /// The cosmetic-sync channel. Null makes `cosmetic.sync_stats` report
+    /// configured=false. The channel verifies every inbound loadout, so the
+    /// stats it exposes are counts of what it accepted and refused.
+    CosmeticSyncChannel* sync = nullptr;
   };
 
   ScriptApi();

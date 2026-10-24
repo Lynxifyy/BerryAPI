@@ -432,6 +432,12 @@ export type Cosmetic = {
   set_local_only: (enabled: boolean) -> (),
   -- Reload local model packs from the pack directory, registering every valid *.pack.json. Returns the number of packs loaded; each pack is applied atomically (all its assets or none).
   reload_packs: () -> number,
+  -- How many peers the client's LAN discovery has found this session, most recently seen first. 0 when discovery is off (the client was not configured to sync). Discovery only names peers — a loadout from one is still verified by the sync channel before anything is applied.
+  peers: () -> number,
+  -- The discovered peer at `index`, most recently seen first, as {instance, address, port, last_ms}, or an empty table when out of range.
+  peer: (index: number) -> {[string]: any},
+  -- This client's cosmetic-sync channel counters as {accepted, rejected, peers, replay_window, configured}, or zeros with configured=false when sync is off.
+  sync_stats: () -> {[string]: any},
 }
 
 -- Capability required: cosmetic.

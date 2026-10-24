@@ -365,6 +365,9 @@ Capability: `cosmetic`.
 | `cosmetic.presets() -> string` | `cosmetic` | - |
 | `cosmetic.set_local_only(enabled: bool) -> nil` | `cosmetic` | - |
 | `cosmetic.reload_packs() -> number` | `cosmetic` | Reload local model packs from the pack directory, registering every valid *.pack.json. Returns the number of packs loaded; each pack is applied atomically (all its assets or none). |
+| `cosmetic.peers() -> number` | `cosmetic` | How many peers the client's LAN discovery has found this session, most recently seen first. 0 when discovery is off (the client was not configured to sync). Discovery only names peers — a loadout from one is still verified by the sync channel before anything is applied. |
+| `cosmetic.peer(index: number) -> Table` | `cosmetic` | The discovered peer at `index`, most recently seen first, as {instance, address, port, last_ms}, or an empty table when out of range. |
+| `cosmetic.sync_stats() -> Table` | `cosmetic` | This client's cosmetic-sync channel counters as {accepted, rejected, peers, replay_window, configured}, or zeros with configured=false when sync is off. |
 
 ## Animator
 

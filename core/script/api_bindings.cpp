@@ -317,6 +317,26 @@ bool ResolveSpeaker(const WorldHandle& world, const std::string& speakerId,
   return false;
 }
 
+/// Resolves a player id (a display name, or the "<raw>:<runtime>" spelling) to
+/// the entity the listener's own world view holds. Returns a default (zero)
+/// EntityId when the world does not hold such a player, so a caller skips the
+/// draw rather than guessing an entity. Used by the remote-cosmetic overlay.
+EntityId ResolveEntityByName(const WorldHandle& world, const std::string& name) {
+  EntityId none;
+  auto seam = world.Seam();
+  if (!seam) return none;
+  for (const EntityId& id : seam->AllEntities()) {
+    EntitySnapshot snap;
+    if (!seam->GetEntity(id, &snap) || !snap.alive) continue;
+    if (snap.name == name) return id;
+    const std::string idSpelling =
+        std::to_string((unsigned long long)id.raw) + ":" +
+        std::to_string((unsigned)id.runtime);
+    if (idSpelling == name) return id;
+  }
+  return none;
+}
+
 }  // namespace
 
 //----------------------------------------------------------------------------
@@ -388,6 +408,20 @@ void ScriptApi::InitFrameHook() {
         // DrawLocal needs no skeleton bound: it resolves nothing and returns 0.
         if (services_.cosmetics && services_.renderer) {
           services_.cosmetics->DrawLocal(*services_.renderer, services_.localPlayer);
+          // Remote cosmetics (from the LAN sync channel) draw through the same
+          // path, gated by the skeleton seam and the ownership check the
+          // channel already applied. Each remote player is resolved to the
+          // entity the listener's own world view holds, so a player the client
+          // cannot see is never drawn. Nothing runs when no sync channel fed a
+          // remote loadout (the list is empty).
+          if (services_.world) {
+            for (const std::string& peer : services_.cosmetics->RemotePlayers()) {
+              EntityId eid = ResolveEntityByName(*services_.world, peer);
+              if (eid.raw != 0 || eid.runtime != 0) {
+                services_.cosmetics->DrawRemote(*services_.renderer, peer, eid);
+              }
+            }
+          }
         }
         // The PvP overlay presents its widget tree through the HUD, then draws
         // its popups/flash through the Renderer. Its animation is advanced from
@@ -2585,6 +2619,43 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     // atomically; the return value is how many packs loaded cleanly.
     const PackLoadReport report = services_.packs->LoadDirectory();
     return ScriptValue::Num((f64)report.packsLoaded);
+  });
+  install("cosmetic.peers", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    // Discovery only names peers on the subnet; a loadout from one is still
+    // verified by the sync channel before anything is applied. Fail closed: no
+    // discovery bound reports 0.
+    if (!services_.discovery) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.discovery->services().size());
+  });
+  install("cosmetic.peer", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ScriptTable t;
+    if (!services_.discovery) {
+      ctx.RaiseError("cosmetic.peer: discovery unavailable");
+      return ScriptValue::Tbl(std::move(t));
+    }
+    const auto list = services_.discovery->services();
+    const f64 idx = args[0].AsNumber();
+    if (idx < 0.0 || idx != std::floor(idx) || (size_t)idx >= list.size()) {
+      return ScriptValue::Tbl(std::move(t));
+    }
+    const LanService& s = list[(size_t)idx];
+    t["instance"] = ScriptValue::Str(s.instance);
+    t["address"] = ScriptValue::Str(s.address);
+    t["port"] = ScriptValue::Num((f64)s.port);
+    t["last_ms"] = ScriptValue::Num((f64)s.lastSeenMs);
+    return ScriptValue::Tbl(std::move(t));
+  });
+  install("cosmetic.sync_stats", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    ScriptTable t;
+    // Fail closed: with no channel bound the counters are zero and the channel
+    // reports itself unconfigured, so a script never reads a stale success.
+    CosmeticSyncChannel* c = services_.sync;
+    t["configured"] = ScriptValue::Bool(c && c->configured());
+    t["accepted"] = ScriptValue::Num((f64)(c ? c->accepted() : 0));
+    t["rejected"] = ScriptValue::Num((f64)(c ? c->rejected() : 0));
+    t["peers"] = ScriptValue::Num((f64)(c ? c->trackedPeers() : 0));
+    t["replay_window"] = ScriptValue::Num((f64)(c ? c->replayWindowSize() : 0));
+    return ScriptValue::Tbl(std::move(t));
   });
 
   //--- Animator (keyframed local-rig animation; renders on this screen only) --

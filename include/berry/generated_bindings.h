@@ -249,6 +249,9 @@ inline const BindingSpec* BindingSpecs() {
       {"cosmetic.presets", CapKind::Cosmetic, 0, "Cosmetic"},
       {"cosmetic.set_local_only", CapKind::Cosmetic, 1, "Cosmetic"},
       {"cosmetic.reload_packs", CapKind::Cosmetic, 0, "Cosmetic"},
+      {"cosmetic.peers", CapKind::Cosmetic, 0, "Cosmetic"},
+      {"cosmetic.peer", CapKind::Cosmetic, 1, "Cosmetic"},
+      {"cosmetic.sync_stats", CapKind::Cosmetic, 0, "Cosmetic"},
       {"animator.add_clip", CapKind::Cosmetic, 3, "Animator"},
       {"animator.add_key", CapKind::Cosmetic, 10, "Animator"},
       {"animator.remove_clip", CapKind::Cosmetic, 1, "Animator"},
@@ -441,7 +444,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 416; }
+inline size_t BindingSpecCount() { return 419; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -725,6 +728,9 @@ inline const char* const kCosmeticNames[] = {
     "cosmetic.presets",
     "cosmetic.set_local_only",
     "cosmetic.reload_packs",
+    "cosmetic.peers",
+    "cosmetic.peer",
+    "cosmetic.sync_stats",
 };
 inline const char* const kAnimatorNames[] = {
     "animator.add_clip",
@@ -955,7 +961,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Ui", kUiNames, 29},
       {"Perf", kPerfNames, 12},
       {"Input", kInputNames, 3},
-      {"Cosmetic", kCosmeticNames, 9},
+      {"Cosmetic", kCosmeticNames, 12},
       {"Animator", kAnimatorNames, 22},
       {"Intent", kIntentNames, 6},
       {"Shader", kShaderNames, 10},
