@@ -37,26 +37,6 @@ class HttpRequest;
 struct HttpResponse;
 
 //----------------------------------------------------------------------------
-// Tick/time helpers used by script timeouts.
-//----------------------------------------------------------------------------
-
-namespace async_time {
-/// A duration measured in game ticks (20/s default).
-struct BERRY_API Ticks {
-  GameTick count = 0;
-  explicit Ticks(GameTick n) : count(n) {}
-};
-inline Ticks ticks(GameTick n) { return Ticks(n); }
-
-/// A duration measured in milliseconds (wall clock).
-struct BERRY_API Millis {
-  u64 ms = 0;
-  explicit Millis(u64 n) : ms(n) {}
-};
-inline Millis millis(u64 n) { return Millis(n); }
-}  // namespace async_time
-
-//----------------------------------------------------------------------------
 // Task + scheduler.
 //----------------------------------------------------------------------------
 

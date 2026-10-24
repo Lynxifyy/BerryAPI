@@ -52,27 +52,6 @@
 
 namespace Berry {
 
-/// The decoded meaning of one capture record's payload. The capture layer
-/// defines a compact binary payload per kind; these are the structs that encode
-/// to and from it, so a consumer never has to parse bytes by hand.
-struct BERRY_API ReplayEntityState {
-  EntitySnapshot snapshot;
-  /// True when this record is a full keyframe sample of the entity rather than
-  /// an incremental change.
-  bool full = false;
-};
-
-/// A time/weather record's payload.
-struct BERRY_API ReplayTimeState {
-  LevelTime time;
-};
-
-/// An event record: a timeline marker (a combat event, a world diff).
-struct BERRY_API ReplayEventPayload {
-  std::string channel;
-  std::string payload;
-};
-
 /// The payload codec for capture records. Every `Encode` produces the bytes a
 /// record's `payload` holds; every `Decode` fails closed on a short or
 /// malformed payload, so a corrupt replay cannot make a reader read past a
