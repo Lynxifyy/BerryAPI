@@ -54,6 +54,13 @@ class BERRY_API IRenderBackend {
   /// backend that cannot rescale is unaffected.
   virtual void SetRenderScale(f32 scale) { (void)scale; }
 
+  /// The current presentation surface size in physical pixels, or (0,0) when
+  /// unknown (headless, or no current surface). The client reads this each
+  /// frame to size the overlay; a zero size makes the overlays skip the frame
+  /// rather than draw at a bogus scale. The default reports unknown, so a
+  /// backend that cannot answer fails closed.
+  virtual Vec2 SurfaceSize() const { return Vec2(0, 0); }
+
   virtual bool running() const = 0;
   virtual const char* name() const = 0;
 };

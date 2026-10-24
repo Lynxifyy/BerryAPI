@@ -15,8 +15,10 @@
 //   * a frame that parses as Ok consumes exactly frameLen bytes
 
 #include "berry/net.h"
+#include "berry/replay_format.h"
 #include "berry/sigscan.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -157,6 +159,169 @@ static void FuzzSig(uint32_t seed) {
   }
 }
 
+//--------------------------------------------------------------------------
+// Replay container parser fuzzer + contract.
+//
+// A replay file is untrusted input: it is a file someone else can hand you and
+// it feeds the game's packet parsers. So this fuzzer does the strongest thing
+// available: it builds a VALID replay, then mutates it (bit flips, truncation,
+// byte insertion/deletion, random replacement) and asserts the reader either
+// accepts it completely or refuses it completely — never crashes, never
+// half-loads, and never trusts a length. It also throws pure random bytes at
+// the reader.
+//--------------------------------------------------------------------------
+
+/// A small valid replay: two keyframes with a delta after each.
+static std::string ValidReplayBytes() {
+  ReplayFile f;
+  f.fingerprint.buildId = 4242;
+  f.fingerprint.label = "1.21.0";
+  f.fingerprint.protocolVersion = 748;
+  u64 tick = 100;
+  for (int k = 0; k < 2; ++k) {
+    ReplaySection key;
+    key.kind = ReplaySectionKind::Keyframe;
+    key.startTick = tick;
+    key.endTick = tick;
+    ReplayRecord a;
+    a.tick = tick; a.kind = ReplayRecordKind::Chunk; a.tag = 7;
+    a.payload.assign(256, (char)('A' + k));
+    key.records.push_back(a);
+    f.sections.push_back(key);
+
+    ReplaySection delta;
+    delta.kind = ReplaySectionKind::Delta;
+    delta.startTick = tick + 1;
+    delta.endTick = tick + 19;
+    ReplayRecord b;
+    b.tick = tick + 1; b.kind = ReplayRecordKind::EntityMove;
+    b.payload.assign(48, 'M');
+    delta.records.push_back(b);
+    f.sections.push_back(delta);
+    tick += 20;
+  }
+  f.RebuildIndex();
+  ReplayWriter w;
+  std::string bytes;
+  if (w.Write(f, &bytes) != ReplayError::Ok) return std::string();
+  return bytes;
+}
+
+/// Asserts a read is all-or-nothing: either Ok with the full section set, or a
+/// non-Ok error with `out` left empty. Never a crash, never a partial load.
+static void CheckAllOrNothing(const std::string& data, uint32_t seed) {
+  ReplayFile out;
+  ReplayReader r;
+  const ReplayError e = r.Read(data, &out);
+  if (e == ReplayError::Ok) {
+    // A successful load must carry an index consistent with its keyframes.
+    size_t keyframes = 0;
+    for (const ReplaySection& s : out.sections) {
+      if (s.kind == ReplaySectionKind::Keyframe) ++keyframes;
+    }
+    CHECK(out.index.size() == keyframes);
+    CHECK(!out.sections.empty());
+  } else {
+    CHECK(out.sections.empty());
+  }
+  (void)seed;
+}
+
+static void FuzzReplay(uint32_t seed) {
+  Rng rng{seed ? seed : 1};
+  const std::string valid = ValidReplayBytes();
+  CHECK(!valid.empty());
+
+  // 1. Pure random bytes: the reader must never crash or trust a length.
+  for (int iter = 0; iter < 500; ++iter) {
+    std::vector<u8> buf(rng.Next() % 400);
+    for (auto& b : buf) b = (u8)rng.Next();
+    CheckAllOrNothing(std::string((const char*)buf.data(), buf.size()), rng.Next());
+  }
+
+  // 2. Random bytes that START with the magic, so the parser gets past the
+  //    first gate and into the header/block/index logic.
+  for (int iter = 0; iter < 500; ++iter) {
+    std::vector<u8> buf(64 + rng.Next() % 512);
+    for (auto& b : buf) b = (u8)rng.Next();
+    buf[0] = 'B'; buf[1] = 'R'; buf[2] = 'P'; buf[3] = 'L';
+    CheckAllOrNothing(std::string((const char*)buf.data(), buf.size()), rng.Next());
+  }
+
+  // 3. Bit flips on a valid replay: the CRC/checksum must catch nearly all,
+  //    and any that slip through must still be all-or-nothing.
+  for (int iter = 0; iter < 3000; ++iter) {
+    std::string m = valid;
+    const size_t at = rng.Next() % m.size();
+    m[at] = (char)((unsigned char)m[at] ^ (u8)(1u << (rng.Next() % 8)));
+    CheckAllOrNothing(m, rng.Next());
+  }
+
+  // 4. Truncation at every length class.
+  for (size_t cut = 0; cut < valid.size(); cut += 1 + (rng.Next() % 17)) {
+    CheckAllOrNothing(valid.substr(0, cut), rng.Next());
+  }
+
+  // 5. Insertion / deletion, which shifts every offset after the change.
+  for (int iter = 0; iter < 1000; ++iter) {
+    std::string m = valid;
+    const size_t at = rng.Next() % m.size();
+    if (rng.Next() & 1) {
+      m.insert(at, 1, (char)rng.Next());
+    } else if (m.size() > 1) {
+      m.erase(at, 1);
+    }
+    CheckAllOrNothing(m, rng.Next());
+  }
+
+  // 6. Bulk random replacement over a window (corrupts a block's payload).
+  for (int iter = 0; iter < 500; ++iter) {
+    std::string m = valid;
+    const size_t at = rng.Next() % m.size();
+    const size_t n = std::min<size_t>(rng.Next() % 64, m.size() - at);
+    for (size_t i = 0; i < n; ++i) m[at + i] = (char)rng.Next();
+    CheckAllOrNothing(m, rng.Next());
+  }
+}
+
+static void ContractReplay() {
+  // The unmutated replay loads exactly.
+  const std::string valid = ValidReplayBytes();
+  ReplayFile out;
+  ReplayReader r;
+  CHECK(r.Read(valid, &out) == ReplayError::Ok);
+  CHECK(out.sections.size() == 4);
+  CHECK(out.index.size() == 2);
+
+  // Every truncation of the header is refused, not misread.
+  for (size_t cut = 1; cut < 64; ++cut) {
+    ReplayFile tmp;
+    CHECK(r.Read(valid.substr(0, cut), &tmp) != ReplayError::Ok);
+    CHECK(tmp.sections.empty());
+  }
+
+  // A file whose declared section count is absurd is refused before any
+  // allocation that count would drive.
+  {
+    std::string bad = valid;
+    bad[24] = (char)0xff; bad[25] = (char)0xff; bad[26] = (char)0xff; bad[27] = (char)0x7f;
+    // Recompute the header CRC so the section-count cap is what fires.
+    u32 crc = 0xffffffffu;
+    for (size_t i = 0; i < 56; ++i) {
+      crc ^= (unsigned char)bad[i];
+      for (int k = 0; k < 8; ++k) {
+        const u32 mask = (u32)-(int)(crc & 1u);
+        crc = (crc >> 1) ^ (0xedb88320u & mask);
+      }
+    }
+    crc ^= 0xffffffffu;
+    bad[56] = (char)(crc & 0xff); bad[57] = (char)((crc >> 8) & 0xff);
+    bad[58] = (char)((crc >> 16) & 0xff); bad[59] = (char)((crc >> 24) & 0xff);
+    ReplayFile tmp;
+    CHECK(r.Read(bad, &tmp) == ReplayError::TooManySections);
+  }
+}
+
 static void ContractSig() {
   // Empty signature never matches but must not crash.
   Signature empty("empty", "");
@@ -181,11 +346,12 @@ static void ContractSig() {
 
 int main(int argc, char** argv) {
   // make test passes the binary path as argv[1]; only treat an explicit
-  // "ws"/"sig"/"both" token as a target selector, otherwise run everything.
+  // "ws"/"sig"/"replay"/"both" token as a target selector, otherwise run
+  // everything.
   std::string which = "both";
   if (argc > 1) {
     std::string a = argv[1];
-    if (a == "ws" || a == "sig" || a == "both") which = a;
+    if (a == "ws" || a == "sig" || a == "replay" || a == "both") which = a;
   }
   if (which == "ws" || which == "both") {
     FuzzWs(0x1234);
@@ -198,6 +364,12 @@ int main(int argc, char** argv) {
     FuzzSig(0xbeef);
     ContractSig();
     printf("test_fuzz[sig]: ALL OK\n");
+  }
+  if (which == "replay" || which == "both") {
+    FuzzReplay(0x5eed);
+    FuzzReplay(0xfeedface);
+    ContractReplay();
+    printf("test_fuzz[replay]: ALL OK\n");
   }
   return g_fail;
 }

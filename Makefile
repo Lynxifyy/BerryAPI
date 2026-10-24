@@ -2,7 +2,7 @@
 # Produces tests/berry_tests binary that runs every module's test suite.
 
 CXX      ?= g++
-CXXFLAGS ?= -std=c++17 -Wall -Wextra -O2 -g -Iinclude -Ithird_party/ed25519 $(MBEDTLS_INCLUDES) $(LUAU_INCLUDES) -DBERRY_THREAD_ASSERT
+CXXFLAGS ?= -std=c++17 -Wall -Wextra -O2 -g -Iinclude -Ithird_party/ed25519 $(MBEDTLS_INCLUDES) $(LZ4_INCLUDES) $(LUAU_INCLUDES) -DBERRY_THREAD_ASSERT
 LDFLAGS  ?= -pthread
 
 # Header dependency tracking. Without it, editing a header leaves every object
@@ -16,7 +16,7 @@ DEPFLAGS := -MMD -MP
 
 # The injectable shared library (android/linux target build).
 # Compile with -fPIC and -fvisibility=hidden; only BERRY_API symbols escape.
-SHARED_CXXFLAGS ?= -std=c++17 -O2 -fPIC -fvisibility=hidden -DBERRY_BUILD_SHARED -Iinclude -Ithird_party/ed25519 $(MBEDTLS_INCLUDES) $(LUAU_INCLUDES)
+SHARED_CXXFLAGS ?= -std=c++17 -O2 -fPIC -fvisibility=hidden -DBERRY_BUILD_SHARED -Iinclude -Ithird_party/ed25519 $(MBEDTLS_INCLUDES) $(LZ4_INCLUDES) $(LUAU_INCLUDES)
 SHARED_LDFLAGS  ?= -shared -pthread -ldl
 SHARED_NAME     ?= libBerryAPI.so
 
@@ -30,11 +30,15 @@ include tools/sources.mk
 -include $(patsubst %.cpp,build/san/tests/%.d,$(TEST_SRC))
 -include $(patsubst %.cpp,build/shared/%.d,$(CORE_SRC))
 -include $(MBEDTLS_SRC:.c=.d)
+-include $(LZ4_SRC:.c=.d)
+-include $(patsubst %.c,build/san/%.d,$(LZ4_SRC))
+-include $(patsubst %.c,build/shared/%.d,$(LZ4_SRC))
 
 # Vendored C (Ed25519) is compiled as C99 into the same object set as the C++
 # core, so both the host tests and the injectable .so carry it.
 ED25519_OBJ := $(ED25519_SRC:.c=.o)
 MBEDTLS_OBJ := $(MBEDTLS_SRC:.c=.o)
+LZ4_OBJ := $(LZ4_SRC:.c=.o)
 # Test-only mbedTLS object set: the same sources compiled with the test config
 # (tests/tls_test_config) that adds the TLS server role. Every mbedTLS source is
 # rebuilt, because a client-only ssl_tls.o will not link with the server TUs;
@@ -51,7 +55,7 @@ MBEDTLS_TEST_INCLUDES := -Itests/tls_test_config -Ithird_party/mbedtls/include \
                          -Ithird_party/mbedtls/library \
                          -DMBEDTLS_CONFIG_FILE='"mbedtls/mbedtls_config_test.h"'
 LUAU_OBJ := $(LUAU_SRC:.cpp=.o)
-CORE_OBJ := $(CORE_SRC:.cpp=.o) $(ED25519_OBJ) $(MBEDTLS_OBJ) $(LUAU_OBJ)
+CORE_OBJ := $(CORE_SRC:.cpp=.o) $(ED25519_OBJ) $(MBEDTLS_OBJ) $(LZ4_OBJ) $(LUAU_OBJ)
 TEST_OBJ := $(TEST_SRC:.cpp=.o)
 
 # Each suite links against the core into its own binary.
@@ -92,6 +96,12 @@ third_party/luau/%.o: third_party/luau/%.cpp
 # caller-supplied, so nothing reads /dev/urandom inside the library).
 third_party/ed25519/%.o: third_party/ed25519/%.c
 	$(CC) -std=c99 -O2 -Wall -Wextra -DED25519_NO_SEED -c $< -o $@
+
+# Vendored LZ4: C99, compiled with its own -w (upstream is warning-clean only
+# under its own flag set). One rule covers both lz4.c and lz4hc.c.
+third_party/lz4/lib/%.o: third_party/lz4/lib/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c99 -O2 -w -Ithird_party/lz4/lib -c $< -o $@
 
 # Vendored mbedTLS: C99, warning-clean only under its own flag set (upstream
 # builds it with -w), compiled against the vendored config and include roots.
@@ -148,7 +158,7 @@ test: idl-check check-signer check-sources $(TEST_BINS) build/$(SHARED_NAME) che
 # Sanitizer build: ASan+UBSan host tests. Everything is built into its own
 # directory so it never collides with the normal build/, and every binary runs
 # with leak + stack checks enabled.
-SAN_CXXFLAGS := -std=c++17 -Wall -Wextra -O1 -g -Iinclude -Ithird_party/ed25519 $(MBEDTLS_INCLUDES) $(LUAU_INCLUDES) \
+SAN_CXXFLAGS := -std=c++17 -Wall -Wextra -O1 -g -Iinclude -Ithird_party/ed25519 $(MBEDTLS_INCLUDES) $(LZ4_INCLUDES) $(LUAU_INCLUDES) \
                 -DBERRY_THREAD_ASSERT \
                 -fsanitize=address,undefined -fno-omit-frame-pointer
 SAN_LDFLAGS  := -pthread -fsanitize=address,undefined
@@ -158,6 +168,7 @@ SAN_CORE_OBJ := $(filter-out build/san/core/net/tls.o,$(patsubst core/%.cpp,buil
                 $(patsubst util/%.cpp,build/san/util/%.o,$(filter util/%.cpp,$(CORE_SRC))) \
                 $(patsubst third_party/ed25519/%.c,build/san/third_party/ed25519/%.o,$(ED25519_SRC)) \
                 $(patsubst %.cpp,build/san/%.o,$(LUAU_SRC)) \
+                $(patsubst %.c,build/san/%.o,$(LZ4_SRC)) \
                 $(patsubst %.c,build/san/mbedtls-test/%.o,$(MBEDTLS_SRC)) \
                 $(patsubst %.c,build/san/mbedtls-test/%.o,$(MBEDTLS_TEST_EXTRA_SRC)) \
                 build/san/testcfg/core/net/tls.o
@@ -182,6 +193,10 @@ build/san/third_party/ed25519/%.o: third_party/ed25519/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c99 -O1 -g -DED25519_NO_SEED -fsanitize=address,undefined -fno-omit-frame-pointer -c $< -o $@
 
+build/san/third_party/lz4/lib/%.o: third_party/lz4/lib/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c99 -O1 -g -w -Ithird_party/lz4/lib -fsanitize=address,undefined -fno-omit-frame-pointer -c $< -o $@
+
 build/san/tests:
 	mkdir -p $@
 build/san/core:
@@ -204,6 +219,7 @@ test-sanitize: $(SAN_BINS)
 SHARED_OBJ := $(patsubst %.cpp,build/shared/%.o,$(CORE_SRC)) \
               $(patsubst %.c,build/shared/%.o,$(ED25519_SRC)) \
               $(patsubst %.c,build/shared/%.o,$(MBEDTLS_SRC)) \
+              $(patsubst %.c,build/shared/%.o,$(LZ4_SRC)) \
               $(patsubst %.cpp,build/shared/%.o,$(LUAU_SRC))
 
 build/shared/%.o: %.cpp
@@ -221,6 +237,10 @@ build/shared/third_party/ed25519/%.o: third_party/ed25519/%.c
 build/shared/third_party/mbedtls/library/%.o: third_party/mbedtls/library/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c99 -O2 -fPIC -fvisibility=hidden -w $(MBEDTLS_INCLUDES) -c $< -o $@
+
+build/shared/third_party/lz4/%.o: third_party/lz4/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c99 -O2 -fPIC -fvisibility=hidden -w -Ithird_party/lz4/lib -c $< -o $@
 
 build/$(SHARED_NAME): $(SHARED_OBJ)
 	$(CXX) $(SHARED_LDFLAGS) $(SHARED_OBJ) -o $@

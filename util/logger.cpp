@@ -9,13 +9,11 @@
 
 namespace Berry {
 
-ILogSink* Log::sink_ = nullptr;
 std::mutex Log::mutex_;
 std::string Log::last_message_;
 bool Log::capture_ = false;
 LogLevel Log::level_ = LogLevel::Info;
 
-void Log::SetSink(ILogSink* sink) { sink_ = sink; }
 void Log::SetLevel(LogLevel level) { level_ = level; }
 LogLevel Log::GetLevel() { return level_; }
 
@@ -63,7 +61,6 @@ void Log::VFormat(LogLevel level, const char* fmt, va_list args) {
   fprintf(stderr, "[Berry][%s] %s\n", LevelName(level), buf);
 #endif
   if (capture_) last_message_ = buf;
-  if (sink_) sink_->write(level, buf);
 }
 
 void Log::LogAt(LogLevel level, const char* fmt, ...) {

@@ -284,6 +284,7 @@ Capability: `hud`.
 | `hud.attach(widget: Widget) -> nil` | `hud` | - |
 | `hud.set_visible(widget: Widget, visible: bool) -> nil` | `hud` | - |
 | `hud.tween(widget: Widget, prop: string, to: number, ms: number) -> nil` | `hud` | - |
+| `hud.stats() -> Table` | `hud` | The HUD's frame counters as {frames, layout_passes, widgets_drawn, widgets_culled, primitives}. `widgets_culled` counts widgets skipped because they were off-screen or hidden; `layout_passes` counts the subtrees re-laid-out this frame (the retained tree re-lays out only what was dirtied). |
 
 ## Ui
 
@@ -365,6 +366,9 @@ Capability: `cosmetic`.
 | `cosmetic.presets() -> string` | `cosmetic` | - |
 | `cosmetic.set_local_only(enabled: bool) -> nil` | `cosmetic` | - |
 | `cosmetic.reload_packs() -> number` | `cosmetic` | Reload local model packs from the pack directory, registering every valid *.pack.json. Returns the number of packs loaded; each pack is applied atomically (all its assets or none). |
+| `cosmetic.peers() -> number` | `cosmetic` | How many peers the client's LAN discovery has found this session, most recently seen first. 0 when discovery is off (the client was not configured to sync). Discovery only names peers — a loadout from one is still verified by the sync channel before anything is applied. |
+| `cosmetic.peer(index: number) -> Table` | `cosmetic` | The discovered peer at `index`, most recently seen first, as {instance, address, port, last_ms}, or an empty table when out of range. |
+| `cosmetic.sync_stats() -> Table` | `cosmetic` | This client's cosmetic-sync channel counters as {accepted, rejected, peers, replay_window, configured}, or zeros with configured=false when sync is off. |
 
 ## Animator
 
@@ -599,3 +603,49 @@ Capability: `voice`.
 | `voice.stats() -> Table` | `voice` | The session counters as {frames_captured, frames_sent, frames_received, frames_dropped, frames_played, bytes_sent, bytes_received}. |
 | `voice.reset() -> nil` | `voice` | Forgets the speaker state and the counters, keeping the config and the seams. |
 | `voice.transport() -> string` | `voice` | The transport's short name (\"lan\" on device, \"\" when none is bound). |
+
+## ReplayMod
+
+Capability: `world`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `replaymod.capture_start() -> bool` | `world` | Begins a fresh capture, clearing any previous tape. False when already recording. |
+| `replaymod.capture_stop() -> bool` | `world` | Ends the capture and keeps the tape. False when not recording. |
+| `replaymod.capturing() -> bool` | `world` | - |
+| `replaymod.section_count() -> number` | `world` | The number of sections on the tape. |
+| `replaymod.bytes() -> number` | `world` | The uncompressed payload bytes currently held. |
+| `replaymod.first_tick() -> number` | `world` | The first and last tick held, or 0 when empty. |
+| `replaymod.last_tick() -> number` | `world` | - |
+| `replaymod.save() -> string` | `world` | The tape as one binary replay document, ready to save. Returns \"\" on a write error. |
+| `replaymod.load(data: string) -> bool` | `world` | Replaces the loaded replay from a binary document. Rejects the whole document on any error (returns false with a reason in `last_error`) and leaves the current replay untouched. |
+| `replaymod.loaded() -> bool` | `world` | True when a replay is loaded. |
+| `replaymod.unload() -> nil` | `world` | - |
+| `replaymod.last_error() -> string` | `world` | Why the last `load` failed, or \"\" after a success. |
+| `replaymod.loaded_sections() -> number` | `world` | The loaded replay's section count. |
+| `replaymod.loaded_first_tick() -> number` | `world` | The loaded replay's first and last tick, or 0 when none. |
+| `replaymod.loaded_last_tick() -> number` | `world` | - |
+| `replaymod.world_entity_count(tick: number) -> number` | `world` | How many entities the reconstructed world holds at `tick`, or 0 when no replay is loaded. |
+| `replaymod.world_entity(tick: number, index: number) -> Table` | `world` | The entity at `index` of the reconstructed world at `tick` as {valid, id, type, x, y, z, health, max_health, alive, name}, or an empty table when out of range. |
+| `replaymod.world_block(tick: number, x: number, y: number, z: number) -> number` | `world` | The block id at a block coordinate in the reconstructed world at `tick`, or 0 when no replay is loaded. |
+| `replaymod.tick_range() -> Table` | `world` | The replay's tick range as {first, last}, or zeros when none. |
+| `replaymod.set_review_active(on: bool) -> nil` | `world` | Turns the local review overlay on or off. Off by default. |
+| `replaymod.review_active() -> bool` | `world` | - |
+| `replaymod.review_play() -> bool` | `world` | Starts the review playback from the loaded replay. False when no replay is loaded. |
+| `replaymod.review_pause() -> nil` | `world` | - |
+| `replaymod.review_playing() -> bool` | `world` | - |
+| `replaymod.review_tick() -> number` | `world` | The tick the review is showing. |
+| `replaymod.review_seek(tick: number) -> bool` | `world` | Moves the review to a tick. False when no replay is loaded. |
+| `replaymod.review_speed() -> number` | `world` | The playback speed multiplier. Must be finite and in (0, 64]; a bad value is refused. |
+| `replaymod.set_review_speed(speed: number) -> bool` | `world` | - |
+| `replaymod.review_present() -> number` | `world` | Draws the review through the frame's renderer when active; returns how many entities it drew. A no-op (0) when inactive or no replay is loaded. |
+| `replaymod.server_start(host: string, port: number) -> bool` | `world` | Binds the loopback playback server to `host:port`. `host` must be a loopback address (\"127.0.0.1\", \"::1\" or \"localhost\"); anything else is refused. A port of 0 asks the OS for a free one, which `server_port` reports. Returns false (with a reason in `last_error`) when the host is not loopback, the socket cannot bind, or the server is already running. |
+| `replaymod.server_stop() -> nil` | `world` | - |
+| `replaymod.server_running() -> bool` | `world` | - |
+| `replaymod.server_port() -> number` | `world` | - |
+| `replaymod.server_client_connected() -> bool` | `world` | - |
+| `replaymod.server_packets_sent() -> number` | `world` | How many packets the server has sent since a client joined. |
+| `replaymod.server_set_paused(paused: bool) -> nil` | `world` | Pauses or resumes the server's stream (the client stays connected). |
+| `replaymod.server_paused() -> bool` | `world` | - |
+| `replaymod.server_seek(tick: number) -> bool` | `world` | Restarts the stream for the connected client at the nearest keyframe at or before `tick`. False when no client is connected. |
+| `replaymod.status() -> string` | `world` | A one-line status: capture state, sections, bytes, whether a replay is loaded, and whether a client is connected. |

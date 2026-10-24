@@ -230,6 +230,21 @@ static void TestHudLifecycleAcrossThreads() {
     if (!kv.second.visible) sawHidden = true;
   }
   CHECK(sawHidden);
+
+  // hud.stats reports the counters Present() populated, key for key.
+  renderer.BeginFrame(Vec2(800, 600));
+  hud.Present(renderer, Vec2(800, 600));
+  renderer.EndFrame();
+
+  ScriptValue stats;
+  CHECK(Call(bindings, "hud.stats", {}, {"hud"}, &stats) == ScriptStatus::Ok);
+  CHECK(stats.IsTable());
+  const ScriptTable* t = stats.AsTable();
+  CHECK((u64)t->at("frames").AsNumber() == hud.stats().frames);
+  CHECK((u64)t->at("layout_passes").AsNumber() == hud.stats().layoutPasses);
+  CHECK((u64)t->at("widgets_drawn").AsNumber() == hud.stats().widgetsDrawn);
+  CHECK((u64)t->at("widgets_culled").AsNumber() == hud.stats().widgetsCulled);
+  CHECK((u64)t->at("primitives").AsNumber() == hud.stats().primitives);
 }
 
 static void TestFrameHookDrawsCosmetics() {

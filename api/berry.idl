@@ -338,6 +338,8 @@ module Hud {
   fn attach(widget: Widget) -> nil
   fn set_visible(widget: Widget, visible: bool) -> nil
   fn tween(widget: Widget, prop: string, to: number, ms: number) -> nil
+  doc "The HUD's frame counters as {frames, layout_passes, widgets_drawn, widgets_culled, primitives}. `widgets_culled` counts widgets skipped because they were off-screen or hidden; `layout_passes` counts the subtrees re-laid-out this frame (the retained tree re-lays out only what was dirtied)."
+  fn stats() -> Table
 }
 
 module Ui {
@@ -447,6 +449,12 @@ module Cosmetic {
   fn set_local_only(enabled: bool) -> nil
   doc "Reload local model packs from the pack directory, registering every valid *.pack.json. Returns the number of packs loaded; each pack is applied atomically (all its assets or none)."
   fn reload_packs() -> number
+  doc "How many peers the client's LAN discovery has found this session, most recently seen first. 0 when discovery is off (the client was not configured to sync). Discovery only names peers — a loadout from one is still verified by the sync channel before anything is applied."
+  fn peers() -> number
+  doc "The discovered peer at `index`, most recently seen first, as {instance, address, port, last_ms}, or an empty table when out of range."
+  fn peer(index: number) -> Table
+  doc "This client's cosmetic-sync channel counters as {accepted, rejected, peers, replay_window, configured}, or zeros with configured=false when sync is off."
+  fn sync_stats() -> Table
 }
 
 module Animator {
@@ -779,4 +787,74 @@ module Voice {
   fn reset() -> nil
   doc "The transport's short name (\"lan\" on device, \"\" when none is bound)."
   fn transport() -> string
+}
+
+module ReplayMod {
+  capability world
+  doc "The replay mod's container half: capture this client's own world stream into a versioned, compressed, seekable replay, load one back, and play it. Distinct from `Replay` (the camera timeline): this is the tape itself. `capture_start`/`capture_stop` drive the in-memory capture the World tick feeds; `save` returns the tape as one binary replay document and `load` replaces the loaded replay from one (rejecting the whole document on any error and leaving the current one untouched). A loaded replay is reconstructed per tick so `world_tick`/`entity_count`/`world_entity` answer from the tape instead of the game — the same reads a script makes of the live world. `review_*` drives the local fight-review overlay (an ESP-style box, nameplate and combat-event markers drawn through the one render path), which reveals nothing the client was not already sent. `server_start` plays the loaded replay back to the game's own client over a loopback socket; it refuses any non-loopback host, so a recording can never be served to a remote peer. Client-side and read-only with respect to the world: recording snapshots what the seam already reported, never game memory."
+  doc "Begins a fresh capture, clearing any previous tape. False when already recording."
+  fn capture_start() -> bool
+  doc "Ends the capture and keeps the tape. False when not recording."
+  fn capture_stop() -> bool
+  fn capturing() -> bool
+  doc "The number of sections on the tape."
+  fn section_count() -> number
+  doc "The uncompressed payload bytes currently held."
+  fn bytes() -> number
+  doc "The first and last tick held, or 0 when empty."
+  fn first_tick() -> number
+  fn last_tick() -> number
+  doc "The tape as one binary replay document, ready to save. Returns \"\" on a write error."
+  fn save() -> string
+  doc "Replaces the loaded replay from a binary document. Rejects the whole document on any error (returns false with a reason in `last_error`) and leaves the current replay untouched."
+  fn load(data: string) -> bool
+  doc "True when a replay is loaded."
+  fn loaded() -> bool
+  fn unload() -> nil
+  doc "Why the last `load` failed, or \"\" after a success."
+  fn last_error() -> string
+  doc "The loaded replay's section count."
+  fn loaded_sections() -> number
+  doc "The loaded replay's first and last tick, or 0 when none."
+  fn loaded_first_tick() -> number
+  fn loaded_last_tick() -> number
+  doc "How many entities the reconstructed world holds at `tick`, or 0 when no replay is loaded."
+  fn world_entity_count(tick: number) -> number
+  doc "The entity at `index` of the reconstructed world at `tick` as {valid, id, type, x, y, z, health, max_health, alive, name}, or an empty table when out of range."
+  fn world_entity(tick: number, index: number) -> Table
+  doc "The block id at a block coordinate in the reconstructed world at `tick`, or 0 when no replay is loaded."
+  fn world_block(tick: number, x: number, y: number, z: number) -> number
+  doc "The replay's tick range as {first, last}, or zeros when none."
+  fn tick_range() -> Table
+  doc "Turns the local review overlay on or off. Off by default."
+  fn set_review_active(on: bool) -> nil
+  fn review_active() -> bool
+  doc "Starts the review playback from the loaded replay. False when no replay is loaded."
+  fn review_play() -> bool
+  fn review_pause() -> nil
+  fn review_playing() -> bool
+  doc "The tick the review is showing."
+  fn review_tick() -> number
+  doc "Moves the review to a tick. False when no replay is loaded."
+  fn review_seek(tick: number) -> bool
+  doc "The playback speed multiplier. Must be finite and in (0, 64]; a bad value is refused."
+  fn review_speed() -> number
+  fn set_review_speed(speed: number) -> bool
+  doc "Draws the review through the frame's renderer when active; returns how many entities it drew. A no-op (0) when inactive or no replay is loaded."
+  fn review_present() -> number
+  doc "Binds the loopback playback server to `host:port`. `host` must be a loopback address (\"127.0.0.1\", \"::1\" or \"localhost\"); anything else is refused. A port of 0 asks the OS for a free one, which `server_port` reports. Returns false (with a reason in `last_error`) when the host is not loopback, the socket cannot bind, or the server is already running."
+  fn server_start(host: string, port: number) -> bool
+  fn server_stop() -> nil
+  fn server_running() -> bool
+  fn server_port() -> number
+  fn server_client_connected() -> bool
+  doc "How many packets the server has sent since a client joined."
+  fn server_packets_sent() -> number
+  doc "Pauses or resumes the server's stream (the client stays connected)."
+  fn server_set_paused(paused: bool) -> nil
+  fn server_paused() -> bool
+  doc "Restarts the stream for the connected client at the nearest keyframe at or before `tick`. False when no client is connected."
+  fn server_seek(tick: number) -> bool
+  doc "A one-line status: capture state, sections, bytes, whether a replay is loaded, and whether a client is connected."
+  fn status() -> string
 }

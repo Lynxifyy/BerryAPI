@@ -16,6 +16,8 @@
 namespace Berry {
 
 class SessionRecorder;
+class ReplayService;
+class BerryClient;
 
 //----------------------------------------------------------------------------
 // Engine — central BerryAPI instance.
@@ -34,6 +36,27 @@ struct EngineConfig {
   bool captureLog = false;
   bool autoAttachModules = true;
   bool enableRender = true;
+  /// Build the client composition root (owns the client services + the script
+  /// host). On by default; a pure telemetry injector turns it off.
+  bool enableClient = true;
+  /// Load manifests without signature/source-hash verification. Development
+  /// only; never set on device.
+  bool devMode = false;
+  /// The directory the client loads a script from, or empty for none.
+  std::string scriptDirectory;
+  /// The local player's runtime entity id (0 = unknown).
+  u64 localPlayerId = 0;
+  /// LAN cosmetic-sync channel (opt-in). Off by default.
+  bool enableCosmeticSync = false;
+  std::string syncVerifyKey;   // hex Ed25519 public key, or HMAC secret
+  std::string syncSelfId;      // empty = verify/apply only, never publish
+  std::string syncSignSecret;  // empty = never publish
+  bool syncUseHmac = false;
+  /// LAN proximity voice (opt-in). Off by default.
+  bool enableVoice = false;
+  std::string voiceSelfId;     // empty = transport bound but session stopped
+  /// The interface the LAN channels join and send on ("" = system route).
+  std::string lanIface;
 };
 
 class BERRY_API Engine {
@@ -60,6 +83,18 @@ class BERRY_API Engine {
   /// The session recorder: record-and-replay of the world stream. Always
   /// present; recording is off until `SessionRecorder::Start`.
   SessionRecorder& Recorder() { return *recorder_; }
+
+  /// The replay mod: the container capture, the reconstructed replay, the
+  /// local review overlay and the loopback playback server, in one owned
+  /// object. Always present; capture is off until `ReplayCapture::Start` and
+  /// the server is stopped until `ReplayServer::Start`.
+  ReplayService& Replay() { return *replay_; }
+
+  /// The client composition root: owns the client services (UI, HUD, overlays,
+  /// registries, script host) and drives them on the tick/frame. Created by
+  /// `Attach` when the config enables it; null otherwise.
+  BerryClient* Client() { return client_.get(); }
+  const BerryClient* Client() const { return client_.get(); }
 
   // Tick -------------------------------------------------------------------
   /// Called from the game's RTT simulation tick each frame.
@@ -89,10 +124,17 @@ class BERRY_API Engine {
   Scheduler sched_;
   ModuleRegistry modules_;
   std::unique_ptr<SessionRecorder> recorder_;
+  std::unique_ptr<ReplayService> replay_;
+  /// The client composition root. Declared after the modules it binds, so it is
+  /// destroyed before them (its services hold the world/render handles).
+  std::unique_ptr<BerryClient> client_;
   std::atomic<GameTick> currentTick_{0};
   std::atomic<bool> attached_{false};
   EngineConfig cfg_;
   GameTick lastFrameTick_ = 0;
+  u64 lastReplayFrameMs_ = 0;
+  /// Wall-clock of the last presented frame, for the client frame delta.
+  u64 lastFrameMs_ = 0;
 };
 
 }  // namespace Berry

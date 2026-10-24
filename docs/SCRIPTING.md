@@ -417,11 +417,10 @@ report (warm, not yet throttling) clamps early to a Fair ceiling. Every clamp
 arms a dwell window during which restoration is blocked, because a device that
 just throttled reports fast frames for a moment and restoring then would heat it
 straight back up. `SetPlatform` selects a `QualityProfile` and thermal ceiling
-for a device class (`MobileLow`/`MobileHigh`/`Desktop`/`Generic`), and
-`CullPolicy` turns the current settings into the render hooks' cull/keep,
-animate/don't and spawn/don't decisions, including per-category particle caps
-and a screen-size cull for ambient particles. `FrameStats` reports p99 and
-`FrameHistogram` shows the shape of the tail.
+for a device class (`MobileLow`/`MobileHigh`/`Desktop`/`Generic`); the resulting
+`RenderSettings` feed the render pipeline's `LodPolicy`, which answers the
+render hooks' keep/cull and animate/don't decisions. `FrameStats` reports p99
+and `FrameHistogram` shows the shape of the tail.
 
 The governor is also what drives the render pipeline. `ScriptApi::PublishFrame`
 (the frame hook the engine raises once per frame) calls `governor->OnFrame`,

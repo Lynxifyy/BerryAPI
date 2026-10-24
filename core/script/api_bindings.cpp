@@ -317,6 +317,26 @@ bool ResolveSpeaker(const WorldHandle& world, const std::string& speakerId,
   return false;
 }
 
+/// Resolves a player id (a display name, or the "<raw>:<runtime>" spelling) to
+/// the entity the listener's own world view holds. Returns a default (zero)
+/// EntityId when the world does not hold such a player, so a caller skips the
+/// draw rather than guessing an entity. Used by the remote-cosmetic overlay.
+EntityId ResolveEntityByName(const WorldHandle& world, const std::string& name) {
+  EntityId none;
+  auto seam = world.Seam();
+  if (!seam) return none;
+  for (const EntityId& id : seam->AllEntities()) {
+    EntitySnapshot snap;
+    if (!seam->GetEntity(id, &snap) || !snap.alive) continue;
+    if (snap.name == name) return id;
+    const std::string idSpelling =
+        std::to_string((unsigned long long)id.raw) + ":" +
+        std::to_string((unsigned)id.runtime);
+    if (idSpelling == name) return id;
+  }
+  return none;
+}
+
 }  // namespace
 
 //----------------------------------------------------------------------------
@@ -388,6 +408,20 @@ void ScriptApi::InitFrameHook() {
         // DrawLocal needs no skeleton bound: it resolves nothing and returns 0.
         if (services_.cosmetics && services_.renderer) {
           services_.cosmetics->DrawLocal(*services_.renderer, services_.localPlayer);
+          // Remote cosmetics (from the LAN sync channel) draw through the same
+          // path, gated by the skeleton seam and the ownership check the
+          // channel already applied. Each remote player is resolved to the
+          // entity the listener's own world view holds, so a player the client
+          // cannot see is never drawn. Nothing runs when no sync channel fed a
+          // remote loadout (the list is empty).
+          if (services_.world) {
+            for (const std::string& peer : services_.cosmetics->RemotePlayers()) {
+              EntityId eid = ResolveEntityByName(*services_.world, peer);
+              if (eid.raw != 0 || eid.runtime != 0) {
+                services_.cosmetics->DrawRemote(*services_.renderer, peer, eid);
+              }
+            }
+          }
         }
         // The PvP overlay presents its widget tree through the HUD, then draws
         // its popups/flash through the Renderer. Its animation is advanced from
@@ -467,6 +501,18 @@ void ScriptApi::InitFrameHook() {
             const Vec2 center(screen.x * 0.5f, screen.y * 0.5f);
             services_.radial->Update(dt, center, pointer, held);
             services_.radial->Draw(*services_.renderer, center);
+          }
+        }
+        // The replay review draws its fight-review overlay through the same
+        // Renderer, after the other overlays. It is a read-only reconstruction
+        // of the loaded replay, so it can only ever show what the client was
+        // already sent. The engine advances it on the frame clock; this hook
+        // only draws it, so a paused client draws a still frame.
+        if (services_.replay && services_.renderer) {
+          const Vec2 screen = screenSize();
+          if (screen.x > 0 && screen.y > 0) {
+            services_.replay->PresentReview(services_.renderer->camera(),
+                                            *services_.renderer, screen);
           }
         }
         // The script-module overlay draws last, on top, when a user turned it
@@ -2092,6 +2138,18 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Nil();
   });
 
+  install("hud.stats", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.hud) return ScriptValue::Nil();
+    const HudStats s = services_.hud->stats();
+    ScriptTable t;
+    t["frames"] = ScriptValue::Num((f64)s.frames);
+    t["layout_passes"] = ScriptValue::Num((f64)s.layoutPasses);
+    t["widgets_drawn"] = ScriptValue::Num((f64)s.widgetsDrawn);
+    t["widgets_culled"] = ScriptValue::Num((f64)s.widgetsCulled);
+    t["primitives"] = ScriptValue::Num((f64)s.primitives);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
   //--- Ui (immediate-mode UI) ----------------------------------------------
   //
   // Every call builds one widget and reads back the interaction the render
@@ -2573,6 +2631,43 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     // atomically; the return value is how many packs loaded cleanly.
     const PackLoadReport report = services_.packs->LoadDirectory();
     return ScriptValue::Num((f64)report.packsLoaded);
+  });
+  install("cosmetic.peers", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    // Discovery only names peers on the subnet; a loadout from one is still
+    // verified by the sync channel before anything is applied. Fail closed: no
+    // discovery bound reports 0.
+    if (!services_.discovery) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.discovery->services().size());
+  });
+  install("cosmetic.peer", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    ScriptTable t;
+    if (!services_.discovery) {
+      ctx.RaiseError("cosmetic.peer: discovery unavailable");
+      return ScriptValue::Tbl(std::move(t));
+    }
+    const auto list = services_.discovery->services();
+    const f64 idx = args[0].AsNumber();
+    if (idx < 0.0 || idx != std::floor(idx) || (size_t)idx >= list.size()) {
+      return ScriptValue::Tbl(std::move(t));
+    }
+    const LanService& s = list[(size_t)idx];
+    t["instance"] = ScriptValue::Str(s.instance);
+    t["address"] = ScriptValue::Str(s.address);
+    t["port"] = ScriptValue::Num((f64)s.port);
+    t["last_ms"] = ScriptValue::Num((f64)s.lastSeenMs);
+    return ScriptValue::Tbl(std::move(t));
+  });
+  install("cosmetic.sync_stats", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    ScriptTable t;
+    // Fail closed: with no channel bound the counters are zero and the channel
+    // reports itself unconfigured, so a script never reads a stale success.
+    CosmeticSyncChannel* c = services_.sync;
+    t["configured"] = ScriptValue::Bool(c && c->configured());
+    t["accepted"] = ScriptValue::Num((f64)(c ? c->accepted() : 0));
+    t["rejected"] = ScriptValue::Num((f64)(c ? c->rejected() : 0));
+    t["peers"] = ScriptValue::Num((f64)(c ? c->trackedPeers() : 0));
+    t["replay_window"] = ScriptValue::Num((f64)(c ? c->replayWindowSize() : 0));
+    return ScriptValue::Tbl(std::move(t));
   });
 
   //--- Animator (keyframed local-rig animation; renders on this screen only) --
@@ -4416,6 +4511,269 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
   install("mod.overlay", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
     if (!services_.modules) { ctx.RaiseError("mod.overlay: module registry unavailable"); return ScriptValue::Bool(false); }
     return ScriptValue::Bool(services_.modules->overlayVisible());
+  });
+
+  //--- ReplayMod (the replay container, review overlay, loopback server) ----
+  //
+  // The tape itself, distinct from `replay.*` (the camera timeline). Capture is
+  // fed by the World tick, so these bindings only control the session, move the
+  // loaded replay in and out, drive the local review overlay and the loopback
+  // playback server. Everything fails closed when no service is bound.
+  install("replaymod.capture_start", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.replay) { ctx.RaiseError("replaymod.capture_start: replay service unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.replay->capture().Start());
+  });
+
+  install("replaymod.capture_stop", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.replay) { ctx.RaiseError("replaymod.capture_stop: replay service unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.replay->capture().Stop());
+  });
+
+  install("replaymod.capturing", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replay->capture().recording());
+  });
+
+  install("replaymod.section_count", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replay->capture().sectionCount());
+  });
+
+  install("replaymod.bytes", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replay->capture().bytes());
+  });
+
+  install("replaymod.first_tick", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replay->capture().firstTick());
+  });
+
+  install("replaymod.last_tick", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replay->capture().lastTick());
+  });
+
+  install("replaymod.save", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.replay) { ctx.RaiseError("replaymod.save: replay service unavailable"); return ScriptValue::Str(""); }
+    std::string out;
+    const ReplayError e = services_.replay->Save(&out);
+    if (e != ReplayError::Ok) {
+      ctx.RaiseError(std::string("replaymod.save: ") + ReplayErrorName(e));
+      return ScriptValue::Str("");
+    }
+    return ScriptValue::Str(std::move(out));
+  });
+
+  install("replaymod.load", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.replay) { ctx.RaiseError("replaymod.load: replay service unavailable"); return ScriptValue::Bool(false); }
+    ReplayError e = ReplayError::Ok;
+    // A refused document is a normal "no", not an error: the reason is in
+    // `last_error`, so a script can branch on it without an exception.
+    const bool ok = services_.replay->Load(args[0].ToDisplay(), &e);
+    {
+      std::lock_guard<std::mutex> lk(replayErrorMutex_);
+      lastReplayError_ = ok ? std::string() : ReplayErrorName(e);
+    }
+    return ScriptValue::Bool(ok);
+  });
+
+  install("replaymod.loaded", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replay->loaded());
+  });
+
+  install("replaymod.unload", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.replay) services_.replay->Unload();
+    return ScriptValue::Nil();
+  });
+
+  install("replaymod.last_error", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    std::lock_guard<std::mutex> lk(replayErrorMutex_);
+    return ScriptValue::Str(lastReplayError_);
+  });
+
+  install("replaymod.loaded_sections", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Num(0);
+    const ReplayFile* f = services_.replay->file();
+    return ScriptValue::Num(f ? (f64)f->sectionCount() : 0);
+  });
+
+  install("replaymod.loaded_first_tick", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Num(0);
+    const ReplayFile* f = services_.replay->file();
+    return ScriptValue::Num(f ? (f64)f->firstTick() : 0);
+  });
+
+  install("replaymod.loaded_last_tick", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Num(0);
+    const ReplayFile* f = services_.replay->file();
+    return ScriptValue::Num(f ? (f64)f->lastTick() : 0);
+  });
+
+  install("replaymod.world_entity_count", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.replay) { ctx.RaiseError("replaymod.world_entity_count: replay service unavailable"); return ScriptValue::Num(0); }
+    ReplayWorld* w = services_.replay->world();
+    if (!w || !w->loaded()) return ScriptValue::Num(0);
+    w->Seek((u64)args[0].AsNumber());
+    return ScriptValue::Num((f64)w->AllEntities().size());
+  });
+
+  install("replaymod.world_entity", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.replay) { ctx.RaiseError("replaymod.world_entity: replay service unavailable"); return ScriptValue::Tbl(ScriptTable{}); }
+    ReplayWorld* w = services_.replay->world();
+    if (!w || !w->loaded()) return ScriptValue::Tbl(ScriptTable{});
+    w->Seek((u64)args[0].AsNumber());
+    const std::vector<EntityId> ids = w->AllEntities();
+    const size_t i = (size_t)args[1].AsNumber();
+    if (i >= ids.size()) return ScriptValue::Tbl(ScriptTable{});
+    EntitySnapshot s;
+    if (!w->GetEntity(ids[i], &s)) return ScriptValue::Tbl(ScriptTable{});
+    return EntityTableValue(s);
+  });
+
+  install("replaymod.world_block", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.replay) { ctx.RaiseError("replaymod.world_block: replay service unavailable"); return ScriptValue::Num(0); }
+    ReplayWorld* w = services_.replay->world();
+    if (!w || !w->loaded()) return ScriptValue::Num(0);
+    w->Seek((u64)args[0].AsNumber());
+    return ScriptValue::Num((f64)w->GetBlock(Vec3((f32)args[1].AsNumber(),
+                                                  (f32)args[2].AsNumber(),
+                                                  (f32)args[3].AsNumber())));
+  });
+
+  install("replaymod.tick_range", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    ScriptTable t;
+    const ReplayFile* f = services_.replay ? services_.replay->file() : nullptr;
+    t["first"] = ScriptValue::Num(f ? (f64)f->firstTick() : 0);
+    t["last"] = ScriptValue::Num(f ? (f64)f->lastTick() : 0);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("replaymod.set_review_active", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.replay) { ctx.RaiseError("replaymod.set_review_active: replay service unavailable"); return ScriptValue::Nil(); }
+    services_.replay->review().SetActive(args[0].Truthy());
+    return ScriptValue::Nil();
+  });
+
+  install("replaymod.review_active", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replay->review().active());
+  });
+
+  install("replaymod.review_play", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.replay) { ctx.RaiseError("replaymod.review_play: replay service unavailable"); return ScriptValue::Bool(false); }
+    ReplayWorld* w = services_.replay->world();
+    return ScriptValue::Bool(services_.replay->review().Play(w));
+  });
+
+  install("replaymod.review_pause", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.replay) services_.replay->review().Pause();
+    return ScriptValue::Nil();
+  });
+
+  install("replaymod.review_playing", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replay->review().playing());
+  });
+
+  install("replaymod.review_tick", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replay->review().tick());
+  });
+
+  install("replaymod.review_seek", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.replay) { ctx.RaiseError("replaymod.review_seek: replay service unavailable"); return ScriptValue::Bool(false); }
+    return ScriptValue::Bool(services_.replay->review().Seek((u64)args[0].AsNumber()));
+  });
+
+  install("replaymod.review_speed", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Num(1.0);
+    return ScriptValue::Num((f64)services_.replay->review().speed());
+  });
+
+  install("replaymod.set_review_speed", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.replay) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replay->review().SetSpeed((f32)args[0].AsNumber()));
+  });
+
+  install("replaymod.review_present", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    if (!services_.replay || !services_.renderer) {
+      ctx.RaiseError("replaymod.review_present: replay service or renderer unavailable");
+      return ScriptValue::Num(0);
+    }
+    ReplayReview& rev = services_.replay->review();
+    if (!rev.active() || !rev.activeWorld()) return ScriptValue::Num(0);
+    // The renderer holds the frame's camera; use its published pose so the
+    // review projects exactly like every other overlay.
+    CameraState cam = services_.renderer->camera();
+    const Vec2 screen = screenSize();
+    if (screen.x <= 0 || screen.y <= 0) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)rev.Present(cam, *services_.renderer, screen));
+  });
+
+  install("replaymod.server_start", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    if (!services_.replay) { ctx.RaiseError("replaymod.server_start: replay service unavailable"); return ScriptValue::Bool(false); }
+    ReplayServerConfig cfg;
+    cfg.host = args[0].ToDisplay();
+    const f64 p = args[1].AsNumber();
+    cfg.port = (p > 0 && p <= 65535) ? (u16)p : 0;
+    // A refused host (or a busy port) is a normal "no": the reason is in
+    // `last_error`. Only a missing service is an error.
+    const ReplayServerError e = services_.replay->server().Start(cfg);
+    {
+      std::lock_guard<std::mutex> lk(replayErrorMutex_);
+      lastReplayError_ = (e == ReplayServerError::Ok) ? std::string() : ReplayServerErrorName(e);
+    }
+    return ScriptValue::Bool(e == ReplayServerError::Ok);
+  });
+
+  install("replaymod.server_stop", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (services_.replay) services_.replay->server().Stop();
+    return ScriptValue::Nil();
+  });
+
+  install("replaymod.server_running", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replay->server().running());
+  });
+
+  install("replaymod.server_port", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replay->server().port());
+  });
+
+  install("replaymod.server_client_connected", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replay->server().clientConnected());
+  });
+
+  install("replaymod.server_packets_sent", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Num(0);
+    return ScriptValue::Num((f64)services_.replay->server().packetsSent());
+  });
+
+  install("replaymod.server_set_paused", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (services_.replay) {
+      if (args[0].Truthy()) services_.replay->server().Pause();
+      else services_.replay->server().Resume();
+    }
+    return ScriptValue::Nil();
+  });
+
+  install("replaymod.server_paused", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replay->server().paused());
+  });
+
+  install("replaymod.server_seek", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    if (!services_.replay) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replay->server().Seek((u64)args[0].AsNumber()));
+  });
+
+  install("replaymod.status", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Str("replay: unavailable");
+    return ScriptValue::Str(services_.replay->status());
   });
 
   return installed_.size();

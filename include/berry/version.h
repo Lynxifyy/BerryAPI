@@ -8,7 +8,9 @@
 // The BerryAPI C ABI version. Bump whenever the exported C surface or the
 // layout of a public config / ingest struct changes. Loader tools and the
 // library both check this; mismatches are rejected at attach time.
-#define BERRY_ABI_VERSION 2
+// v3: BerryConfigC grew the client fields (enable_client, dev_mode,
+//     script_directory, local_player_id).
+#define BERRY_ABI_VERSION 3
 
 // Legacy internal SDK ABI identifier (kept for compatibility).
 #define BERRY_SDK_ABI 1

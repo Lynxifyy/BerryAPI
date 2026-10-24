@@ -39,6 +39,8 @@
 #include "berry/crystal.h"
 #include "berry/voice.h"
 #include "berry/cosmetic.h"
+#include "berry/cosmetic_sync.h"
+#include "berry/lan_discovery.h"
 #include "berry/event.h"
 #include "berry/fs.h"
 #include "berry/hud.h"
@@ -53,6 +55,7 @@
 #include "berry/script.h"
 #include "berry/scriptmod.h"
 #include "berry/session_recorder.h"
+#include "berry/replay_service.h"
 #include "berry/shader.h"
 #include "berry/ui.h"
 #include "berry/services.h"
@@ -169,6 +172,11 @@ class BERRY_API ScriptApi {
     /// The session recorder (record & replay of the world stream). Null makes
     /// the `record.*` bindings fail closed (start/save report failure).
     SessionRecorder* recorder = nullptr;
+    /// The replay mod: container capture, reconstructed replay, local review
+    /// overlay and loopback playback server, in one owned object. Null makes
+    /// the `replay_mod.*` bindings fail closed (a load reports failure, a
+    /// status reports "unavailable").
+    ReplayService* replay = nullptr;
     /// Egress policy for `network.get`. The harness relaxes it for loopback.
     UrlPolicy networkPolicy;
     /// Script-facing WebSocket pool. Null makes the `ws.*` bindings fail closed
@@ -206,6 +214,16 @@ class BERRY_API ScriptApi {
     /// The frame hook wires its proximity resolver to `world`/`localPlayer`, so
     /// a speaker is only heard when the listener's own world view places them.
     VoiceService* voice = nullptr;
+    /// LAN peer discovery (mDNS `_berry._udp.local`). Null makes the
+    /// `cosmetic.peers`/`cosmetic.peer` bindings fail closed (0 peers). The
+    /// client's own discovery instance is bound here when sync is enabled;
+    /// discovery only names peers, and a loadout from one is still verified by
+    /// the sync channel before anything is applied.
+    LanDiscovery* discovery = nullptr;
+    /// The cosmetic-sync channel. Null makes `cosmetic.sync_stats` report
+    /// configured=false. The channel verifies every inbound loadout, so the
+    /// stats it exposes are counts of what it accepted and refused.
+    CosmeticSyncChannel* sync = nullptr;
   };
 
   ScriptApi();
@@ -281,6 +299,10 @@ class BERRY_API ScriptApi {
 
   // Client-side state a script writes and the client reads back.
   std::atomic<f32> zoom_{1.0f};
+
+  // Why the last replay_mod.load failed, for the script to read back.
+  mutable std::mutex replayErrorMutex_;
+  std::string lastReplayError_;
 
   // Published by the render thread, read by the script thread.
   std::atomic<f32> frameMs_{0.0f};

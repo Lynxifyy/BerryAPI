@@ -11,6 +11,7 @@
 #                    them rather than compiling empty objects.
 
 CORE_SRC := \
+  core/client/client.cpp \
   core/events/event.cpp \
   core/hooks/sigscan.cpp \
   core/hooks/backend_shim.cpp \
@@ -65,6 +66,12 @@ CORE_SRC := \
   core/script/audio.cpp \
   core/script/packet.cpp \
   core/script/record.cpp \
+  core/replay/replay_format.cpp \
+  core/replay/replay_capture.cpp \
+  core/replay/replay_world.cpp \
+  core/replay/replay_review.cpp \
+  core/replay/replay_server.cpp \
+  core/replay/replay_service.cpp \
   core/script/jsonrpc_client.cpp \
   core/net/rpc.cpp \
   core/script/layout.cpp \
@@ -86,6 +93,14 @@ ED25519_SRC := \
   third_party/ed25519/keypair.c \
   third_party/ed25519/sign.c \
   third_party/ed25519/verify.c
+
+# Vendored LZ4 (C): the block compressor behind the replay container
+# (berry/replay_format.h). Only lib/ is vendored (BSD-2-Clause); the block API
+# is used directly, so no LZ4 frame layer is needed. See
+# third_party/lz4/PROVENANCE.md.
+LZ4_SRC := \
+  third_party/lz4/lib/lz4.c \
+  third_party/lz4/lib/lz4hc.c
 
 # Vendored mbedTLS (C): the client-side TLS 1.2/1.3 stack behind Berry::TlsSocket.
 # It is compiled with the trimmed third_party/mbedtls/include/mbedtls/
@@ -197,6 +212,7 @@ TEST_SRC := \
   tests/test_loader.cpp \
   tests/test_api_bindings.cpp \
   tests/test_cosmetic.cpp \
+  tests/test_client_lan.cpp \
   tests/test_pack.cpp \
   tests/test_intent.cpp \
   tests/test_shader.cpp \
@@ -218,7 +234,13 @@ TEST_SRC := \
   tests/test_replay_camera.cpp \
   tests/test_radial.cpp \
   tests/test_crystal.cpp \
-  tests/test_voice.cpp
+  tests/test_voice.cpp \
+  tests/test_replay_format.cpp \
+  tests/test_replay_capture.cpp \
+  tests/test_replay_world.cpp \
+  tests/test_replay_review.cpp \
+  tests/test_replay_server.cpp \
+  tests/test_replay_service.cpp
 
 # Vendored Luau (MIT). See third_party/luau/PROVENANCE.md for the pinned
 # version and why these units and not the CLI. Compiled with -w because upstream
@@ -282,3 +304,6 @@ LUAU_SRC := $(LUAU_AST_SRC) $(LUAU_COMPILER_SRC) $(LUAU_VM_SRC)
 
 # Include roots Luau expects (Common is header-only).
 LUAU_INCLUDES := -Ithird_party/luau/Common/include -Ithird_party/luau/Ast/include -Ithird_party/luau/Compiler/include -Ithird_party/luau/VM/include
+
+# Include root LZ4 expects (its headers are used as "lz4.h").
+LZ4_INCLUDES := -Ithird_party/lz4/lib

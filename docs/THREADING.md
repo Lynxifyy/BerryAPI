@@ -53,3 +53,22 @@ Phase 1 defines the script runtime on a dedicated worker:
   memory cap, wall-clock timeout).
 - A crashing script is unloaded; the game keeps running. Error isolation is a
   hard requirement — see the Phase 1 acceptance criteria.
+
+## LAN channels (cosmetic sync, discovery, voice)
+
+The opt-in LAN sockets are owned by the client and touched from the frame
+thread only:
+
+- `BerryClient::PollCosmeticSync()` runs at the top of `BeginFrame`, before any
+  overlay draws. It publishes the local loadout, re-queries mDNS on a slow
+  interval, and drains the transport for a bounded slice. Because it is the
+  only caller, the transport's non-atomic counters and fragment state are
+  never touched concurrently.
+- The game tick does **not** publish. Publishing on the tick thread while the
+  frame thread polled would be a data race on the same non-atomic state, so the
+  publish was moved into the frame path.
+- The voice service's transport is pumped by the voice frame hook, which also
+  runs on the frame thread.
+- Teardown clears each borrowed transport pointer (`SetTransport(nullptr)`)
+  before the transport is destroyed, so no service ever holds a dangling
+  pointer.
