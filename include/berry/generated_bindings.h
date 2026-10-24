@@ -196,6 +196,7 @@ inline const BindingSpec* BindingSpecs() {
       {"hud.attach", CapKind::Hud, 1, "Hud"},
       {"hud.set_visible", CapKind::Hud, 2, "Hud"},
       {"hud.tween", CapKind::Hud, 4, "Hud"},
+      {"hud.stats", CapKind::Hud, 0, "Hud"},
       {"ui.begin_frame", CapKind::Hud, 0, "Ui"},
       {"ui.end_frame", CapKind::Hud, 0, "Ui"},
       {"ui.begin_window", CapKind::Hud, 5, "Ui"},
@@ -444,7 +445,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 419; }
+inline size_t BindingSpecCount() { return 420; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -667,6 +668,7 @@ inline const char* const kHudNames[] = {
     "hud.attach",
     "hud.set_visible",
     "hud.tween",
+    "hud.stats",
 };
 inline const char* const kUiNames[] = {
     "ui.begin_frame",
@@ -957,7 +959,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Network", kNetworkNames, 2},
       {"Ws", kWsNames, 10},
       {"JsonRpc", kJsonRpcNames, 1},
-      {"Hud", kHudNames, 5},
+      {"Hud", kHudNames, 6},
       {"Ui", kUiNames, 29},
       {"Perf", kPerfNames, 12},
       {"Input", kInputNames, 3},

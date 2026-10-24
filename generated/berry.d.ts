@@ -324,6 +324,8 @@ export interface Hud {
   attach(widget: WidgetId): void;
   set_visible(widget: WidgetId, visible: boolean): void;
   tween(widget: WidgetId, prop: string, to: number, ms: number): void;
+  /** The HUD's frame counters as {frames, layout_passes, widgets_drawn, widgets_culled, primitives}. `widgets_culled` counts widgets skipped because they were off-screen or hidden; `layout_passes` counts the subtrees re-laid-out this frame (the retained tree re-lays out only what was dirtied). */
+  stats(): Record<string, unknown>;
 }
 
 /** Capability required: hud. */

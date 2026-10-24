@@ -2138,6 +2138,18 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Nil();
   });
 
+  install("hud.stats", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.hud) return ScriptValue::Nil();
+    const HudStats s = services_.hud->stats();
+    ScriptTable t;
+    t["frames"] = ScriptValue::Num((f64)s.frames);
+    t["layout_passes"] = ScriptValue::Num((f64)s.layoutPasses);
+    t["widgets_drawn"] = ScriptValue::Num((f64)s.widgetsDrawn);
+    t["widgets_culled"] = ScriptValue::Num((f64)s.widgetsCulled);
+    t["primitives"] = ScriptValue::Num((f64)s.primitives);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
   //--- Ui (immediate-mode UI) ----------------------------------------------
   //
   // Every call builds one widget and reads back the interaction the render

@@ -338,6 +338,8 @@ module Hud {
   fn attach(widget: Widget) -> nil
   fn set_visible(widget: Widget, visible: bool) -> nil
   fn tween(widget: Widget, prop: string, to: number, ms: number) -> nil
+  doc "The HUD's frame counters as {frames, layout_passes, widgets_drawn, widgets_culled, primitives}. `widgets_culled` counts widgets skipped because they were off-screen or hidden; `layout_passes` counts the subtrees re-laid-out this frame (the retained tree re-lays out only what was dirtied)."
+  fn stats() -> Table
 }
 
 module Ui {
