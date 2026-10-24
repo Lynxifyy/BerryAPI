@@ -58,6 +58,13 @@ class Hook {
       : backend_(backend) {
     Install(target, detour);
   }
+  /// Constructs without installing, so a caller can defer the install until the
+  /// target and detour are both known. The backend must be non-null before
+  /// `Install`.
+  explicit Hook(IHook* backend) : backend_(backend) {}
+  /// Sets the backend after construction. Only valid before the first
+  /// `Install`; installing twice on one `Hook` is refused.
+  void SetBackend(IHook* backend) { backend_ = backend; }
   ~Hook() {
     if (backend_ && fine_ && symbol_.target)
       backend_->Uninstall(symbol_.target);

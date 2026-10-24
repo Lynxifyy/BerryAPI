@@ -15,6 +15,7 @@ CORE_SRC := \
   core/events/event.cpp \
   core/hooks/sigscan.cpp \
   core/hooks/backend_shim.cpp \
+  core/hooks/x86_length.cpp \
   core/modules/module.cpp \
   core/modules/combat.cpp \
   core/modules/combat_state.cpp \
@@ -67,6 +68,7 @@ CORE_SRC := \
   core/script/fs.cpp \
   core/script/audio.cpp \
   core/script/packet.cpp \
+  core/script/packet_capture.cpp \
   core/script/record.cpp \
   core/replay/replay_format.cpp \
   core/replay/replay_capture.cpp \
@@ -227,6 +229,7 @@ TEST_SRC := \
   tests/test_fs.cpp \
   tests/test_audio.cpp \
   tests/test_packet.cpp \
+  tests/test_packet_capture.cpp \
   tests/test_profiler.cpp \
   tests/test_sigpack.cpp \
   tests/test_session_recorder.cpp \
