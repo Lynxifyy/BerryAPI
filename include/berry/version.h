@@ -13,7 +13,10 @@
 // v4: BerryConfigC grew the LAN + persistence fields (enable_cosmetic_sync,
 //     sync_verify_key, sync_self_id, sync_sign_secret, sync_use_hmac,
 //     enable_voice, voice_self_id, lan_iface, script_data_directory).
-#define BERRY_ABI_VERSION 4
+// v5: BerryConfigC grew the voice-security fields (voice_identity_seed,
+//     voice_peer_keys, voice_room_key, voice_group, voice_port), so voice is
+//     authenticated and encrypted rather than plaintext.
+#define BERRY_ABI_VERSION 5
 
 // Legacy internal SDK ABI identifier (kept for compatibility).
 #define BERRY_SDK_ABI 1

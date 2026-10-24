@@ -97,6 +97,38 @@ bool Engine::Bootstrap(const BerryConfigC& cfg) {
   internal.syncUseHmac = cfg.sync_use_hmac != 0;
   internal.enableVoice = cfg.enable_voice != 0;
   if (cfg.voice_self_id) internal.voiceSelfId = cfg.voice_self_id;
+  if (cfg.voice_identity_seed) internal.voiceIdentitySeed = cfg.voice_identity_seed;
+  if (cfg.voice_peer_keys) {
+    // Comma-separated hex Ed25519 public keys; a malformed entry is skipped so
+    // one bad key cannot disable the whole anchor (the rest still verify).
+    std::string keys = cfg.voice_peer_keys;
+    size_t start = 0;
+    while (start <= keys.size()) {
+      const size_t comma = keys.find(',', start);
+      const size_t end = (comma == std::string::npos) ? keys.size() : comma;
+      std::string one = keys.substr(start, end - start);
+      // Trim surrounding whitespace so a config file can be spaced.
+      size_t b = one.find_first_not_of(" \t\r\n");
+      size_t e = one.find_last_not_of(" \t\r\n");
+      if (b != std::string::npos) one = one.substr(b, e - b + 1);
+      if (!one.empty() && !internal.voiceTrust.AddPublicKeyHex(one)) {
+        Log::Warn("engine: voice peer key '%s' is not a 32-byte hex key; skipped",
+                  one.c_str());
+      }
+      if (comma == std::string::npos) break;
+      start = comma + 1;
+    }
+    if (!internal.voiceTrust.publicKeys.empty()) {
+      internal.voiceTrust.kind = VoiceTrustAnchor::Kind::Ed25519Keys;
+    }
+  }
+  if (cfg.voice_room_key && cfg.voice_room_key[0] != '\0') {
+    if (!internal.voiceTrust.SetRoomKey(cfg.voice_room_key)) {
+      Log::Warn("engine: voice room key too short; ignored");
+    }
+  }
+  if (cfg.voice_group) internal.voiceGroup = cfg.voice_group;
+  if (cfg.voice_port != 0) internal.voicePort = cfg.voice_port;
   if (cfg.lan_iface) internal.lanIface = cfg.lan_iface;
   if (cfg.script_data_directory) {
     internal.scriptDataDirectory = cfg.script_data_directory;
@@ -159,6 +191,10 @@ bool Engine::Attach() {
     ccfg.syncUseHmac = cfg_.syncUseHmac;
     ccfg.enableVoice = cfg_.enableVoice;
     ccfg.voiceSelfId = cfg_.voiceSelfId;
+    ccfg.voiceIdentitySeed = cfg_.voiceIdentitySeed;
+    ccfg.voiceTrust = cfg_.voiceTrust;
+    ccfg.voiceGroup = cfg_.voiceGroup;
+    ccfg.voicePort = cfg_.voicePort;
     ccfg.lanIface = cfg_.lanIface;
     ccfg.scriptDataDirectory = cfg_.scriptDataDirectory;
     client_ = std::make_unique<BerryClient>();

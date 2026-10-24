@@ -66,6 +66,22 @@ typedef struct BerryConfigC {
   int enable_voice;
   // This client's voice session id, or NULL to leave the session stopped.
   const char* voice_self_id;
+  // The 32-byte Ed25519 seed (raw) that identifies this client on the voice
+  // channel, or NULL to disable voice (there is no plaintext fallback). Hex
+  // (64 chars) is also accepted.
+  const char* voice_identity_seed;
+  // The Ed25519 public keys (hex, comma-separated) a peer's voice announce is
+  // verified against, or NULL/empty to accept none. Ignored when
+  // voice_room_key is set.
+  const char* voice_peer_keys;
+  // A backend-issued room key (raw bytes) that authenticates voice peers when
+  // no per-peer key is distributed. NULL/empty disables room-key mode.
+  const char* voice_room_key;
+  // The voice multicast group, or NULL for the default. A different group from
+  // the cosmetic channel.
+  const char* voice_group;
+  // The voice port, or 0 for the default.
+  unsigned short voice_port;
   // The interface the LAN channels join and send on, or NULL for the system
   // multicast route. A host test passes "127.0.0.1" to stay on loopback.
   const char* lan_iface;

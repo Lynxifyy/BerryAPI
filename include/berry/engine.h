@@ -8,6 +8,7 @@
 #include "berry/sigscan.h"
 #include "berry/event.h"
 #include "berry/module.h"
+#include "berry/voice_crypto.h"
 #include <atomic>
 #include <memory>
 #include <string>
@@ -55,6 +56,16 @@ struct EngineConfig {
   /// LAN proximity voice (opt-in). Off by default.
   bool enableVoice = false;
   std::string voiceSelfId;     // empty = transport bound but session stopped
+  /// The Ed25519 seed (raw or hex) that identifies this client on the voice
+  /// channel. Empty disables voice: there is no plaintext fallback.
+  std::string voiceIdentitySeed;
+  /// What a peer's voice announce is verified against. The default accepts
+  /// nothing, so voice stays off until an embedder sets it.
+  VoiceTrustAnchor voiceTrust;
+  /// The voice multicast group and port (defaults are a different group from
+  /// the cosmetic channel).
+  std::string voiceGroup = "239.66.0.2";
+  u16 voicePort = 47824;
   /// The interface the LAN channels join and send on ("" = system route).
   std::string lanIface;
   /// Root directory for the sandboxed `fs.*` store. Empty keeps it in-memory.

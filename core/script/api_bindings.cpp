@@ -545,7 +545,10 @@ void ScriptApi::InitFrameHook() {
           const EntitySnapshot self =
               services_.world->GetEntity(services_.localPlayer);
           if (self.alive) services_.voice->SetPosition(self.position);
-          services_.voice->Pump(NowMs(), 0);
+          // A small poll budget lets the secure transport re-announce on its
+          // interval (so a peer that joins later still finds us) and still
+          // drains every queued datagram without blocking the frame.
+          services_.voice->Pump(NowMs(), 1);
         }
         return EventResult::Continue;
       });

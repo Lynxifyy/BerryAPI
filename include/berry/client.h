@@ -61,6 +61,8 @@
 #include "berry/ui.h"
 #include "berry/url.h"
 #include "berry/voice.h"
+#include "berry/voice_crypto.h"
+#include "berry/voice_secure_transport.h"
 #include "berry/voice_transport.h"
 #include "berry/ws_client.h"
 
@@ -120,12 +122,27 @@ struct BERRY_API ClientConfig {
   std::string syncSignSecret;
   bool syncUseHmac = false;
   /// Enable LAN proximity voice. Off by default (microphone capture is
-  /// privacy-sensitive); when on, the client binds `LanVoiceTransport` to the
-  /// voice service and starts a session only if `voiceSelfId` is set.
+  /// privacy-sensitive); when on, the client binds an *authenticated and
+  /// encrypted* voice transport (`SecureVoiceTransport`) to the voice service
+  /// and starts a session only if `voiceSelfId` is set. The transport requires a
+  /// signing identity and a trust anchor (`voiceIdentitySeed` + `voiceTrust`);
+  /// without them it refuses to open, so voice never falls back to plaintext.
   bool enableVoice = false;
   /// This client's voice session id. Empty leaves the session stopped (the
   /// transport is bound but nothing is sent or admitted).
   std::string voiceSelfId;
+  /// The 32-byte Ed25519 seed (raw, or 64-char hex) that identifies this client
+  /// on the voice channel. It authenticates the handshake; it never encrypts
+  /// audio. Empty disables the secure transport.
+  std::string voiceIdentitySeed;
+  /// What a peer's voice announce is verified against (Ed25519 peer keys, or a
+  /// backend-issued room key). The default accepts nothing, so voice stays off
+  /// until it is set.
+  VoiceTrustAnchor voiceTrust;
+  /// The voice multicast group and port. A different group from the cosmetic
+  /// channel so the two never mix.
+  std::string voiceGroup = "239.66.0.2";
+  u16 voicePort = 47824;
   /// Enable OTA signature-pack loading from `sigpackDirectory`. Packs are
   /// verified against `sigpackTrust` (Ed25519) BEFORE they are parsed, so an
   /// unsigned, tampered, expired or replayed pack is refused. Off by default;
@@ -273,8 +290,12 @@ class BERRY_API BerryClient {
   /// discovery could not bind. Reads only: discovery names peers, and a loadout
   /// from one is still verified by the sync channel before it is applied.
   LanDiscovery* discovery() { return discovery_.get(); }
-  /// The LAN voice transport, or null when voice is disabled.
-  LanVoiceTransport* voiceTransport() { return voiceTransport_.get(); }
+  /// The LAN voice transport, or null when voice is disabled. In production this
+  /// is the authenticated, encrypted `SecureVoiceTransport`.
+  VoiceTransport* voiceTransport() { return voiceTransport_.get(); }
+  /// The secure voice transport specifically, or null when it is not the active
+  /// transport. For diagnostics (peer count) and tests.
+  SecureVoiceTransport* secureVoiceTransport() { return secureVoice_.get(); }
 
   /// The signature-pack loader, or null when packs are disabled. Owns the
   /// filesystem seam and the anti-rollback sequence floor.
@@ -389,7 +410,9 @@ class BERRY_API BerryClient {
   std::string lastPublishedLoadout_;
   // The LAN voice transport. Built only when the config enables voice; the
   // service borrows it, so it is torn down after the service's transport is
-  // cleared.
+  // cleared. In production this is the authenticated, encrypted transport; the
+  // plaintext `LanVoiceTransport` remains available for a dev/diagnostic build.
+  std::unique_ptr<SecureVoiceTransport> secureVoice_;
   std::unique_ptr<LanVoiceTransport> voiceTransport_;
   // The OTA signature-pack loader, its filesystem seam and the layout registry
   // it registers into. Built only when packs are enabled.

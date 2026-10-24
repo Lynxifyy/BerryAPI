@@ -294,27 +294,50 @@ void BerryClient::BuildLan(const ClientConfig& cfg) {
     }
   }
 
-  // Voice: bind the LAN transport and hand it to the voice service. The
-  // session only starts when an id is configured; without one the transport is
-  // bound but silent.
+  // Voice: bind the authenticated, encrypted transport and hand it to the voice
+  // service. The secure transport refuses to open without a signing identity and
+  // a trust anchor, so voice never falls back to plaintext; without them it is
+  // simply disabled. The session only starts when an id is configured; without
+  // one the transport is bound but silent.
   if (cfg.enableVoice) {
-    voiceTransport_ = std::make_unique<LanVoiceTransport>();
-    VoiceTransportConfig vcfg;
-    if (!cfg.lanIface.empty()) vcfg.iface = cfg.lanIface;
-    if (!voiceTransport_->Open(vcfg)) {
-      Log::Warn("BerryClient: voice transport failed to open (no multicast?); "
-                "voice disabled");
-      voiceTransport_.reset();
-    } else {
-      voice_->SetTransport(voiceTransport_.get());
-      if (!cfg.voiceSelfId.empty()) {
-        if (!voice_->Start(cfg.voiceSelfId)) {
-          Log::Warn("BerryClient: voice session refused id '%s'",
-                    cfg.voiceSelfId.c_str());
-        }
+    VoiceIdentity voiceId;
+    if (!cfg.voiceIdentitySeed.empty()) {
+      std::string seed = cfg.voiceIdentitySeed;
+      // Accept a 64-char hex seed as well as raw 32 bytes.
+      if (seed.size() == 64 && crypto::IsHex(seed)) {
+        std::string raw;
+        if (crypto::FromHex(seed, &raw, 32)) seed = raw;
       }
-      Log::Info("BerryClient: voice transport on port %u (self '%s')",
-                (unsigned)voiceTransport_->localPort(), cfg.voiceSelfId.c_str());
+      voiceId = VoiceIdentity::FromSeed(seed);
+      if (!voiceId.valid()) {
+        Log::Warn("BerryClient: voice identity seed is not 32 bytes; "
+                  "voice disabled");
+      }
+    }
+    if (!voiceId.valid() || !cfg.voiceTrust.Valid()) {
+      Log::Warn("BerryClient: voice needs a signing identity and a trust "
+                "anchor; voice disabled (no plaintext fallback)");
+    } else {
+      secureVoice_ = std::make_unique<SecureVoiceTransport>();
+      SecureVoiceConfig vcfg;
+      vcfg.group = cfg.voiceGroup;
+      vcfg.port = cfg.voicePort;
+      if (!cfg.lanIface.empty()) vcfg.iface = cfg.lanIface;
+      if (!secureVoice_->Open(vcfg, voiceId, cfg.voiceTrust)) {
+        Log::Warn("BerryClient: secure voice transport failed to open; "
+                  "voice disabled");
+        secureVoice_.reset();
+      } else {
+        voice_->SetTransport(secureVoice_.get());
+        if (!cfg.voiceSelfId.empty()) {
+          if (!voice_->Start(cfg.voiceSelfId)) {
+            Log::Warn("BerryClient: voice session refused id '%s'",
+                      cfg.voiceSelfId.c_str());
+          }
+        }
+        Log::Info("BerryClient: secure voice on port %u (self '%s')",
+                  (unsigned)secureVoice_->localPort(), cfg.voiceSelfId.c_str());
+      }
     }
   }
 }
@@ -430,6 +453,7 @@ void BerryClient::Detach() {
     voice_->Stop();
     voice_->SetTransport(nullptr);
   }
+  secureVoice_.reset();
   voiceTransport_.reset();
   discovery_.reset();
   if (syncChannel_) syncChannel_->SetTransport(nullptr);

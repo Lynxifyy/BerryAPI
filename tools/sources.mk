@@ -23,6 +23,7 @@ CORE_SRC := \
   core/modules/radial.cpp \
   core/modules/crystal.cpp \
   core/modules/voice.cpp \
+  core/modules/voice_crypto.cpp \
   core/modules/render.cpp \
   core/modules/render_backend.cpp \
   core/modules/pipeline.cpp \
@@ -45,6 +46,7 @@ CORE_SRC := \
   core/net/lan_transport.cpp \
   core/net/lan_discovery.cpp \
   core/net/voice_transport.cpp \
+  core/net/voice_secure_transport.cpp \
   core/script/crypto.cpp \
   core/script/ed25519.cpp \
   core/script/manifest.cpp \
@@ -235,6 +237,8 @@ TEST_SRC := \
   tests/test_radial.cpp \
   tests/test_crystal.cpp \
   tests/test_voice.cpp \
+  tests/test_voice_crypto.cpp \
+  tests/test_voice_secure.cpp \
   tests/test_replay_format.cpp \
   tests/test_replay_capture.cpp \
   tests/test_replay_world.cpp \
