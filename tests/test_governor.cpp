@@ -1,4 +1,4 @@
-// Host tests for the adaptive FPS governor and its cull policy.
+// Host tests for the adaptive FPS governor.
 //
 // Covers:
 //   * QualityLevel clamping, equality and mean.
@@ -10,7 +10,6 @@
 //     reduce.
 //   * Floors, user ceilings and thermal clamping, including the "a hot device
 //     must not climb back up" rule.
-//   * CullPolicy decisions.
 #include "berry/perf.h"
 
 #include <cmath>
@@ -468,40 +467,6 @@ static void TestPlatformProfiles() {
   CHECK(Near(g.profile().renderDistance.maxValue, 16.0f));
 }
 
-static void TestParticleClassCaps() {
-  CullPolicy cp;
-  cp.settings.entityDistance = 32.0f;
-  cp.settings.maxParticles = 1000;
-
-  // A zero class cap disables that class even when the global cap allows it.
-  cp.classCaps[(size_t)CullPolicy::ParticleClass::Ambient] = 0;
-  CHECK(!cp.AllowParticleClass(CullPolicy::ParticleClass::Ambient, 0));
-  CHECK(cp.AllowParticleClass(CullPolicy::ParticleClass::Effect, 0));
-
-  // A class at its own cap is refused while another class is not.
-  cp.classCaps[(size_t)CullPolicy::ParticleClass::Ambient] = 10;
-  CHECK(cp.AllowParticleClass(CullPolicy::ParticleClass::Ambient, 9));
-  CHECK(!cp.AllowParticleClass(CullPolicy::ParticleClass::Ambient, 10));
-  CHECK(cp.AllowParticleClass(CullPolicy::ParticleClass::Combat, 10));
-
-  // The global cap still applies to every class.
-  cp.settings.maxParticles = 0;
-  CHECK(!cp.AllowParticleClass(CullPolicy::ParticleClass::Effect, 0));
-
-  // Detailed decision: distance, class budget and the ambient screen-size test.
-  cp.settings.maxParticles = 1000;
-  cp.classCaps[(size_t)CullPolicy::ParticleClass::Ambient] = 10;
-  CHECK(!cp.AllowParticleDetailed(CullPolicy::ParticleClass::Ambient, 100.0f, 0));
-  CHECK(!cp.AllowParticleDetailed(CullPolicy::ParticleClass::Ambient, 10.0f, 10));
-  // A tiny ambient particle is culled; a tiny effect particle is not.
-  CHECK(!cp.AllowParticleDetailed(CullPolicy::ParticleClass::Ambient, 10.0f, 0,
-                                  0.0001f));
-  CHECK(cp.AllowParticleDetailed(CullPolicy::ParticleClass::Effect, 10.0f, 0,
-                                 0.0001f));
-  CHECK(cp.AllowParticleDetailed(CullPolicy::ParticleClass::Ambient, 10.0f, 0,
-                                 0.5f));
-}
-
 static void TestThermalCeilingRespectsUserCeiling() {
   PerformanceGovernor g;
   GovernorConfig cfg = TestConfig();
@@ -537,49 +502,6 @@ static void TestSetQualityAndReset() {
   CHECK(Near(g.ceiling(), 1.0f));
 }
 
-static void TestCullPolicy() {
-  CullPolicy cp;
-  cp.settings.entityDistance = 32.0f;
-  cp.settings.animationDistance = 16.0f;
-  cp.settings.maxParticles = 100;
-  cp.settings.cullFarEntities = false;
-
-  // Culling off: every entity is kept regardless of distance.
-  CHECK(cp.KeepEntity(1000.0f));
-  CHECK(cp.KeepEntity(0.0f));
-  // Animation still respects its own distance.
-  CHECK(cp.AnimateEntity(10.0f));
-  CHECK(!cp.AnimateEntity(20.0f));
-
-  // Culling on: the boundary is inclusive.
-  cp.settings.cullFarEntities = true;
-  CHECK(cp.KeepEntity(32.0f));
-  CHECK(!cp.KeepEntity(32.1f));
-
-  // Particles: cap plus distance.
-  CHECK(cp.AllowParticle(99));
-  CHECK(!cp.AllowParticle(100));
-  CHECK(cp.AllowParticleAt(10.0f, 0));
-  CHECK(!cp.AllowParticleAt(100.0f, 0));
-  cp.settings.maxParticles = 0;
-  CHECK(!cp.AllowParticle(0));       // a zero cap disables particles entirely
-}
-
-static void TestCullPolicyFromGovernor() {
-  PerformanceGovernor g;
-  GovernorConfig cfg = TestConfig();
-  cfg.floorQuality = 0.0f;
-  g.Configure(cfg);
-
-  // Drive quality to the bottom so culling engages.
-  for (int i = 0; i < 500; ++i) g.OnFrame(80.0f);
-  CullPolicy cp;
-  cp.settings = g.settings();
-  CHECK(cp.settings.cullFarEntities);
-  CHECK(cp.settings.renderDistanceChunks == 4);
-  CHECK(!cp.KeepEntity(1000.0f));
-}
-
 int main() {
   TestQualityLevel();
   TestKnobNames();
@@ -598,11 +520,8 @@ int main() {
   TestTailLatencyNeedsEnoughSamples();
   TestFrameHistogram();
   TestPlatformProfiles();
-  TestParticleClassCaps();
   TestThermalCeilingRespectsUserCeiling();
   TestSetQualityAndReset();
-  TestCullPolicy();
-  TestCullPolicyFromGovernor();
   if (g_fail == 0) printf("test_governor: ALL OK\n");
   return g_fail;
 }

@@ -108,7 +108,7 @@ are deliberately **not** added to the strict module set. See
   plus the pointer, wheel and typed text the UI layer consumes.
 - `PvpOverlay` (`pvp.h`) — local-only CPS/keystrokes/combo/armor/ping HUD.
 - `PerformanceGovernor` (`perf.h`) — adaptive FPS governor with thermal
-  awareness and a `CullPolicy` for the render hooks' keep/cull decisions.
+  awareness; its `RenderSettings` drive the render pipeline's `LodPolicy`.
 - `CosmeticService` (`cosmetic.h`) — slot/bone cosmetic registry, loadouts and
   wardrobe, rendered locally through the skeleton and geometry seams. It also
   draws through `Berry::Render`: `DrawLocal`/`DrawRemote` resolve a loadout into
