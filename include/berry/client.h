@@ -57,6 +57,7 @@
 #include "berry/scriptmod.h"
 #include "berry/services.h"
 #include "berry/shader.h"
+#include "berry/sigpack.h"
 #include "berry/ui.h"
 #include "berry/url.h"
 #include "berry/voice.h"
@@ -125,6 +126,23 @@ struct BERRY_API ClientConfig {
   /// This client's voice session id. Empty leaves the session stopped (the
   /// transport is bound but nothing is sent or admitted).
   std::string voiceSelfId;
+  /// Enable OTA signature-pack loading from `sigpackDirectory`. Packs are
+  /// verified against `sigpackTrust` (Ed25519) BEFORE they are parsed, so an
+  /// unsigned, tampered, expired or replayed pack is refused. Off by default;
+  /// when on, `sigpackTrust` must carry a key or every pack is refused.
+  bool enableSigPacks = false;
+  /// The directory `*.sigpack.json` files are read from. Empty disables the
+  /// load even when `enableSigPacks` is set.
+  std::string sigpackDirectory;
+  /// The Ed25519 anchor packs are verified against, plus the anti-rollback
+  /// floor and the wall clock used for the signed expiry check.
+  SigPackTrust sigpackTrust;
+  /// The active build fingerprint packs must name to apply. Empty refuses
+  /// every pack (fail closed), matching the signature-table gate.
+  std::string sigpackBuild;
+  /// The highest pack sequence applied by a previous run, so a restart cannot
+  /// be rolled back onto an older pack. Persisted by the embedder.
+  u64 sigpackSequenceFloor = 0;
 };
 
 //----------------------------------------------------------------------------
@@ -251,6 +269,17 @@ class BERRY_API BerryClient {
   /// The LAN voice transport, or null when voice is disabled.
   LanVoiceTransport* voiceTransport() { return voiceTransport_.get(); }
 
+  /// The signature-pack loader, or null when packs are disabled. Owns the
+  /// filesystem seam and the anti-rollback sequence floor.
+  SignaturePackLoader* sigPacks() { return sigPackLoader_.get(); }
+  /// The layout registry packs register into, or null when packs are disabled.
+  LayoutRegistry* sigPackLayouts() { return sigPackLayouts_.get(); }
+  /// The aggregate of the last pack load (all zero when packs are disabled).
+  const SigPackLoadReport& sigPackReport() const { return sigPackReport_; }
+  /// The highest pack sequence applied so far, so an embedder can persist it and
+  /// refuse a rollback across a restart. 0 when packs are disabled.
+  u64 sigPackSequenceFloor() const;
+
   /// Broadcasts the local cosmetic loadout on the sync channel. False when
   /// sync is disabled, no signing secret/self id is configured, or the send
   /// fails. Called by the frame poll, so a loadout change reaches peers without
@@ -281,6 +310,11 @@ class BERRY_API BerryClient {
   /// multicast transport) and the LAN voice transport. A no-op for a config
   /// that enables neither.
   void BuildLan(const ClientConfig& cfg);
+
+  /// Builds the signature-pack loader and applies every verified pack. A no-op
+  /// when packs are disabled. Runs before the script loads, so a pack's
+  /// signatures/layouts are in the registries by the time a script asks.
+  void LoadSigPacks(const ClientConfig& cfg);
 
   /// Drains the sync transport and applies every verified loadout to the
   /// cosmetic service. Runs on the frame thread, before the overlays draw, so
@@ -343,6 +377,12 @@ class BERRY_API BerryClient {
   // service borrows it, so it is torn down after the service's transport is
   // cleared.
   std::unique_ptr<LanVoiceTransport> voiceTransport_;
+  // The OTA signature-pack loader, its filesystem seam and the layout registry
+  // it registers into. Built only when packs are enabled.
+  std::unique_ptr<RealScriptFileSystem> sigPackFs_;
+  std::unique_ptr<SignaturePackLoader> sigPackLoader_;
+  std::unique_ptr<LayoutRegistry> sigPackLayouts_;
+  SigPackLoadReport sigPackReport_;
   // The on-device overlay backend and the seam that funnels the Renderer's
   // frame batch into it. Owned here so the render path has a production owner
   // (the Renderer only ever had a test-installed seam). `null` backend on the

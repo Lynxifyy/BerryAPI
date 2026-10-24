@@ -114,6 +114,11 @@ bool BerryClient::Attach(Engine& engine, const ClientConfig& cfg) {
   // multicast socket, so nothing is opened unless the config asks for it.
   BuildLan(cfg);
 
+  // OTA signature packs load before the script: a pack's signature rows and
+  // struct layouts must be registered by the time a script asks the signature
+  // cache or a layout to resolve. Verification happens inside the loader.
+  LoadSigPacks(cfg);
+
   // Build the services view the ScriptApi binds. The replay service lives on
   // the engine (the World module feeds its capture and the engine drives its
   // review); the script-facing pointer is bound to that same instance.
@@ -287,12 +292,32 @@ void BerryClient::BuildLan(const ClientConfig& cfg) {
   }
 }
 
+u64 BerryClient::sigPackSequenceFloor() const {
+  return sigPackLoader_ ? sigPackLoader_->sequenceFloor() : 0;
+}
+
+void BerryClient::LoadSigPacks(const ClientConfig& cfg) {
+  if (!cfg.enableSigPacks || cfg.sigpackDirectory.empty()) return;
+  // The loader verifies every pack against the anchor BEFORE parsing it, so a
+  // tampered, unsigned, expired or replayed pack never reaches the entry
+  // parser. The floor is seeded from the config so a restart cannot be rolled
+  // back onto an older pack.
+  sigPackFs_ = std::make_unique<RealScriptFileSystem>();
+  sigPackLayouts_ = std::make_unique<LayoutRegistry>();
+  sigPackLoader_ =
+      std::make_unique<SignaturePackLoader>(sigPackFs_.get(), cfg.sigpackTrust,
+                                            cfg.sigpackDirectory);
+  sigPackLoader_->SetSequenceFloor(cfg.sigpackSequenceFloor);
+  sigPackReport_ = sigPackLoader_->LoadDirectory(
+      cfg.sigpackBuild, SigCache::Instance(), sigPackLayouts_.get());
+  Log::Info("BerryClient: signature packs: %zu applied, %zu refused "
+            "(floor %llu)",
+            sigPackReport_.packsApplied, sigPackReport_.packsFailed,
+            (unsigned long long)sigPackLoader_->sequenceFloor());
+}
+
 void BerryClient::PollCosmeticSync() {
   if (!syncChannel_ || !syncTransport_) return;
-  // Both halves of the channel run here, on the frame thread, so the transport
-  // is touched from exactly one thread (its counters and fragment state are not
-  // atomic). Publish first — a local change should reach peers on the same
-  // frame it happened — then drain and apply.
   PublishLoadout();
   // Keep the mDNS cache fresh: drain a bounded slice, then re-query on a slow
   // interval so peers that joined after attach are found and known peers do not

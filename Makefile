@@ -144,7 +144,7 @@ check-samples: samples/sample_hitmarker.o
 	@echo "== samples compile OK =="
 	@rm -f samples/sample_hitmarker.o
 
-test: idl-check check-signer check-sources $(TEST_BINS) build/$(SHARED_NAME) check-samples
+test: idl-check check-signer check-sigpack-signer check-sources $(TEST_BINS) build/$(SHARED_NAME) check-samples
 	@for b in $(TEST_BINS); do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
@@ -263,6 +263,13 @@ idl-check:
 .PHONY: check-signer
 check-signer:
 	@python3 tools/check-signer.py
+
+# The signature-pack signer and the C++ pack verifier must agree on the
+# canonical signed payload byte for byte, or every published pack would
+# be rejected at load time.
+.PHONY: check-sigpack-signer
+check-sigpack-signer:
+	@python3 tools/check-sigpack-signer.py
 
 # Every .cpp under core/ and util/ must be in tools/sources.mk, so the host
 # build and the Android build cannot silently drift apart.
