@@ -1,0 +1,226 @@
+// Host tests for the client's LAN wiring (Phase 4/5).
+//
+// The client is the production composition root: `BuildLan` opens the multicast
+// transport, the mDNS discovery and the sync channel from config; the frame
+// hook polls and applies; and a changed local loadout is published with no
+// script in the picture. These tests drive the real engine so the whole path is
+// exercised end to end, with a test-side peer standing in for the remote client:
+//
+//   * a client configured with sync + a verify key builds a channel and
+//     discovery, and reports them through the client accessors;
+//   * the frame hook applies a verified remote loadout into the client's own
+//     cosmetic service (the production target), and refuses a bad one;
+//   * the frame hook publishes the local loadout on a change;
+//   * a client with sync off builds no channel and polls nothing (fail closed).
+#include "berry/client.h"
+#include "berry/cosmetic.h"
+#include "berry/cosmetic_sync.h"
+#include "berry/engine.h"
+#include "berry/lan_discovery.h"
+#include "berry/lan_transport.h"
+#include "berry/script.h"
+#include "berry/services.h"
+
+#include <cstdio>
+#include <memory>
+#include <string>
+
+using namespace Berry;
+
+static int g_fail = 0;
+#define CHECK(cond) do { if (!(cond)) { \
+  printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); ++g_fail; } } while (0)
+
+namespace {
+
+// Runs one binding through a real host so the capability gate is exercised
+// exactly as it is on device.
+ScriptStatus CallBinding(ScriptBindings& bindings, const std::string& name,
+                         const std::vector<std::string>& grants,
+                         ScriptValue* out) {
+  CapabilitySet caps;
+  for (const auto& g : grants) caps.Add(g);
+  ScriptHost host("client-lan-test", caps, nullptr);
+  host.SetBindings(&bindings);
+  return host.CallBinding(name, {}, out);
+}
+
+const char* kGroup = "239.66.0.1";
+const u16 kPort = 47823;
+
+// The default config with the LAN sync channel enabled on loopback. HMAC keeps
+// the test free of a keypair; the client parses it into the channel's key.
+BerryConfigC SyncConfig() {
+  BerryConfigC cfg{};
+  cfg.size = sizeof(cfg);
+  cfg.abi_version = BERRY_ABI_VERSION;
+  cfg.auto_attach_modules = 1;
+  cfg.enable_render = 1;
+  cfg.enable_client = 1;
+  cfg.enable_cosmetic_sync = 1;
+  cfg.sync_verify_key = "shared";
+  cfg.sync_use_hmac = 1;
+  cfg.sync_self_id = "me";
+  cfg.sync_sign_secret = "shared";
+  cfg.lan_iface = "127.0.0.1";
+  return cfg;
+}
+
+// A test-side peer on the same loopback group, standing in for a remote client.
+struct Peer {
+  LanCosmeticTransport transport;
+  CosmeticSyncChannel channel;
+
+  bool Open() {
+    LanTransportConfig tcfg;
+    tcfg.group = kGroup;
+    tcfg.port = kPort;
+    tcfg.iface = "127.0.0.1";
+    if (!transport.Open(tcfg)) return false;
+    // The peer verifies what it receives, so it holds the shared key too.
+    channel.SetVerifyKey(CosmeticSyncKey::HmacSecret("shared"));
+    channel.SetTransport(&transport);
+    return true;
+  }
+
+  // Publishes a signed loadout for `id` on the shared secret.
+  bool Publish(const std::string& id, const CosmeticLoadout& lo) {
+    return channel.Publish(id, lo, "shared", /*useHmac=*/true);
+  }
+};
+
+}  // namespace
+
+int main() {
+  // The built-in registry gives `builtin.cape.red` a real asset to equip and
+  // own, so the client's ownership gate admits a verified remote loadout.
+  CosmeticRegistry::Instance().Clear();
+  CosmeticRegistry::Instance().RegisterBuiltins();
+  CosmeticOwnership::Instance().Grant("alice", "builtin.cape.red");
+
+  //--- a client with sync off has no channel and polls nothing ---
+  {
+    Engine& eng = Engine::Instance();
+    CHECK(eng.Bootstrap());
+    CHECK(eng.Attach());
+    BerryClient* client = eng.Client();
+    CHECK(client != nullptr);
+    CHECK(client->cosmeticSync() == nullptr);
+    CHECK(client->discovery() == nullptr);
+    client->BeginFrame(16.0f, Vec2(1280, 720));   // a no-op poll
+    client->EndFrame();
+    eng.Detach();
+  }
+
+  //--- a client with sync on builds the channel + discovery from config ---
+  {
+    Engine& eng = Engine::Instance();
+    BerryConfigC cfg = SyncConfig();
+    CHECK(eng.Bootstrap(cfg));
+    CHECK(eng.Attach());
+    BerryClient* client = eng.Client();
+    CHECK(client != nullptr);
+    CHECK(client->cosmeticSync() != nullptr);
+    CHECK(client->cosmeticSync()->configured());
+    CHECK(client->discovery() != nullptr);
+
+    //--- the frame hook applies a verified remote loadout ---
+    Peer alice;
+    CHECK(alice.Open());
+    CosmeticLoadout remote;
+    CHECK(remote.Equip("builtin.cape.red"));
+    CHECK(alice.Publish("alice", remote));
+
+    bool applied = false;
+    for (int i = 0; i < 80 && !applied; ++i) {
+      // BeginFrame drains and applies through the production poll path.
+      client->BeginFrame(16.0f, Vec2(1280, 720));
+      client->EndFrame();
+      applied = !client->cosmetics().RemotePlayers().empty();
+    }
+    CHECK(applied);
+    CHECK(client->cosmeticSync()->accepted() >= 1);
+
+    //--- a bad signature is refused, not applied ---
+    {
+      CosmeticSyncChannel forged;
+      forged.SetTransport(&alice.transport);
+      CosmeticLoadout bad;
+      CHECK(bad.Equip("builtin.cape.red"));
+      // Signed with a different secret: the client's key will not verify it.
+      CHECK(forged.Publish("mallory", bad, "not-shared", /*useHmac=*/true));
+      const u64 rejectedBefore = client->cosmeticSync()->rejected();
+      for (int i = 0; i < 40; ++i) {
+        client->BeginFrame(16.0f, Vec2(1280, 720));
+        client->EndFrame();
+        if (client->cosmeticSync()->rejected() > rejectedBefore) break;
+      }
+      CHECK(client->cosmeticSync()->rejected() > rejectedBefore);
+    }
+
+    //--- the frame hook publishes the local loadout on a change ---
+    CHECK(client->cosmetics().Equip("builtin.cape.red"));
+    bool gotLocal = false;
+    for (int i = 0; i < 80 && !gotLocal; ++i) {
+      client->BeginFrame(16.0f, Vec2(1280, 720));
+      client->EndFrame();
+      alice.transport.Poll([&](const std::string& m, const std::string&, u16) {
+        if (gotLocal) return;
+        CosmeticSyncMessage msg;
+        if (alice.channel.Verify(m, &msg) == CosmeticSyncResult::Ok &&
+            msg.playerId == "me") {
+          gotLocal = true;
+        }
+      }, 10);
+    }
+    CHECK(gotLocal);
+
+    alice.transport.Close();
+    eng.Detach();
+  }
+
+  //--- discovery: a peer on the subnet becomes visible to the client's own
+  //    frame poll, and `cosmetic.peers` reports it (the production caller) ---
+  {
+    Engine& eng = Engine::Instance();
+    BerryConfigC cfg = SyncConfig();
+    CHECK(eng.Bootstrap(cfg));
+    CHECK(eng.Attach());
+    BerryClient* client = eng.Client();
+    CHECK(client != nullptr);
+    CHECK(client->discovery() != nullptr);
+
+    // A remote client publishes itself over mDNS on loopback.
+    LanDiscovery peer;
+    LanDiscoveryConfig pcfg;
+    pcfg.iface = "127.0.0.1";
+    CHECK(peer.Open(pcfg));
+    CHECK(peer.Publish("remote-peer", 47999, "sync=1"));
+
+    // The client's frame poll browses: it answers the peer's query with its own
+    // publish and drains the reply. Drive both sides until the client lists it.
+    bool found = false;
+    for (int i = 0; i < 60 && !found; ++i) {
+      peer.Query();
+      peer.Poll(5);
+      client->BeginFrame(16.0f, Vec2(1280, 720));
+      client->EndFrame();
+      for (const LanService& s : client->discovery()->services()) {
+        if (s.instance.find("remote-peer") != std::string::npos) found = true;
+      }
+    }
+    CHECK(found);
+
+    // The binding reads the same cache, so a script sees the peer too.
+    ScriptValue out;
+    CHECK(CallBinding(client->bindings(), "cosmetic.peers", {"cosmetic"}, &out) ==
+          ScriptStatus::Ok);
+    CHECK(out.AsNumber() >= 1);
+
+    peer.Close();
+    eng.Detach();
+  }
+
+  if (g_fail == 0) printf("test_client_lan: ALL OK\n");
+  return g_fail;
+}

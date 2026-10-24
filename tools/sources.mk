@@ -212,6 +212,7 @@ TEST_SRC := \
   tests/test_loader.cpp \
   tests/test_api_bindings.cpp \
   tests/test_cosmetic.cpp \
+  tests/test_client_lan.cpp \
   tests/test_pack.cpp \
   tests/test_intent.cpp \
   tests/test_shader.cpp \

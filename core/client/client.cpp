@@ -24,6 +24,13 @@
 
 namespace Berry {
 
+namespace {
+// How often the frame poll re-queries mDNS. The cache TTL is 120s, so a query
+// every 20s keeps a live peer listed without flooding the group; a peer that
+// leaves simply ages out.
+constexpr u64 kDiscoveryQueryIntervalMs = 20000;
+}  // namespace
+
 BerryClient::BerryClient() = default;
 
 BerryClient::~BerryClient() { Detach(); }
@@ -61,6 +68,10 @@ bool BerryClient::Attach(Engine& engine, const ClientConfig& cfg) {
   // installs a real skeleton seam behind it.
   animatorSeam_ = std::make_unique<AnimatedSkeletonSource>(nullptr, animator_.get());
   cosmetics_->SetSkeletonSource(animatorSeam_.get());
+  // The local velocity source reaches the world through the same seam every
+  // other read uses; the cosmetic sway and `input.velocity` both pull from it.
+  velocitySource_ = std::make_unique<WorldVelocitySource>(world_, localPlayer_);
+  cosmetics_->SetVelocitySource(velocitySource_.get());
   modules_ = std::make_unique<ScriptModuleRegistry>();
   shaders_ = std::make_unique<ShaderRegistry>();
   packages_ = std::make_unique<PackageRegistry>();
@@ -98,6 +109,10 @@ bool BerryClient::Attach(Engine& engine, const ClientConfig& cfg) {
   // the Renderer keeps its null seam and discards the batch.
   Renderer* renderer = RendererFrom(engine.Modules());
   if (renderer && renderSeam_) renderer->BindSeam(renderSeam_.get());
+
+  // The LAN channels (cosmetic sync + voice) are opt-in: each binds a private
+  // multicast socket, so nothing is opened unless the config asks for it.
+  BuildLan(cfg);
 
   // Build the services view the ScriptApi binds. The replay service lives on
   // the engine (the World module feeds its capture and the engine drives its
@@ -153,7 +168,7 @@ void BerryClient::BuildServices() {
   s.world = world_;
   s.cosmetics = cosmetics_.get();
   s.packs = packs_.get();
-  s.velocity = nullptr;   // the device adapter installs a real motion source
+  s.velocity = velocitySource_.get();
   s.intents = intents_.get();
   s.shaders = shaders_.get();
   s.packages = packages_.get();
@@ -176,6 +191,8 @@ void BerryClient::BuildServices() {
   s.radial = radial_.get();
   s.crystal = crystal_.get();
   s.voice = voice_.get();
+  s.discovery = discovery_.get();
+  s.sync = syncChannel_.get();
   services_ = s;
   api_ = std::make_unique<ScriptApi>(services_);
 }
@@ -197,6 +214,133 @@ bool BerryClient::LoadScript(const ClientConfig& cfg) {
   return true;
 }
 
+void BerryClient::BuildLan(const ClientConfig& cfg) {
+  // Cosmetic sync: a private multicast transport carries the signed envelope.
+  // The transport is opened first; if it cannot bind, the channel is still
+  // built (so a script sees a configured-but-unreachable channel) but nothing
+  // is sent or admitted until the socket is up.
+  if (cfg.enableCosmeticSync) {
+    syncTransport_ = std::make_unique<LanCosmeticTransport>();
+    LanTransportConfig tcfg;
+    if (!cfg.lanIface.empty()) tcfg.iface = cfg.lanIface;
+    if (!syncTransport_->Open(tcfg)) {
+      Log::Warn("BerryClient: cosmetic-sync transport failed to open "
+                "(no multicast?); channel disabled");
+      syncTransport_.reset();
+    } else {
+      syncChannel_ = std::make_unique<CosmeticSyncChannel>();
+      syncChannel_->SetVerifyKey(cfg.syncVerifyKey);
+      syncChannel_->SetTransport(syncTransport_.get());
+      // Remember the publishing side: a tick re-broadcasts the loadout only
+      // when it changes, and only when a self id + signing secret are set.
+      syncSelfId_ = cfg.syncSelfId;
+      syncSignSecret_ = cfg.syncSignSecret;
+      syncUseHmac_ = cfg.syncUseHmac;
+      Log::Info("BerryClient: cosmetic-sync channel on port %u (%s)",
+                (unsigned)syncTransport_->localPort(),
+                syncChannel_->configured() ? "verify key set"
+                                           : "NO verify key; receives refused");
+      // mDNS discovery for the same LAN: publish this client so a peer learns
+      // its address and port, and browse for peers. Discovery is best-effort —
+      // a socket that cannot bind leaves it null and the sync channel still
+      // works over the multicast group.
+      discovery_ = std::make_unique<LanDiscovery>();
+      LanDiscoveryConfig dcfg;
+      if (!cfg.lanIface.empty()) dcfg.iface = cfg.lanIface;
+      if (discovery_->Open(dcfg)) {
+        const std::string instance =
+            cfg.syncSelfId.empty() ? "berry-client" : cfg.syncSelfId;
+        discovery_->Publish(instance, syncTransport_->localPort(),
+                            "sync=1");
+        discovery_->Query();
+        Log::Info("BerryClient: LAN discovery on port %u as '%s'",
+                  (unsigned)discovery_->localPort(), instance.c_str());
+      } else {
+        Log::Warn("BerryClient: LAN discovery failed to open; peers not listed");
+        discovery_.reset();
+      }
+    }
+  }
+
+  // Voice: bind the LAN transport and hand it to the voice service. The
+  // session only starts when an id is configured; without one the transport is
+  // bound but silent.
+  if (cfg.enableVoice) {
+    voiceTransport_ = std::make_unique<LanVoiceTransport>();
+    VoiceTransportConfig vcfg;
+    if (!cfg.lanIface.empty()) vcfg.iface = cfg.lanIface;
+    if (!voiceTransport_->Open(vcfg)) {
+      Log::Warn("BerryClient: voice transport failed to open (no multicast?); "
+                "voice disabled");
+      voiceTransport_.reset();
+    } else {
+      voice_->SetTransport(voiceTransport_.get());
+      if (!cfg.voiceSelfId.empty()) {
+        if (!voice_->Start(cfg.voiceSelfId)) {
+          Log::Warn("BerryClient: voice session refused id '%s'",
+                    cfg.voiceSelfId.c_str());
+        }
+      }
+      Log::Info("BerryClient: voice transport on port %u (self '%s')",
+                (unsigned)voiceTransport_->localPort(), cfg.voiceSelfId.c_str());
+    }
+  }
+}
+
+void BerryClient::PollCosmeticSync() {
+  if (!syncChannel_ || !syncTransport_) return;
+  // Both halves of the channel run here, on the frame thread, so the transport
+  // is touched from exactly one thread (its counters and fragment state are not
+  // atomic). Publish first — a local change should reach peers on the same
+  // frame it happened — then drain and apply.
+  PublishLoadout();
+  // Keep the mDNS cache fresh: drain a bounded slice, then re-query on a slow
+  // interval so peers that joined after attach are found and known peers do not
+  // age out of the TTL cache. Without the re-query the peer list would be
+  // correct only at attach and then decay to empty.
+  if (discovery_) {
+    discovery_->Poll(1);
+    const u64 now = NowMs();
+    if (lastDiscoveryQueryMs_ == 0 ||
+        now - lastDiscoveryQueryMs_ >= kDiscoveryQueryIntervalMs) {
+      discovery_->Query();
+      lastDiscoveryQueryMs_ = now;
+    }
+  }
+  // Drain the transport for a bounded slice so the frame is never held up by a
+  // busy subnet, and apply each verified message. Receive runs the post-
+  // signature defences (replay/rate/revoke) and the ownership gate, so a
+  // forged or replayed loadout changes nothing.
+  syncTransport_->Poll(
+      [this](const std::string& message, const std::string&, u16) {
+        size_t applied = 0;
+        const CosmeticSyncResult r =
+            syncChannel_->Receive(message, cosmetics_.get(), &applied);
+        if (r != CosmeticSyncResult::Ok) {
+          Log::Debug("BerryClient: cosmetic sync refused: %s",
+                     CosmeticSyncResultName(r));
+        }
+      },
+      2);
+}
+
+bool BerryClient::PublishLoadout() {
+  if (!syncChannel_ || syncSelfId_.empty() || syncSignSecret_.empty()) {
+    return false;
+  }
+  // Only publish a change: the canonical payload is what peers verify, so an
+  // unchanged loadout would only be dropped by their replay window.
+  const CosmeticLoadout loadout = cosmetics_->localLoadout();
+  const std::string payload = CosmeticSyncPayload(syncSelfId_, loadout);
+  if (payload == lastPublishedLoadout_) return false;
+  if (!syncChannel_->Publish(syncSelfId_, loadout, syncSignSecret_,
+                             syncUseHmac_)) {
+    return false;
+  }
+  lastPublishedLoadout_ = payload;
+  return true;
+}
+
 void BerryClient::Detach() {
   if (!attached_) return;
   attached_ = false;
@@ -214,11 +358,31 @@ void BerryClient::Detach() {
   api_.reset();
   bindings_.Clear();
   services_ = ScriptApi::Services{};
+  // Unbind the cosmetic seams before the owned seam objects are destroyed, so
+  // the service never holds a pointer to a destroyed seam. (Its destructor does
+  // not touch them, but the explicit clear keeps the ownership honest.)
+  if (cosmetics_) {
+    cosmetics_->SetSkeletonSource(nullptr);
+    cosmetics_->SetVelocitySource(nullptr);
+  }
   // Stop the backend after the renderer is no longer presenting, then release
   // the seam before the backend it points at.
   renderSeam_.reset();
   if (renderBackend_) renderBackend_->Stop();
   renderBackend_.reset();
+  // Tear down the LAN channels after the services that borrow them: the voice
+  // session is stopped and its transport unbound before the transport dies,
+  // and the sync channel's borrowed transport pointer is cleared before the
+  // transport is released.
+  if (voice_) {
+    voice_->Stop();
+    voice_->SetTransport(nullptr);
+  }
+  voiceTransport_.reset();
+  discovery_.reset();
+  if (syncChannel_) syncChannel_->SetTransport(nullptr);
+  syncChannel_.reset();
+  syncTransport_.reset();
   Log::Info("BerryClient detached");
 }
 
@@ -262,6 +426,9 @@ Vec2 BerryClient::screenSize() const {
 
 void BerryClient::BeginFrame(f32 frameMs, const Vec2& screen) {
   if (!attached_) return;
+  // Apply any loadout that arrived since the last frame BEFORE the overlays
+  // draw, so a peer's cosmetics render the same frame they were received.
+  PollCosmeticSync();
   // Open the renderer frame first, so every overlay that draws through it (the
   // HUD, the PvP overlay, the UI, the radial menu, the replay review, the
   // script-module overlay) queues into this frame's batch. Then publish the

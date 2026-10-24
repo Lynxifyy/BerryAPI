@@ -34,12 +34,15 @@
 #include "berry/audio.h"
 #include "berry/combat_state.h"
 #include "berry/cosmetic.h"
+#include "berry/cosmetic_sync.h"
 #include "berry/crystal.h"
 #include "berry/event.h"
 #include "berry/fs.h"
 #include "berry/hud.h"
 #include "berry/input.h"
 #include "berry/intent.h"
+#include "berry/lan_discovery.h"
+#include "berry/lan_transport.h"
 #include "berry/loader.h"
 #include "berry/pack.h"
 #include "berry/package.h"
@@ -57,6 +60,7 @@
 #include "berry/ui.h"
 #include "berry/url.h"
 #include "berry/voice.h"
+#include "berry/voice_transport.h"
 #include "berry/ws_client.h"
 
 #include <functional>
@@ -94,6 +98,66 @@ struct BERRY_API ClientConfig {
   /// empty the client uses the renderer's last-known size, and a zero size
   /// makes the overlays skip the frame rather than draw at a bogus scale.
   std::function<Vec2()> screenSource;
+  /// Enable the LAN cosmetic-sync channel: a private multicast transport that
+  /// carries the local loadout and applies verified remote ones. Off by
+  /// default (a client renders its own cosmetics on its own screen); when on,
+  /// `syncVerifyKey` must be set or the channel refuses every inbound message.
+  bool enableCosmeticSync = false;
+  /// The interface the LAN channels join and send on. "0.0.0.0" (the default)
+  /// uses the system multicast route; a host test sets "127.0.0.1" to stay on
+  /// loopback.
+  std::string lanIface = "0.0.0.0";
+  /// The key used to verify inbound cosmetic loadouts. Without it the channel
+  /// is not configured and Receive fails closed.
+  CosmeticSyncKey syncVerifyKey;
+  /// This client's own id on the sync channel (the name peers see). Empty
+  /// disables publishing (the client still verifies and applies inbound ones).
+  std::string syncSelfId;
+  /// The secret used to sign the local loadout before publishing. A 64-byte
+  /// Ed25519 secret as hex, or an HMAC secret with `syncUseHmac`. Empty
+  /// disables publishing.
+  std::string syncSignSecret;
+  bool syncUseHmac = false;
+  /// Enable LAN proximity voice. Off by default (microphone capture is
+  /// privacy-sensitive); when on, the client binds `LanVoiceTransport` to the
+  /// voice service and starts a session only if `voiceSelfId` is set.
+  bool enableVoice = false;
+  /// This client's voice session id. Empty leaves the session stopped (the
+  /// transport is bound but nothing is sent or admitted).
+  std::string voiceSelfId;
+};
+
+//----------------------------------------------------------------------------
+// WorldVelocitySource — the production LocalVelocitySource.
+//----------------------------------------------------------------------------
+
+/// Reports the local player's velocity from the world seam (the
+/// `EntitySnapshot.velocity` every other consumer reads). This is the
+/// production implementation of `LocalVelocitySource`: the cosmetic sway and
+/// the `input.velocity` binding both pull from it, and it reaches the world the
+/// same way everything else does, never game memory. Returns false when the
+/// world or the local entity is unknown, so consumers treat the player as
+/// stationary rather than using a stale vector.
+class BERRY_API WorldVelocitySource final : public LocalVelocitySource {
+ public:
+  WorldVelocitySource() = default;
+  WorldVelocitySource(WorldHandle* world, EntityId local)
+      : world_(world), local_(local) {}
+
+  void SetWorld(WorldHandle* world) { world_ = world; }
+  void SetLocal(EntityId local) { local_ = local; }
+
+  bool LocalVelocity(Vec3* out) const override {
+    if (!world_) return false;
+    const EntitySnapshot s = world_->GetEntity(local_);
+    if (!s.alive) return false;
+    if (out) *out = s.velocity;
+    return true;
+  }
+
+ private:
+  WorldHandle* world_ = nullptr;
+  EntityId local_;
 };
 
 //----------------------------------------------------------------------------
@@ -177,6 +241,22 @@ class BERRY_API BerryClient {
   CosmeticPackLoader& packs() { return *packs_; }
   AsyncRuntime& async() { return *async_; }
 
+  /// The LAN cosmetic-sync channel, or null when sync is disabled. Owns the
+  /// multicast transport when enabled.
+  CosmeticSyncChannel* cosmeticSync() { return syncChannel_.get(); }
+  /// The mDNS discovery the sync channel uses, or null when sync is disabled or
+  /// discovery could not bind. Reads only: discovery names peers, and a loadout
+  /// from one is still verified by the sync channel before it is applied.
+  LanDiscovery* discovery() { return discovery_.get(); }
+  /// The LAN voice transport, or null when voice is disabled.
+  LanVoiceTransport* voiceTransport() { return voiceTransport_.get(); }
+
+  /// Broadcasts the local cosmetic loadout on the sync channel. False when
+  /// sync is disabled, no signing secret/self id is configured, or the send
+  /// fails. Called by the frame poll, so a loadout change reaches peers without
+  /// a script having to ask.
+  bool PublishLoadout();
+
   /// The loaded script, or null when none is configured / the load failed.
   LoadedScript* script() { return script_.get(); }
 
@@ -197,6 +277,16 @@ class BERRY_API BerryClient {
   /// Builds the host from `cfg.scriptDirectory` through the loader.
   bool LoadScript(const ClientConfig& cfg);
 
+  /// Builds the opt-in LAN channels: the cosmetic-sync channel (with its
+  /// multicast transport) and the LAN voice transport. A no-op for a config
+  /// that enables neither.
+  void BuildLan(const ClientConfig& cfg);
+
+  /// Drains the sync transport and applies every verified loadout to the
+  /// cosmetic service. Runs on the frame thread, before the overlays draw, so
+  /// a loadout received this frame renders this frame.
+  void PollCosmeticSync();
+
   /// Drives on_tick + the async pump on the worker. Posted by `Tick`.
   void RunTickOnWorker(GameTick tick);
 
@@ -211,6 +301,7 @@ class BERRY_API BerryClient {
   std::unique_ptr<CombatStateTracker> combatState_;
   std::unique_ptr<CosmeticService> cosmetics_;
   std::unique_ptr<AnimatedSkeletonSource> animatorSeam_;
+  std::unique_ptr<WorldVelocitySource> velocitySource_;
   std::unique_ptr<RealScriptFileSystem> fs_;
   std::unique_ptr<CosmeticPackLoader> packs_;
   std::unique_ptr<ScriptModuleRegistry> modules_;
@@ -225,6 +316,33 @@ class BERRY_API BerryClient {
   std::unique_ptr<CrystalOptimizer> crystal_;
   std::unique_ptr<VoiceService> voice_;
   std::unique_ptr<ScriptApi> api_;
+  // The LAN cosmetic-sync channel and its multicast transport. Built only when
+  // the config enables sync; the channel's Receive is what turns a verified
+  // message into a rendered remote loadout. The transport is destroyed after
+  // the channel, so the channel's borrowed transport pointer is never dangling.
+  std::unique_ptr<LanCosmeticTransport> syncTransport_;
+  std::unique_ptr<CosmeticSyncChannel> syncChannel_;
+  // mDNS discovery for the sync channel: publishes this client so peers can find
+  // it and browses for theirs. Built only when sync is enabled; polled on the
+  // frame thread alongside the transport, and re-queried on a slow interval so
+  // the peer list stays live.
+  std::unique_ptr<LanDiscovery> discovery_;
+  // The wall clock at the last discovery re-query (0 = none yet, so the first
+  // frame queries). Keeps the re-query off the hot path.
+  u64 lastDiscoveryQueryMs_ = 0;
+  // Publishing side of the sync channel: the self id, the signing secret and
+  // whether it is HMAC (dev) or Ed25519 (production). Empty secret or id means
+  // the client only verifies/applies, never publishes.
+  std::string syncSelfId_;
+  std::string syncSignSecret_;
+  bool syncUseHmac_ = false;
+  // The local loadout as last published, so a tick that did not change it does
+  // not re-broadcast (the channel's peers would only drop a duplicate anyway).
+  std::string lastPublishedLoadout_;
+  // The LAN voice transport. Built only when the config enables voice; the
+  // service borrows it, so it is torn down after the service's transport is
+  // cleared.
+  std::unique_ptr<LanVoiceTransport> voiceTransport_;
   // The on-device overlay backend and the seam that funnels the Renderer's
   // frame batch into it. Owned here so the render path has a production owner
   // (the Renderer only ever had a test-installed seam). `null` backend on the

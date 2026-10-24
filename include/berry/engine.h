@@ -46,6 +46,17 @@ struct EngineConfig {
   std::string scriptDirectory;
   /// The local player's runtime entity id (0 = unknown).
   u64 localPlayerId = 0;
+  /// LAN cosmetic-sync channel (opt-in). Off by default.
+  bool enableCosmeticSync = false;
+  std::string syncVerifyKey;   // hex Ed25519 public key, or HMAC secret
+  std::string syncSelfId;      // empty = verify/apply only, never publish
+  std::string syncSignSecret;  // empty = never publish
+  bool syncUseHmac = false;
+  /// LAN proximity voice (opt-in). Off by default.
+  bool enableVoice = false;
+  std::string voiceSelfId;     // empty = transport bound but session stopped
+  /// The interface the LAN channels join and send on ("" = system route).
+  std::string lanIface;
 };
 
 class BERRY_API Engine {

@@ -90,6 +90,14 @@ bool Engine::Bootstrap(const BerryConfigC& cfg) {
   internal.devMode = cfg.dev_mode != 0;
   if (cfg.script_directory) internal.scriptDirectory = cfg.script_directory;
   internal.localPlayerId = cfg.local_player_id;
+  internal.enableCosmeticSync = cfg.enable_cosmetic_sync != 0;
+  if (cfg.sync_verify_key) internal.syncVerifyKey = cfg.sync_verify_key;
+  if (cfg.sync_self_id) internal.syncSelfId = cfg.sync_self_id;
+  if (cfg.sync_sign_secret) internal.syncSignSecret = cfg.sync_sign_secret;
+  internal.syncUseHmac = cfg.sync_use_hmac != 0;
+  internal.enableVoice = cfg.enable_voice != 0;
+  if (cfg.voice_self_id) internal.voiceSelfId = cfg.voice_self_id;
+  if (cfg.lan_iface) internal.lanIface = cfg.lan_iface;
   ApplyConfig(internal);
   Log::Info("BerryAPI v%s bootstrapped (abi %u)", BERRY_VERSION_STRING,
             (unsigned)BERRY_ABI_VERSION);
@@ -134,6 +142,21 @@ bool Engine::Attach() {
     ccfg.requireSignature = !cfg_.devMode;
     ccfg.requireSourceHash = !cfg_.devMode;
     ccfg.localPlayer.raw = cfg_.localPlayerId;
+    // The LAN channels are opt-in. The verify key is hex, parsed into the key
+    // struct the channel takes; an empty/blank key leaves the channel
+    // unconfigured, so Receive fails closed.
+    ccfg.enableCosmeticSync = cfg_.enableCosmeticSync;
+    if (!cfg_.syncVerifyKey.empty()) {
+      ccfg.syncVerifyKey = cfg_.syncUseHmac
+          ? CosmeticSyncKey::HmacSecret(cfg_.syncVerifyKey)
+          : CosmeticSyncKey::Ed25519PublicKey(cfg_.syncVerifyKey);
+    }
+    ccfg.syncSelfId = cfg_.syncSelfId;
+    ccfg.syncSignSecret = cfg_.syncSignSecret;
+    ccfg.syncUseHmac = cfg_.syncUseHmac;
+    ccfg.enableVoice = cfg_.enableVoice;
+    ccfg.voiceSelfId = cfg_.voiceSelfId;
+    ccfg.lanIface = cfg_.lanIface;
     client_ = std::make_unique<BerryClient>();
     if (!client_->Attach(*this, ccfg)) {
       Log::Error("BerryClient failed to attach; detaching modules");
