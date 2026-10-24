@@ -1,4 +1,5 @@
 #include "berry/math.h"
+#include "berry/game.h"
 #include <cstdio>
 #include <cmath>
 
@@ -24,13 +25,15 @@ int main() {
   CHECK_NEAR(n.Length(), 1, 1e-6);
   CHECK_NEAR(Vec3(1, 0, 0).Cross(Vec3(0, 1, 0)).z, 1, 1e-6);
 
-  // Ray-AABB (slab/amy method — bool hit + optional distance)
+  // Ray-AABB (slab method — the production helper in game.h)
   Aabb box(Vec3(0, 0, 0), Vec3(2, 2, 2));
-  Ray ray(Vec3(-5, 1, 1), Vec3(1, 0, 0));
   f32 d = 0;
-  CHECK(ray.IntersectAabb(box, &d));
+  CHECK(RayHitsAabb(Vec3(-5, 1, 1), Vec3(1, 0, 0), box, 100.0f, &d));
   CHECK_NEAR(d, 5, 1e-6);
-  CHECK(!ray.IntersectAabb(Aabb(Vec3(5, 5, 5), Vec3(6, 6, 6))));
+  CHECK(!RayHitsAabb(Vec3(-5, 1, 1), Vec3(1, 0, 0), box, 4.0f, nullptr));
+  // A ray pointed away from a disjoint box misses.
+  CHECK(!RayHitsAabb(Vec3(10, 10, 10), Vec3(1, 0, 0),
+                     Aabb(Vec3(5, 5, 5), Vec3(6, 6, 6)), 100.0f, nullptr));
 
   // Entity AABB approx for ESP
   CHECK(box.Contains(Vec3(1, 1, 1)));
