@@ -57,6 +57,8 @@ struct EngineConfig {
   std::string voiceSelfId;     // empty = transport bound but session stopped
   /// The interface the LAN channels join and send on ("" = system route).
   std::string lanIface;
+  /// Root directory for the sandboxed `fs.*` store. Empty keeps it in-memory.
+  std::string scriptDataDirectory;
 };
 
 class BERRY_API Engine {

@@ -69,6 +69,12 @@ typedef struct BerryConfigC {
   // The interface the LAN channels join and send on, or NULL for the system
   // multicast route. A host test passes "127.0.0.1" to stay on loopback.
   const char* lan_iface;
+  // Root directory for the sandboxed `fs.*` store, or NULL for in-memory only.
+  // When set, the client binds the store to a per-script subdirectory (named
+  // from the loaded manifest) so a script's data survives a restart. The store
+  // refuses a symlink on every path component and writes through a temp file
+  // plus rename, so it cannot escape the directory or expose a partial write.
+  const char* script_data_directory;
 } BerryConfigC;
 
 #ifdef __cplusplus

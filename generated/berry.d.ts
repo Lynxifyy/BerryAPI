@@ -189,7 +189,7 @@ export interface Entity {
 
 /** Capability required: fileio. */
 export interface Fs {
-  /** Sandboxed file store. A script gets its own directory and nothing else: a path is validated before use (no absolute path, no backslash, no drive letter, no control character, no empty segment, no \".\" or \"..\", a bounded length and depth), so a path cannot escape the sandbox however it is spelled. Writes are capped per file, in total and in count, so a write loop cannot exhaust memory. Every call fails closed (false / empty) rather than throwing. */
+  /** Sandboxed file store. A script gets its own directory and nothing else: a path is validated before use (no absolute path, no backslash, no drive letter, no control character, no empty segment, no \".\" or \"..\", a bounded length and depth), so a path cannot escape the sandbox however it is spelled. Writes are capped per file, in total and in count, so a write loop cannot exhaust memory. Every call fails closed (false / empty) rather than throwing. When the embedder configures a script data directory, the store persists to a per-script directory there: every path component is opened without following a symlink, a write lands in a temporary file that is renamed into place (so a reader never sees a partial write), and the existing files and bytes are counted against the quota when the directory is opened, so data survives a restart and a planted symlink or a traversal spelling is refused. */
   write(path: string, data: string): boolean;
   read(path: string): string;
   append(path: string, data: string): boolean;

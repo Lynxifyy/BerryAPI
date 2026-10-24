@@ -22,8 +22,12 @@
 #include "berry/services.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 
 using namespace Berry;
 
@@ -37,16 +41,52 @@ namespace {
 // exactly as it is on device.
 ScriptStatus CallBinding(ScriptBindings& bindings, const std::string& name,
                          const std::vector<std::string>& grants,
-                         ScriptValue* out) {
+                         ScriptValue* out,
+                         const std::vector<ScriptValue>& args = {}) {
   CapabilitySet caps;
   for (const auto& g : grants) caps.Add(g);
   ScriptHost host("client-lan-test", caps, nullptr);
   host.SetBindings(&bindings);
-  return host.CallBinding(name, {}, out);
+  return host.CallBinding(name, args, out);
 }
 
 const char* kGroup = "239.66.0.1";
 const u16 kPort = 47823;
+
+// A tiny Luau module source; the client's loader compiles with the real Luau
+// VM, so the source must be valid Luau (a module returning a table).
+const char* kScriptSrc =
+    "local M = {}\n"
+    "function M.on_load() return 0 end\n"
+    "return M\n";
+
+/// A unique temp directory for one test, removed by the caller.
+std::string MakeTempDir(const char* tag) {
+  char tmpl[160];
+  std::snprintf(tmpl, sizeof tmpl, "/tmp/berry-client-%s-XXXXXX", tag);
+  const char* d = mkdtemp(tmpl);
+  return d ? std::string(d) : std::string();
+}
+
+void WriteFileRaw(const std::string& path, const std::string& data) {
+  FILE* f = std::fopen(path.c_str(), "wb");
+  if (!f) return;
+  std::fwrite(data.data(), 1, data.size(), f);
+  std::fclose(f);
+}
+
+/// Creates a script directory (unsigned; the client runs it in dev mode) whose
+/// manifest names `name`, and returns the directory.
+std::string MakeScriptDir(const std::string& root, const std::string& name) {
+  const std::string dir = root + "/script";
+  std::string cmd = "mkdir -p '" + dir + "'";
+  if (system(cmd.c_str()) != 0) return std::string();
+  WriteFileRaw(dir + "/manifest.json",
+               "{\"name\":\"" + name + "\",\"version\":\"1.0.0\","
+               "\"entry\":\"main.luau\",\"capabilities\":[\"fileio\"]}");
+  WriteFileRaw(dir + "/main.luau", kScriptSrc);
+  return dir;
+}
 
 // The default config with the LAN sync channel enabled on loopback. HMAC keeps
 // the test free of a keypair; the client parses it into the channel's key.
@@ -219,6 +259,84 @@ int main() {
 
     peer.Close();
     eng.Detach();
+  }
+
+  //--- script data persistence: the fs store binds to a per-script dir under
+  //    the configured root, and a restart sees the same files (Phase E) ---
+  {
+    const std::string root = MakeTempDir("data");
+    CHECK(!root.empty());
+    if (!root.empty()) {
+      const std::string scriptDir = MakeScriptDir(root, "persister");
+      CHECK(!scriptDir.empty());
+      const std::string dataRoot = root + "/data";
+
+      // First run: the client loads the script and binds the store, and a
+      // script write lands on disk.
+      {
+        Engine& eng = Engine::Instance();
+        BerryConfigC cfg = BerryConfigC();
+        cfg.size = sizeof(cfg);
+        cfg.abi_version = BERRY_ABI_VERSION;
+        cfg.auto_attach_modules = 1;
+        cfg.enable_render = 1;
+        cfg.enable_client = 1;
+        cfg.dev_mode = 1;                 // unsigned script for the test
+        cfg.script_directory = scriptDir.c_str();
+        cfg.script_data_directory = dataRoot.c_str();
+        CHECK(eng.Bootstrap(cfg));
+        CHECK(eng.Attach());
+        BerryClient* client = eng.Client();
+        CHECK(client != nullptr);
+        CHECK(client->files().persistent());
+
+        ScriptValue out;
+        CHECK(CallBinding(client->bindings(), "fs.write", {"fileio"}, &out,
+                          {ScriptValue::Str("save.dat"),
+                           ScriptValue::Str("level-9")}) == ScriptStatus::Ok);
+        CHECK(out.Truthy());
+        eng.Detach();
+      }
+
+      // Second run: a fresh engine over the same root reads the data back.
+      {
+        Engine& eng = Engine::Instance();
+        BerryConfigC cfg = BerryConfigC();
+        cfg.size = sizeof(cfg);
+        cfg.abi_version = BERRY_ABI_VERSION;
+        cfg.auto_attach_modules = 1;
+        cfg.enable_render = 1;
+        cfg.enable_client = 1;
+        cfg.dev_mode = 1;
+        cfg.script_directory = scriptDir.c_str();
+        cfg.script_data_directory = dataRoot.c_str();
+        CHECK(eng.Bootstrap(cfg));
+        CHECK(eng.Attach());
+        BerryClient* client = eng.Client();
+        CHECK(client != nullptr);
+        CHECK(client->files().persistent());
+        CHECK(client->files().FileCount() == 1);
+        ScriptValue out;
+        CHECK(CallBinding(client->bindings(), "fs.read", {"fileio"}, &out,
+                          {ScriptValue::Str("save.dat")}) == ScriptStatus::Ok);
+        CHECK(out.AsString() == "level-9");
+        eng.Detach();
+      }
+
+      // A client with no data directory stays in-memory.
+      {
+        Engine& eng = Engine::Instance();
+        CHECK(eng.Bootstrap());
+        CHECK(eng.Attach());
+        BerryClient* client = eng.Client();
+        CHECK(client != nullptr);
+        CHECK(!client->files().persistent());
+        eng.Detach();
+      }
+
+      std::string cmd = "rm -rf '" + root + "'";
+      if (system(cmd.c_str()) != 0) { /* best-effort cleanup */ }
+    }
   }
 
   if (g_fail == 0) printf("test_client_lan: ALL OK\n");

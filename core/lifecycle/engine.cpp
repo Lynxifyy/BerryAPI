@@ -98,6 +98,9 @@ bool Engine::Bootstrap(const BerryConfigC& cfg) {
   internal.enableVoice = cfg.enable_voice != 0;
   if (cfg.voice_self_id) internal.voiceSelfId = cfg.voice_self_id;
   if (cfg.lan_iface) internal.lanIface = cfg.lan_iface;
+  if (cfg.script_data_directory) {
+    internal.scriptDataDirectory = cfg.script_data_directory;
+  }
   ApplyConfig(internal);
   Log::Info("BerryAPI v%s bootstrapped (abi %u)", BERRY_VERSION_STRING,
             (unsigned)BERRY_ABI_VERSION);
@@ -157,6 +160,7 @@ bool Engine::Attach() {
     ccfg.enableVoice = cfg_.enableVoice;
     ccfg.voiceSelfId = cfg_.voiceSelfId;
     ccfg.lanIface = cfg_.lanIface;
+    ccfg.scriptDataDirectory = cfg_.scriptDataDirectory;
     client_ = std::make_unique<BerryClient>();
     if (!client_->Attach(*this, ccfg)) {
       Log::Error("BerryClient failed to attach; detaching modules");

@@ -143,6 +143,13 @@ struct BERRY_API ClientConfig {
   /// The highest pack sequence applied by a previous run, so a restart cannot
   /// be rolled back onto an older pack. Persisted by the embedder.
   u64 sigpackSequenceFloor = 0;
+  /// Root directory for the sandboxed `fs.*` store. When set, the client binds
+  /// the store to a per-script subdirectory (named from the loaded manifest) so
+  /// data survives a restart; when empty the store stays in-memory and a script
+  /// gets no persistence. The store refuses symlinks on every path component and
+  /// writes through a temp file plus rename, so a persistence attempt cannot
+  /// escape the directory or observe a partial write.
+  std::string scriptDataDirectory;
 };
 
 //----------------------------------------------------------------------------
@@ -315,6 +322,13 @@ class BERRY_API BerryClient {
   /// when packs are disabled. Runs before the script loads, so a pack's
   /// signatures/layouts are in the registries by the time a script asks.
   void LoadSigPacks(const ClientConfig& cfg);
+
+  /// Binds the sandboxed `fs.*` store to the script's own directory under
+  /// `cfg.scriptDataDirectory`, so data survives a restart. A no-op (the store
+  /// stays in-memory) when no directory is configured or no script loaded. The
+  /// per-script directory name is derived from the loaded manifest, so two
+  /// scripts never share a sandbox.
+  void BindScriptData(const ClientConfig& cfg);
 
   /// Drains the sync transport and applies every verified loadout to the
   /// cosmetic service. Runs on the frame thread, before the overlays draw, so

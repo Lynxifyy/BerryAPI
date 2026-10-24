@@ -152,6 +152,12 @@ bool BerryClient::Attach(Engine& engine, const ClientConfig& cfg) {
     }
   }
 
+  // Bind the sandboxed fs store to the script's own directory, so its data
+  // survives a restart. Runs after the script loads (the directory name comes
+  // from the manifest) and before the worker starts, so the first script call
+  // already sees its persisted files.
+  BindScriptData(cfg);
+
   // The worker runs the script. It is started even when no script loaded, so
   // `Tick` can post and drain uniformly.
   worker_ = std::make_unique<ScriptWorker>();
@@ -217,6 +223,27 @@ bool BerryClient::LoadScript(const ClientConfig& cfg) {
   script_->SetBindings(&bindings_);
   lastScriptError_.clear();
   return true;
+}
+
+void BerryClient::BindScriptData(const ClientConfig& cfg) {
+  if (cfg.scriptDataDirectory.empty() || !script_ || !script_->valid()) return;
+  // One directory per script, named from a hash of the manifest name so a
+  // name with a path separator or a dot cannot climb out of the root, and two
+  // scripts never collide on the same sandbox. The name is not the manifest
+  // name itself: that is attacker-controlled text, and a directory name must
+  // be safe by construction.
+  const std::string id = crypto::Sha256Hex(script_->manifest().name);
+  const std::string dir = cfg.scriptDataDirectory + "/" + id.substr(0, 32);
+  if (!files_->Open(dir)) {
+    // A store that cannot persist must not silently become volatile: leave it
+    // in-memory (the script gets no persistence) and say so.
+    Log::Warn("BerryClient: script data directory '%s' unavailable; "
+              "fs.* stays in-memory",
+              dir.c_str());
+    return;
+  }
+  Log::Info("BerryClient: script data bound to '%s' (%zu files, %zu bytes)",
+            dir.c_str(), files_->FileCount(), files_->TotalBytes());
 }
 
 void BerryClient::BuildLan(const ClientConfig& cfg) {
