@@ -23,6 +23,23 @@ constexpr const char* kPayloadBanner = "berry-cosmetic-sync/1";
 
 constexpr size_t kMaxMessageBytes = 64 * 1024;
 
+/// Parses a decimal u64 with no sign, no leading space and no overflow. Written
+/// by hand (not `std::stoull`) so the unit stays compilable with exceptions
+/// disabled, as the on-device build requires, and so a malformed header is
+/// rejected rather than throwing past the caller.
+bool ParseDecU64(const std::string& s, u64* out) {
+  if (s.empty() || s.size() > 20) return false;
+  u64 v = 0;
+  for (char c : s) {
+    if (c < '0' || c > '9') return false;
+    const u64 digit = (u64)(c - '0');
+    if (v > (0xffffffffffffffffull - digit) / 10ull) return false;   // overflow
+    v = v * 10ull + digit;
+  }
+  *out = v;
+  return true;
+}
+
 std::string AlgoFor(CosmeticSyncKey::Kind kind) {
   return kind == CosmeticSyncKey::Kind::Ed25519 ? std::string(signature_algo::Ed25519())
                                                 : std::string(signature_algo::HmacSha256());
@@ -377,12 +394,11 @@ CosmeticSyncResult CosmeticSyncChannel::Verify(const std::string& message,
     return CosmeticSyncResult::BadEnvelope;
   }
 
-  size_t payloadLen = 0;
-  try {
-    payloadLen = (size_t)std::stoull(payloadLenText);
-  } catch (...) {
+  u64 payloadLen64 = 0;
+  if (!ParseDecU64(payloadLenText, &payloadLen64)) {
     return CosmeticSyncResult::BadEnvelope;
   }
+  const size_t payloadLen = (size_t)payloadLen64;
   if (payloadStart + payloadLen != message.size()) {
     return CosmeticSyncResult::BadEnvelope;
   }

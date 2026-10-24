@@ -165,6 +165,8 @@ bool RpcServer::HandleFrame(const std::string& frame, std::string* response) {
   }
 
   RpcResult result;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)
+  // A handler is embedder code; a throw must become an error reply, not a crash.
   try {
     result = handler(params);
   } catch (const std::exception& e) {
@@ -172,6 +174,12 @@ bool RpcServer::HandleFrame(const std::string& frame, std::string* response) {
   } catch (...) {
     result = RpcResult::Err(rpc_error::kInternalError, "handler threw");
   }
+#else
+  // The on-device build compiles with exceptions disabled, so a throw here
+  // cannot be caught (it would call std::terminate either way). Call straight
+  // through and document that a handler must not throw in that build.
+  result = handler(params);
+#endif
 
   if (!result.ok) {
     return reply(ErrorFrame(id, result.errorCode, result.errorMessage));
