@@ -185,6 +185,38 @@ make lib             # builds build/libBerryAPI.so
   the tracked speaker set and every tunable are bounded and validated; a speaker
   ages out of the activity list (and its decode state with it) after `hold_ms`,
   and `Reset()` keeps config and seams.
+- `SecureVoiceTransport` (`voice_secure_transport.h`) is the authenticated,
+  encrypted LAN transport behind the same `VoiceTransport` seam: an Ed25519
+  identity handshake gates the session, the pairwise key is X25519 + HKDF, the
+  frame is ChaCha20-Poly1305, and a replay window rejects a replayed counter. An
+  announce is the only unauthenticated input and is verified before it changes
+  any state, so a peer outside the anchor cannot listen or inject. Its framing
+  lives in `core/net/voice_wire.h` (`voicewire::`) so the transport and the relay
+  cannot drift.
+- `VoiceRelay` (`voice_relay.h`, `core/net/voice_relay.cpp`) is the hostable UDP
+  forwarder for two phones on *different* networks. It is deliberately blind: it
+  never holds a key and never decrypts, so it moves the end-to-end sealed frame
+  untouched and cannot forge audio. The control plane is a per-room secret —
+  `RoomTagHex` is the room lookup key and `RegisterAuthHex` authenticates a
+  registration (constant-time compare) — so an unregistered source is never
+  forwarded and the relay is not an open amplifier. `VoiceRelayTransport`
+  (`voice_relay_transport.h`) is the client: the same secure channel, wrapped in
+  the relay envelope (`relaywire::` in `voice_wire.h`), reaching one relay address
+  instead of a multicast group. TLS is only for the room token
+  (`RoomTokenClient` in `room_token.h`), which a presence backend serves over
+  verified HTTPS; the token is Ed25519-signed over deterministic canonical bytes
+  when a backend key is configured, so a compromised TLS terminator alone cannot
+  swap the relay or shorten the expiry.
+- The multicast transports (`LanVoiceTransport`, `SecureVoiceTransport`,
+  `LanCosmeticTransport`) each hold a `MulticastLock` (`core/net/multicast_lock.h`)
+  while their group is joined. Android's Wi-Fi power management drops multicast
+  to a joined group without one, so two phones never hear each other. It is a
+  device-only JNI seam (kept behind a pimpl so no caller needs `jni.h`) and is
+  best-effort: on the host `available()` is false and `Acquire` returns false
+  without failing the open.
+- Room tokens are `berry-room-token-v1`, domain-separated and length-prefixed so
+  no field can splice into another; `RoomTokenClient::VerifyDocument` is a pure
+  function (testable without a socket) and `Fetch` is the verified-HTTPS path.
 
 ## Conventions
 

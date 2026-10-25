@@ -248,6 +248,21 @@ build/$(SHARED_NAME): $(SHARED_OBJ)
 lib: build/$(SHARED_NAME)
 	@echo "== built $(SHARED_NAME) =="
 
+# The standalone voice-relay host (tools/berry-relay.cpp). It links the portable
+# core, so it can host the UDP forwarder with no game and no Android. Run
+# `make berry-relay` then `./build/berry-relay --help`.
+RELAY_OBJ := build/tools/berry-relay.o
+build/tools/berry-relay.o: tools/berry-relay.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Itools -c $< -o $@
+
+build/berry-relay: $(RELAY_OBJ) $(CORE_OBJ)
+	$(CXX) $(LDFLAGS) $(RELAY_OBJ) $(CORE_OBJ) -ldl -o $@
+
+.PHONY: berry-relay
+berry-relay: build/berry-relay
+	@echo "== built build/berry-relay =="
+
 # IDL codegen: one description generates the C++ binding table, the TS/Luau
 # type definitions and the API docs. `idl-check` fails when they drift.
 .PHONY: idl idl-check

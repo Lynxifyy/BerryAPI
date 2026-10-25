@@ -6,34 +6,35 @@
 #include "berry/event.h"
 #include "berry/logger.h"
 #include "multicast_lock.h"
+#include "voice_wire.h"
 
 #include <algorithm>
 #include <cstring>
 
 namespace Berry {
 
+// The public header declares the wire sizes; the shared framing header defines
+// them. Assert they agree, so a change to one without the other fails to build
+// rather than putting two incompatible formats on the same group.
+static_assert(SecureVoiceTransport::kVersion == voicewire::kVersion, "version");
+static_assert(SecureVoiceTransport::kKindAnnounce == voicewire::kKindAnnounce,
+              "announce kind");
+static_assert(SecureVoiceTransport::kKindSealedFrame ==
+                  voicewire::kKindSealedFrame,
+              "sealed kind");
+static_assert(SecureVoiceTransport::kPrefixBytes == voicewire::kPrefixBytes,
+              "prefix size");
+static_assert(SecureVoiceTransport::kRouteTagBytes == voicewire::kRouteTagBytes,
+              "route tag size");
+static_assert(SecureVoiceTransport::kSealedHeaderBytes ==
+                  voicewire::kSealedHeaderBytes,
+              "sealed header size");
+static_assert(SecureVoiceTransport::kMaxIdBytes == voicewire::kMaxIdBytes,
+              "id cap");
+
 namespace {
 
 constexpr char kMagic[4] = {'B', 'V', 'X', 'S'};
-
-void PutU16(std::string* s, u16 v) {
-  s->push_back((char)(v >> 8));
-  s->push_back((char)v);
-}
-
-u16 GetU16(const char* p) {
-  return (u16)(((u16)(u8)p[0] << 8) | (u8)p[1]);
-}
-
-void PutU64(std::string* s, u64 v) {
-  for (int i = 0; i < 8; ++i) s->push_back((char)(u8)(v >> (8 * (7 - i))));
-}
-
-u64 GetU64(const char* p) {
-  u64 v = 0;
-  for (int i = 0; i < 8; ++i) v = (v << 8) | (u8)p[i];
-  return v;
-}
 
 }  // namespace
 
@@ -105,13 +106,8 @@ u16 SecureVoiceTransport::localPort() const { return sock_.localPort(); }
 bool SecureVoiceTransport::AnnounceNow() {
   if (!open_) return false;
   const std::string& ann = channel_.announce();
-  if (ann.empty()) return false;
   std::string dg;
-  dg.append(kMagic, 4);
-  dg.push_back((char)kVersion);
-  dg.push_back((char)kKindAnnounce);
-  dg.append(ann);
-  if (dg.size() > cfg_.mtu) return false;
+  if (!voicewire::BuildAnnounce(ann, cfg_.mtu, &dg)) return false;
   if (!sock_.SendTo(dg.data(), dg.size(), cfg_.group.c_str(), cfg_.port)) {
     return false;
   }
@@ -129,31 +125,12 @@ bool SecureVoiceTransport::BuildSealed(const VoiceSession& session,
                                        const std::string& speaker, u64 seq,
                                        const std::vector<u8>& adpcm,
                                        std::string* out) const {
-  if (out == nullptr) return false;
-  if (routeTag.size() != kRouteTagBytes) return false;
-  if (speaker.empty() || speaker.size() > kMaxIdBytes) return false;
-  if (adpcm.empty()) return false;
-
-  std::string header;
-  header.append(kMagic, 4);
-  header.push_back((char)kVersion);
-  header.push_back((char)kKindSealedFrame);
-  header.append(routeTag);
-  PutU64(&header, seq);
-  PutU16(&header, (u16)speaker.size());
-  header.push_back(0);   // reserved
-  header.append(speaker);
-
-  std::string sealed;
-  if (!const_cast<VoiceSession&>(session).Seal(
-          seq, header, std::string((const char*)adpcm.data(), adpcm.size()),
-          &sealed)) {
-    return false;
-  }
-  if (header.size() + sealed.size() > cfg_.mtu) return false;
-  header.append(sealed);
-  *out = std::move(header);
-  return true;
+  // The framing is shared with the relay transport (voice_wire.h), so the two
+  // can never drift onto incompatible formats. Seal() is not const, so the
+  // const session reference is cast away — the caller owns the session and has
+  // already serialised access.
+  return voicewire::BuildSealed(const_cast<VoiceSession&>(session), routeTag,
+                                speaker, seq, adpcm, cfg_.mtu, out);
 }
 
 bool SecureVoiceTransport::SendFrame(const std::string& speaker, u32 /*seq*/,
@@ -215,71 +192,32 @@ void SecureVoiceTransport::Poll(const FrameCb& onFrame, int budgetMs) {
       std::lock_guard<std::mutex> lk(mutex_);
       stats_.datagramsReceived++;
     }
-    if (n < (ssize_t)kPrefixBytes) {
+    // The framing is shared with the relay transport (voice_wire.h), so both
+    // parse a datagram identically.
+    const voicewire::Incoming in =
+        voicewire::Decode(buf.data(), (size_t)n, channel_);
+    if (in.kind == voicewire::Incoming::Kind::Announce) {
       std::lock_guard<std::mutex> lk(mutex_);
-      stats_.datagramsDropped++;
+      if (in.accepted) stats_.announcesAccepted++;
+      else stats_.announcesRejected++;
       continue;
     }
-    if (std::memcmp(buf.data(), kMagic, 4) != 0 || (u8)buf[4] != kVersion) {
-      std::lock_guard<std::mutex> lk(mutex_);
-      stats_.datagramsDropped++;
-      continue;
-    }
-    const u8 kind = (u8)buf[5];
-    if (kind == kKindAnnounce) {
-      const std::string ann(buf.data() + kPrefixBytes, (size_t)n - kPrefixBytes);
-      const std::string fp = channel_.AcceptAnnounce(ann);
-      std::lock_guard<std::mutex> lk(mutex_);
-      if (fp.empty()) {
-        stats_.announcesRejected++;
-      } else {
-        stats_.announcesAccepted++;
-      }
-    } else if (kind == kKindSealedFrame) {
-      if ((size_t)n < kSealedHeaderBytes + 1) {
-        std::lock_guard<std::mutex> lk(mutex_);
-        stats_.datagramsDropped++;
-        continue;
-      }
-      const std::string routeTag(buf.data() + kPrefixBytes, kRouteTagBytes);
-      const u64 seq = GetU64(buf.data() + kPrefixBytes + kRouteTagBytes);
-      const size_t idLen = GetU16(buf.data() + kPrefixBytes + kRouteTagBytes + 8);
-      if (idLen == 0 || idLen > kMaxIdBytes ||
-          (size_t)n < kSealedHeaderBytes + idLen + 16) {
-        std::lock_guard<std::mutex> lk(mutex_);
-        stats_.datagramsDropped++;
-        continue;
-      }
-      const size_t idOff = kSealedHeaderBytes;
-      const std::string speaker(buf.data() + idOff, idLen);
-      // The AAD is the header exactly as it arrived, up to and including the id.
-      const std::string aad(buf.data(), idOff + idLen);
-      const std::string sealed(buf.data() + idOff + idLen,
-                               (size_t)n - idOff - idLen);
-
-      VoiceSession* session = channel_.SessionByRoute(routeTag);
-      if (session == nullptr) {
-        std::lock_guard<std::mutex> lk(mutex_);
-        stats_.datagramsDropped++;
-        continue;
-      }
-      std::string plain;
-      if (!session->Open(seq, aad, sealed, &plain) || plain.empty()) {
-        std::lock_guard<std::mutex> lk(mutex_);
-        stats_.datagramsDropped++;
-        continue;
-      }
-      std::vector<u8> adpcm(plain.begin(), plain.end());
+    if (in.kind == voicewire::Incoming::Kind::Frame && in.accepted) {
       {
         std::lock_guard<std::mutex> lk(mutex_);
         stats_.framesReceived++;
       }
       // Invoked outside the lock, so a callback that re-enters cannot deadlock.
-      if (onFrame) onFrame(speaker, (u32)(seq & 0xffffffffu), adpcm, host, port);
-    } else {
-      std::lock_guard<std::mutex> lk(mutex_);
-      stats_.datagramsDropped++;
+      std::vector<u8> adpcm(in.plaintext.begin(), in.plaintext.end());
+      if (onFrame) {
+        onFrame(in.speaker, (u32)(in.seq & 0xffffffffu), adpcm, host, port);
+      }
+      continue;
     }
+    // Anything else (not ours, malformed, unknown route, bad tag, replay) is
+    // dropped; the client stays open.
+    std::lock_guard<std::mutex> lk(mutex_);
+    stats_.datagramsDropped++;
     // Loop until the socket is empty (a 0-ms read returns 0) or the budget is
     // spent, so a frame drains every queued datagram: an announce from a peer
     // that just joined is not starved behind a burst of audio.

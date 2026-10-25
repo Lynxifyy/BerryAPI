@@ -71,8 +71,10 @@ inline const char* kTestKeyPem() {
 class TinyTlsServer {
  public:
   /// Starts listening on `port` (0 lets the kernel choose). Returns the bound
-  /// port, or -1 on failure.
-  int Start(int port) {
+  /// port, or -1 on failure. `body` is the HTTP response body it serves (the
+  /// default "tls-pong"); a caller that needs a JSON body passes one.
+  int Start(int port, const std::string& body = "tls-pong") {
+    body_ = body;
     listenFd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listenFd_ < 0) return -1;
     int one = 1;
@@ -183,12 +185,16 @@ class TinyTlsServer {
       }
       if (!ok) break;
       handshook_ = true;
-      // Echo a short body so the client has something to read.
-      const char* body =
-          "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\n"
-          "tls-pong";
-      const unsigned char* p = (const unsigned char*)body;
-      size_t left = strlen(body);
+      // Echo a short body so the client has something to read. The status line
+      // and Content-Length are computed so a caller's JSON body is served whole.
+      char header[128];
+      std::snprintf(header, sizeof header,
+                    "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\n"
+                    "Connection: close\r\n\r\n",
+                    body_.size());
+      std::string resp = std::string(header) + body_;
+      const unsigned char* p = (const unsigned char*)resp.data();
+      size_t left = resp.size();
       while (left > 0) {
         const int n = mbedtls_ssl_write(&ssl, p, left);
         if (n <= 0) break;
@@ -234,6 +240,7 @@ class TinyTlsServer {
   int listenFd_ = -1;
   std::atomic<int> connFd_{-1};
   int port_ = 0;
+  std::string body_ = "tls-pong";
   std::atomic<bool> running_{false};
   std::atomic<bool> handshook_{false};
   std::string serverErr_;
