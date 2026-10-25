@@ -255,6 +255,7 @@ TEST_SRC := \
   tests/test_room_token.cpp \
   tests/test_multicast_lock.cpp \
   tests/test_replay_format.cpp \
+  tests/test_replay_fuzz.cpp \
   tests/test_replay_capture.cpp \
   tests/test_replay_world.cpp \
   tests/test_replay_review.cpp \
