@@ -36,6 +36,7 @@
 #include "berry/animator.h"
 #include "berry/replay_camera.h"
 #include "berry/radial.h"
+#include "berry/touch.h"
 #include "berry/crystal.h"
 #include "berry/voice.h"
 #include "berry/cosmetic.h"
@@ -205,6 +206,10 @@ class BERRY_API ScriptApi {
     /// Client-side radial (pie) menu. Null makes the `radial.*` bindings fail
     /// closed and the frame hook skip the menu.
     RadialMenu* radial = nullptr;
+    /// Client-side touch, gesture and on-screen button service. Null makes the
+    /// `touch.*` bindings fail closed (edits report false, reads are inert)
+    /// and the frame hook skip the button draw.
+    TouchService* touch = nullptr;
     /// Client-side crystal-placement advisor. Null makes the `crystal.*`
     /// bindings fail closed (an analysis recommends nothing) and the tick hook
     /// skip the advisory overlay. It needs `world` for the entity list the

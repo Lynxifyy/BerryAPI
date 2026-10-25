@@ -558,6 +558,48 @@ Capability: `hud`.
 | `radial.state() -> Table` | `hud` | The current menu state as {open, hovered, selected, progress, items}. `hovered`/`selected` are -1 when none. |
 | `radial.sector_at(pointer_x: number, pointer_y: number, center_x: number, center_y: number, inner_radius: number, outer_radius: number, count: number) -> number` | `hud` | The sector under a pointer relative to a centre for `count` sectors, or -1 for the dead zone or outside the ring. Pure: it reads no state, so it pins the geometry. |
 
+## Touch
+
+Capability: `input`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `touch.pointer_down(id: number, x: number, y: number, now_ms: number) -> bool` | `input` | Records a finger going down at (x, y) with the engine's finger id. False when the pointer table (10 fingers) is full. |
+| `touch.pointer_move(id: number, x: number, y: number, now_ms: number) -> nil` | `input` | Records a finger moving. Ignored when the id is not down. |
+| `touch.pointer_up(id: number, x: number, y: number, now_ms: number) -> nil` | `input` | Records a finger lifting and resolves the single-finger gesture (tap, double tap or swipe) it completes. |
+| `touch.clear_pointers() -> nil` | `input` | Drops every pointer, e.g. on a focus loss or screen change. |
+| `touch.pointer_count() -> number` | `input` | How many fingers are down. |
+| `touch.pointers() -> Table` | `input` | The fingers currently down, oldest first, as a table keyed \"0\",\"1\",… of {id, x, y, start_x, start_y, down_ms}. |
+| `touch.update(now_ms: number) -> nil` | `input` | Advances the recogniser (long press, drag, pinch, rotate) and hit-tests the on-screen buttons against the primary finger for this frame. |
+| `touch.set_gesture_enabled(gesture: string, enabled: bool) -> bool` | `input` | Enables or disables one gesture (by name: tap, double_tap, long_press, drag, swipe, pinch, rotate). False for an unknown name. |
+| `touch.gesture_enabled(gesture: string) -> bool` | `input` | Whether a gesture is enabled. False for an unknown name. |
+| `touch.gesture_mask() -> number` | `input` | The enabled-gesture mask as a bit set (tap=1, double_tap=2, long_press=4, drag=8, swipe=16, pinch=32, rotate=64). |
+| `touch.last_gesture() -> Table` | `input` | The last recognised gesture as {kind, dir, x, y, dx, dy, magnitude, pointers, at_ms}. `kind` is \"none\" before any gesture. |
+| `touch.config() -> Table` | `input` | The recogniser thresholds as {tap_max_move, tap_max_ms, long_press_ms, double_tap_max_ms, swipe_min_dist, swipe_max_ms, pinch_min_scale}. |
+| `touch.set_tap_max_move(px: number) -> bool` | `input` | Sets the movement that still counts as a tap, in pixels. Must be finite and positive; a bad value is refused. |
+| `touch.set_tap_max_ms(ms: number) -> bool` | `input` | Sets the duration that still counts as a tap, in milliseconds. Must be finite and positive. |
+| `touch.set_long_press_ms(ms: number) -> bool` | `input` | Sets the hold time before a long press fires, in milliseconds. Must be finite and positive. |
+| `touch.set_double_tap_max_ms(ms: number) -> bool` | `input` | Sets the window for a second tap to become a double tap, in milliseconds. Must be finite and positive. |
+| `touch.set_swipe_min_dist(px: number) -> bool` | `input` | Sets the travel that makes a release a swipe, in pixels. Must be finite and positive. |
+| `touch.set_swipe_max_ms(ms: number) -> bool` | `input` | Sets the maximum duration of a swipe, in milliseconds. Must be finite and positive. |
+| `touch.set_pinch_min_scale(scale: number) -> bool` | `input` | Sets the separation change that fires a pinch, as a scale fraction. Must be finite, positive and at most 1. |
+| `touch.swipe_direction(dx: number, dy: number, min_dist: number) -> string` | `input` | The direction a swipe of (dx, dy) travels — up, down, left or right — or \"none\" when it is shorter than `min_dist`. Pure: it reads no state, so it pins the geometry. |
+| `touch.add_button(label: string, min_x: number, min_y: number, max_x: number, max_y: number) -> bool` | `input` | Adds an on-screen button covering (min_x, min_y)..(max_x, max_y). False when the label is empty, longer than 24 bytes or non-printable, the rectangle is not finite or not positive-area, or the button cap (24) is reached. |
+| `touch.remove_button(index: number) -> bool` | `input` | Removes the button at `index`. False when out of range. |
+| `touch.clear_buttons() -> nil` | `input` | Removes every button. |
+| `touch.button_count() -> number` | `input` | How many buttons exist. |
+| `touch.button_label(index: number) -> string` | `input` | The label at `index`, or an empty string when out of range. |
+| `touch.button_enabled(index: number) -> bool` | `input` | Whether the button at `index` is enabled; false when out of range. |
+| `touch.set_button_enabled(index: number, enabled: bool) -> bool` | `input` | Enables or disables the button at `index`. False when out of range. |
+| `touch.set_button_intent(index: number, intent: string) -> bool` | `input` | Sets the intent the button requests on press (an intent name such as \"zoom\"; empty clears it). False when out of range or the name is not a bounded identifier. |
+| `touch.button_intent(index: number) -> string` | `input` | The intent the button at `index` requests, or an empty string. |
+| `touch.button_state(index: number) -> Table` | `input` | A snapshot of the button at `index` as {label, enabled, held, toggled, allowed, presses, releases}. `allowed` is false when the button's intent is refused by this server's policy. |
+| `touch.state() -> Table` | `input` | The overall touch state as {pointers, buttons, gesture}. `gesture` is the last gesture table. |
+
+Events (await with `Events.once`):
+
+- `touchGesture(gesture: string)` — -
+
 ## Crystal
 
 Capability: `crystal`.

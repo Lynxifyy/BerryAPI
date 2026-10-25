@@ -515,6 +515,19 @@ void ScriptApi::InitFrameHook() {
             services_.radial->Draw(*services_.renderer, center);
           }
         }
+        // The touch service advances its recogniser and draws the on-screen
+        // buttons each frame, after the radial menu. The pointers are fed by
+        // the game's input hook (the device adapter) and the buttons are
+        // authored by the script; this hook owns the per-frame update and the
+        // draw, and validates each button's intent against the session policy
+        // so a script can grey out what this server forbids.
+        if (services_.touch && services_.renderer) {
+          const Vec2 screen = screenSize();
+          if (screen.x > 0 && screen.y > 0) {
+            services_.touch->Update(NowMs(), services_.intents);
+            services_.touch->Draw(*services_.renderer);
+          }
+        }
         // The replay review draws its fight-review overlay through the same
         // Renderer, after the other overlays. It is a read-only reconstruction
         // of the loaded replay, so it can only ever show what the client was
@@ -3593,6 +3606,271 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     const f64 count = args[6].AsNumber();
     if (!std::isfinite(count) || count < 0.0 || count > 64.0) return ScriptValue::Num(-1);
     return ScriptValue::Num((f64)RadialMenu::SectorFor(pointer, center, inner, outer, (size_t)count));
+  });
+
+  //--- Touch (gestures + on-screen buttons) --------------------------------
+  //
+  // The game's input hook feeds raw multi-touch here; the recogniser turns it
+  // into the gestures a mobile mod acts on and owns the on-screen buttons. The
+  // script authors config/buttons and reads state; the feed and the per-frame
+  // update are the engine's. A call with no service bound fails closed (the HUD
+  // convention, not an error): edits report false, reads are inert, and the
+  // pure helpers (`swipe_direction`) still answer. A button's intent is
+  // validated against the session's policy in `update`, so a script can grey
+  // out what this server forbids without a second policy check of its own.
+  auto touch = [this]() -> TouchService* { return services_.touch; };
+
+  auto gestureTable = [](const TouchGesture& g) {
+    ScriptTable t;
+    t["kind"] = ScriptValue::Str(GestureKindName(g.kind));
+    t["dir"] = ScriptValue::Str(SwipeDirName(g.dir));
+    t["x"] = ScriptValue::Num((f64)g.at.x);
+    t["y"] = ScriptValue::Num((f64)g.at.y);
+    t["dx"] = ScriptValue::Num((f64)g.delta.x);
+    t["dy"] = ScriptValue::Num((f64)g.delta.y);
+    t["magnitude"] = ScriptValue::Num((f64)g.magnitude);
+    t["pointers"] = ScriptValue::Num((f64)g.pointers);
+    t["at_ms"] = ScriptValue::Num((f64)g.atMs);
+    return t;
+  };
+
+  install("touch.pointer_down", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    if (!t) return ScriptValue::Bool(false);
+    const f64 id = args[0].AsNumber();
+    if (!std::isfinite(id) || id < 0.0 || id > 4294967295.0) return ScriptValue::Bool(false);
+    const Vec2 pos((f32)args[1].AsNumber(), (f32)args[2].AsNumber());
+    const f64 now = args[3].AsNumber();
+    return ScriptValue::Bool(t->OnPointerDown((u32)id, pos,
+        std::isfinite(now) && now >= 0.0 ? (u64)now : 0));
+  });
+
+  install("touch.pointer_move", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    if (!t) return ScriptValue::Nil();
+    const f64 id = args[0].AsNumber();
+    if (!std::isfinite(id) || id < 0.0 || id > 4294967295.0) return ScriptValue::Nil();
+    const Vec2 pos((f32)args[1].AsNumber(), (f32)args[2].AsNumber());
+    const f64 now = args[3].AsNumber();
+    t->OnPointerMove((u32)id, pos, std::isfinite(now) && now >= 0.0 ? (u64)now : 0);
+    return ScriptValue::Nil();
+  });
+
+  install("touch.pointer_up", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    if (!t) return ScriptValue::Nil();
+    const f64 id = args[0].AsNumber();
+    if (!std::isfinite(id) || id < 0.0 || id > 4294967295.0) return ScriptValue::Nil();
+    const Vec2 pos((f32)args[1].AsNumber(), (f32)args[2].AsNumber());
+    const f64 now = args[3].AsNumber();
+    t->OnPointerUp((u32)id, pos, std::isfinite(now) && now >= 0.0 ? (u64)now : 0);
+    return ScriptValue::Nil();
+  });
+
+  install("touch.clear_pointers", [touch](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (TouchService* t = touch()) t->ClearPointers();
+    return ScriptValue::Nil();
+  });
+
+  install("touch.pointer_count", [touch](ScriptContext&, const std::vector<ScriptValue>&) {
+    TouchService* t = touch();
+    return ScriptValue::Num(t ? (f64)t->state().pointers : 0.0);
+  });
+
+  install("touch.pointers", [touch](ScriptContext&, const std::vector<ScriptValue>&) {
+    ScriptTable t;
+    if (TouchService* s = touch()) {
+      const std::vector<TouchPointer> pts = s->pointers();
+      for (size_t i = 0; i < pts.size(); ++i) {
+        ScriptTable p;
+        p["id"] = ScriptValue::Num((f64)pts[i].id);
+        p["x"] = ScriptValue::Num((f64)pts[i].pos.x);
+        p["y"] = ScriptValue::Num((f64)pts[i].pos.y);
+        p["start_x"] = ScriptValue::Num((f64)pts[i].start.x);
+        p["start_y"] = ScriptValue::Num((f64)pts[i].start.y);
+        p["down_ms"] = ScriptValue::Num((f64)pts[i].downMs);
+        t[std::to_string(i)] = ScriptValue::Tbl(std::move(p));
+      }
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("touch.update", [this, touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    if (!t) return ScriptValue::Nil();
+    const f64 now = args[0].AsNumber();
+    t->Update(std::isfinite(now) && now >= 0.0 ? (u64)now : 0, services_.intents);
+    return ScriptValue::Nil();
+  });
+
+  install("touch.set_gesture_enabled", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    if (!t) return ScriptValue::Bool(false);
+    const GestureKind k = GestureKindFromName(args[0].AsString());
+    if (k == GestureKind::None) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(t->SetGestureEnabled(k, args[1].IsBool() ? args[1].boolean : true));
+  });
+
+  install("touch.gesture_enabled", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    if (!t) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(t->gestureEnabled(GestureKindFromName(args[0].AsString())));
+  });
+
+  install("touch.gesture_mask", [touch](ScriptContext&, const std::vector<ScriptValue>&) {
+    TouchService* t = touch();
+    return ScriptValue::Num(t ? (f64)t->gestureMask() : 0.0);
+  });
+
+  install("touch.last_gesture", [gestureTable, touch](ScriptContext&, const std::vector<ScriptValue>&) {
+    TouchGesture g;
+    if (TouchService* t = touch()) g = t->lastGesture();
+    return ScriptValue::Tbl(gestureTable(g));
+  });
+
+  install("touch.config", [touch](ScriptContext&, const std::vector<ScriptValue>&) {
+    TouchConfig c;
+    if (TouchService* t = touch()) c = t->config();
+    ScriptTable t;
+    t["tap_max_move"] = ScriptValue::Num((f64)c.tapMaxMove);
+    t["tap_max_ms"] = ScriptValue::Num((f64)c.tapMaxMs);
+    t["long_press_ms"] = ScriptValue::Num((f64)c.longPressMs);
+    t["double_tap_max_ms"] = ScriptValue::Num((f64)c.doubleTapMaxMs);
+    t["swipe_min_dist"] = ScriptValue::Num((f64)c.swipeMinDist);
+    t["swipe_max_ms"] = ScriptValue::Num((f64)c.swipeMaxMs);
+    t["pinch_min_scale"] = ScriptValue::Num((f64)c.pinchMinScale);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("touch.set_tap_max_move", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    return ScriptValue::Bool(t && t->SetTapMaxMove((f32)args[0].AsNumber()));
+  });
+  install("touch.set_tap_max_ms", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    return ScriptValue::Bool(t && t->SetTapMaxMs((f32)args[0].AsNumber()));
+  });
+  install("touch.set_long_press_ms", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    return ScriptValue::Bool(t && t->SetLongPressMs((f32)args[0].AsNumber()));
+  });
+  install("touch.set_double_tap_max_ms", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    return ScriptValue::Bool(t && t->SetDoubleTapMaxMs((f32)args[0].AsNumber()));
+  });
+  install("touch.set_swipe_min_dist", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    return ScriptValue::Bool(t && t->SetSwipeMinDist((f32)args[0].AsNumber()));
+  });
+  install("touch.set_swipe_max_ms", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    return ScriptValue::Bool(t && t->SetSwipeMaxMs((f32)args[0].AsNumber()));
+  });
+  install("touch.set_pinch_min_scale", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    return ScriptValue::Bool(t && t->SetPinchMinScale((f32)args[0].AsNumber()));
+  });
+
+  install("touch.swipe_direction", [](ScriptContext&, const std::vector<ScriptValue>& args) {
+    const Vec2 delta((f32)args[0].AsNumber(), (f32)args[1].AsNumber());
+    const f32 minDist = (f32)args[2].AsNumber();
+    return ScriptValue::Str(SwipeDirName(TouchService::SwipeDirectionOf(delta, minDist)));
+  });
+
+  install("touch.add_button", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    if (!t) return ScriptValue::Bool(false);
+    const Vec2 mn((f32)args[1].AsNumber(), (f32)args[2].AsNumber());
+    const Vec2 mx((f32)args[3].AsNumber(), (f32)args[4].AsNumber());
+    return ScriptValue::Bool(t->AddButton(args[0].AsString(), mn, mx));
+  });
+
+  install("touch.remove_button", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    if (!t) return ScriptValue::Bool(false);
+    const f64 idx = args[0].AsNumber();
+    if (!std::isfinite(idx) || idx < 0.0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(t->RemoveButton((size_t)idx));
+  });
+
+  install("touch.clear_buttons", [touch](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (TouchService* t = touch()) t->ClearButtons();
+    return ScriptValue::Nil();
+  });
+
+  install("touch.button_count", [touch](ScriptContext&, const std::vector<ScriptValue>&) {
+    TouchService* t = touch();
+    return ScriptValue::Num(t ? (f64)t->buttonCount() : 0.0);
+  });
+
+  install("touch.button_label", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    if (!t) return ScriptValue::Str(std::string());
+    const f64 idx = args[0].AsNumber();
+    if (!std::isfinite(idx) || idx < 0.0) return ScriptValue::Str(std::string());
+    return ScriptValue::Str(t->buttonLabel((size_t)idx));
+  });
+
+  install("touch.button_enabled", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    if (!t) return ScriptValue::Bool(false);
+    const f64 idx = args[0].AsNumber();
+    if (!std::isfinite(idx) || idx < 0.0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(t->buttonEnabled((size_t)idx));
+  });
+
+  install("touch.set_button_enabled", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    if (!t) return ScriptValue::Bool(false);
+    const f64 idx = args[0].AsNumber();
+    if (!std::isfinite(idx) || idx < 0.0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(t->SetButtonEnabled((size_t)idx,
+        args[1].IsBool() ? args[1].boolean : true));
+  });
+
+  install("touch.set_button_intent", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    if (!t) return ScriptValue::Bool(false);
+    const f64 idx = args[0].AsNumber();
+    if (!std::isfinite(idx) || idx < 0.0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(t->SetButtonIntent((size_t)idx, args[1].AsString()));
+  });
+
+  install("touch.button_intent", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    if (!t) return ScriptValue::Str(std::string());
+    const f64 idx = args[0].AsNumber();
+    if (!std::isfinite(idx) || idx < 0.0) return ScriptValue::Str(std::string());
+    return ScriptValue::Str(t->buttonIntent((size_t)idx));
+  });
+
+  install("touch.button_state", [touch](ScriptContext&, const std::vector<ScriptValue>& args) {
+    TouchService* t = touch();
+    ScriptTable out;
+    if (t) {
+      const f64 idx = args[0].AsNumber();
+      if (std::isfinite(idx) && idx >= 0.0) {
+        const TouchButton b = t->buttonState((size_t)idx);
+        out["label"] = ScriptValue::Str(b.label);
+        out["enabled"] = ScriptValue::Bool(b.enabled);
+        out["held"] = ScriptValue::Bool(b.held);
+        out["toggled"] = ScriptValue::Bool(b.toggled);
+        out["allowed"] = ScriptValue::Bool(b.allowed);
+        out["presses"] = ScriptValue::Num((f64)b.presses);
+        out["releases"] = ScriptValue::Num((f64)b.releases);
+      }
+    }
+    return ScriptValue::Tbl(std::move(out));
+  });
+
+  install("touch.state", [gestureTable, touch](ScriptContext&, const std::vector<ScriptValue>&) {
+    TouchState s;
+    if (TouchService* t = touch()) s = t->state();
+    ScriptTable t;
+    t["pointers"] = ScriptValue::Num((f64)s.pointers);
+    t["buttons"] = ScriptValue::Num((f64)s.buttons);
+    t["gesture"] = ScriptValue::Tbl(gestureTable(s.gesture));
+    return ScriptValue::Tbl(std::move(t));
   });
 
   //--- Crystal (client-side placement advisor) -----------------------------

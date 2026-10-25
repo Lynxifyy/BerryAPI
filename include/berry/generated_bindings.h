@@ -367,6 +367,37 @@ inline const BindingSpec* BindingSpecs() {
       {"radial.set_open_ms", CapKind::Hud, 1, "Radial"},
       {"radial.state", CapKind::Hud, 0, "Radial"},
       {"radial.sector_at", CapKind::Hud, 7, "Radial"},
+      {"touch.pointer_down", CapKind::Input, 4, "Touch"},
+      {"touch.pointer_move", CapKind::Input, 4, "Touch"},
+      {"touch.pointer_up", CapKind::Input, 4, "Touch"},
+      {"touch.clear_pointers", CapKind::Input, 0, "Touch"},
+      {"touch.pointer_count", CapKind::Input, 0, "Touch"},
+      {"touch.pointers", CapKind::Input, 0, "Touch"},
+      {"touch.update", CapKind::Input, 1, "Touch"},
+      {"touch.set_gesture_enabled", CapKind::Input, 2, "Touch"},
+      {"touch.gesture_enabled", CapKind::Input, 1, "Touch"},
+      {"touch.gesture_mask", CapKind::Input, 0, "Touch"},
+      {"touch.last_gesture", CapKind::Input, 0, "Touch"},
+      {"touch.config", CapKind::Input, 0, "Touch"},
+      {"touch.set_tap_max_move", CapKind::Input, 1, "Touch"},
+      {"touch.set_tap_max_ms", CapKind::Input, 1, "Touch"},
+      {"touch.set_long_press_ms", CapKind::Input, 1, "Touch"},
+      {"touch.set_double_tap_max_ms", CapKind::Input, 1, "Touch"},
+      {"touch.set_swipe_min_dist", CapKind::Input, 1, "Touch"},
+      {"touch.set_swipe_max_ms", CapKind::Input, 1, "Touch"},
+      {"touch.set_pinch_min_scale", CapKind::Input, 1, "Touch"},
+      {"touch.swipe_direction", CapKind::Input, 3, "Touch"},
+      {"touch.add_button", CapKind::Input, 5, "Touch"},
+      {"touch.remove_button", CapKind::Input, 1, "Touch"},
+      {"touch.clear_buttons", CapKind::Input, 0, "Touch"},
+      {"touch.button_count", CapKind::Input, 0, "Touch"},
+      {"touch.button_label", CapKind::Input, 1, "Touch"},
+      {"touch.button_enabled", CapKind::Input, 1, "Touch"},
+      {"touch.set_button_enabled", CapKind::Input, 2, "Touch"},
+      {"touch.set_button_intent", CapKind::Input, 2, "Touch"},
+      {"touch.button_intent", CapKind::Input, 1, "Touch"},
+      {"touch.button_state", CapKind::Input, 1, "Touch"},
+      {"touch.state", CapKind::Input, 0, "Touch"},
       {"crystal.config", CapKind::Crystal, 0, "Crystal"},
       {"crystal.set_range", CapKind::Crystal, 1, "Crystal"},
       {"crystal.set_blast_radius", CapKind::Crystal, 1, "Crystal"},
@@ -452,7 +483,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 427; }
+inline size_t BindingSpecCount() { return 458; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -871,6 +902,39 @@ inline const char* const kRadialNames[] = {
     "radial.state",
     "radial.sector_at",
 };
+inline const char* const kTouchNames[] = {
+    "touch.pointer_down",
+    "touch.pointer_move",
+    "touch.pointer_up",
+    "touch.clear_pointers",
+    "touch.pointer_count",
+    "touch.pointers",
+    "touch.update",
+    "touch.set_gesture_enabled",
+    "touch.gesture_enabled",
+    "touch.gesture_mask",
+    "touch.last_gesture",
+    "touch.config",
+    "touch.set_tap_max_move",
+    "touch.set_tap_max_ms",
+    "touch.set_long_press_ms",
+    "touch.set_double_tap_max_ms",
+    "touch.set_swipe_min_dist",
+    "touch.set_swipe_max_ms",
+    "touch.set_pinch_min_scale",
+    "touch.swipe_direction",
+    "touch.add_button",
+    "touch.remove_button",
+    "touch.clear_buttons",
+    "touch.button_count",
+    "touch.button_label",
+    "touch.button_enabled",
+    "touch.set_button_enabled",
+    "touch.set_button_intent",
+    "touch.button_intent",
+    "touch.button_state",
+    "touch.state",
+};
 inline const char* const kCrystalNames[] = {
     "crystal.config",
     "crystal.set_range",
@@ -988,6 +1052,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Record", kRecordNames, 14},
       {"Replay", kReplayNames, 32},
       {"Radial", kRadialNames, 18},
+      {"Touch", kTouchNames, 31},
       {"Crystal", kCrystalNames, 19},
       {"Voice", kVoiceNames, 22},
       {"ReplayMod", kReplayModNames, 40},
@@ -995,7 +1060,7 @@ inline const ModuleBindings* ModuleBindingTable() {
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 30; }
+inline size_t ModuleBindingCount() { return 31; }
 
 // Event channel declared in the IDL. A declared channel is
 // bridged from the engine bus by the script bus; a script may
@@ -1025,11 +1090,12 @@ inline const EventSpec* EventSpecs() {
       {"combatMissed", "Events", 1},
       {"radialSelected", "Events", 1},
       {"crystalAdvice", "Events", 1},
+      {"touchGesture", "Touch", 1},
   };
   return kEvents;
 }
 
-inline size_t EventSpecCount() { return 15; }
+inline size_t EventSpecCount() { return 16; }
 
 }  // namespace api
 }  // namespace Berry

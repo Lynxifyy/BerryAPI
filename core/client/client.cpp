@@ -60,6 +60,7 @@ bool BerryClient::Attach(Engine& engine, const ClientConfig& cfg) {
   ui_ = std::make_unique<UiLayer>();
   pvp_ = std::make_unique<PvpOverlay>();
   radial_ = std::make_unique<RadialMenu>();
+  touch_ = std::make_unique<TouchService>();
   animator_ = std::make_unique<Animator>();
   combatState_ = std::make_unique<CombatStateTracker>();
   cosmetics_ = std::make_unique<CosmeticService>();
@@ -263,6 +264,7 @@ void BerryClient::BuildServices() {
   s.animatorSeam = animatorSeam_.get();
   s.replayCamera = replayCamera_.get();
   s.radial = radial_.get();
+  s.touch = touch_.get();
   s.crystal = crystal_.get();
   s.voice = voice_.get();
   s.discovery = discovery_.get();

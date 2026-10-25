@@ -22,6 +22,7 @@ CORE_SRC := \
   core/modules/animator.cpp \
   core/modules/replay_camera.cpp \
   core/modules/radial.cpp \
+  core/modules/touch.cpp \
   core/modules/crystal.cpp \
   core/modules/voice.cpp \
   core/modules/voice_crypto.cpp \
@@ -251,6 +252,7 @@ TEST_SRC := \
   tests/test_animator.cpp \
   tests/test_replay_camera.cpp \
   tests/test_radial.cpp \
+  tests/test_touch.cpp \
   tests/test_crystal.cpp \
   tests/test_voice.cpp \
   tests/test_voice_crypto.cpp \

@@ -2721,6 +2721,114 @@ static void TestFrameHookDrawsRadialMenu() {
   CHECK(seam.texts == 3);      // one label per item
 }
 
+static void TestTouchBindings() {
+  TouchService touch;
+  IntentValidator intents;
+
+  ScriptApi::Services services;
+  services.touch = &touch;
+  services.intents = &intents;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"input"};
+
+  // Feed a tap through the bindings.
+  CHECK(Call(bindings, "touch.pointer_down",
+             {ScriptValue::Num(1), ScriptValue::Num(100), ScriptValue::Num(100),
+              ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "touch.pointer_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  CHECK(Call(bindings, "touch.pointer_up",
+             {ScriptValue::Num(1), ScriptValue::Num(100), ScriptValue::Num(100),
+              ScriptValue::Num(40)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "touch.last_gesture", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  const ScriptValue* kind = out.Field("kind");
+  CHECK(kind && kind->AsString() == "tap");
+
+  // A non-finite / out-of-range id is refused, not truncated.
+  CHECK(Call(bindings, "touch.pointer_down",
+             {ScriptValue::Num(-1), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  // The pure helper answers without any feed.
+  CHECK(Call(bindings, "touch.swipe_direction",
+             {ScriptValue::Num(0), ScriptValue::Num(-80), ScriptValue::Num(48)},
+             caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "up");
+
+  // Gesture toggles.
+  CHECK(Call(bindings, "touch.set_gesture_enabled",
+             {ScriptValue::Str("tap"), ScriptValue::Bool(false)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "touch.gesture_enabled",
+             {ScriptValue::Str("tap")}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "touch.set_gesture_enabled",
+             {ScriptValue::Str("nope"), ScriptValue::Bool(true)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  // Button authoring + state.
+  CHECK(Call(bindings, "touch.add_button",
+             {ScriptValue::Str("Jump"), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(80), ScriptValue::Num(60)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "touch.button_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  CHECK(Call(bindings, "touch.button_label", {ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "Jump");
+  CHECK(Call(bindings, "touch.set_button_intent",
+             {ScriptValue::Num(0), ScriptValue::Str("zoom")}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "touch.button_state", {ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  const ScriptValue* label = out.Field("label");
+  CHECK(label && label->AsString() == "Jump");
+
+  // Config read-back + a refused setter.
+  CHECK(Call(bindings, "touch.config", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(Call(bindings, "touch.set_tap_max_move", {ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  // The capability gate: without the input grant the call is denied.
+  ScriptHost host("touch-test", Grant({"hud"}), nullptr);
+  host.SetBindings(&bindings);
+  CHECK(host.CallBinding("touch.pointer_count", {}, &out) == ScriptStatus::CapabilityDenied);
+}
+
+static void TestTouchFailsClosedWithoutService() {
+  ScriptApi::Services services;   // no touch service
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"input"};
+  // Edits report false, reads are inert, and the pure helper still answers.
+  CHECK(Call(bindings, "touch.pointer_down",
+             {ScriptValue::Num(1), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "touch.pointer_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "touch.add_button",
+             {ScriptValue::Str("X"), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(10), ScriptValue::Num(10)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "touch.last_gesture", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(Call(bindings, "touch.swipe_direction",
+             {ScriptValue::Num(80), ScriptValue::Num(0), ScriptValue::Num(48)},
+             caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "right");
+}
+
 static void TestCrystalBindings() {
   std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
   WorldHandle* world = worldMod->Service<WorldHandle>();
@@ -3195,6 +3303,8 @@ int main() {
   TestFrameHookPresentsUi();
   TestRadialBindings();
   TestRadialFailsClosedWithoutService();
+  TestTouchBindings();
+  TestTouchFailsClosedWithoutService();
   TestFrameHookDrawsRadialMenu();
   TestCrystalBindings();
   TestCrystalFailsClosedWithoutService();

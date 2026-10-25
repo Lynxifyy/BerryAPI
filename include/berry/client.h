@@ -53,6 +53,7 @@
 #include "berry/perf.h"
 #include "berry/pvp.h"
 #include "berry/radial.h"
+#include "berry/touch.h"
 #include "berry/render.h"
 #include "berry/render_backend.h"
 #include "berry/replay_camera.h"
@@ -337,6 +338,7 @@ class BERRY_API BerryClient {
   Hud& hud() { return *hud_; }
   PvpOverlay& pvp() { return *pvp_; }
   RadialMenu& radial() { return *radial_; }
+  TouchService& touch() { return *touch_; }
   Animator& animator() { return *animator_; }
   CombatStateTracker& combatState() { return *combatState_; }
   CosmeticService& cosmetics() { return *cosmetics_; }
@@ -468,6 +470,7 @@ class BERRY_API BerryClient {
   std::unique_ptr<UiLayer> ui_;
   std::unique_ptr<PvpOverlay> pvp_;
   std::unique_ptr<RadialMenu> radial_;
+  std::unique_ptr<TouchService> touch_;
   std::unique_ptr<Animator> animator_;
   std::unique_ptr<CombatStateTracker> combatState_;
   std::unique_ptr<CosmeticService> cosmetics_;

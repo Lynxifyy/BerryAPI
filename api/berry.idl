@@ -709,6 +709,74 @@ module Radial {
   fn sector_at(pointer_x: number, pointer_y: number, center_x: number, center_y: number, inner_radius: number, outer_radius: number, count: number) -> number
 }
 
+module Touch {
+  capability input
+  doc "Client-side touch, gesture and on-screen button API. The game's input hook feeds raw multi-touch (down/move/up per finger); this layer turns that stream into the gestures a mobile mod acts on — tap, double tap, long press, drag, swipe, pinch and rotate — and owns the on-screen buttons a mobile mod needs (a labelled rectangle that reports press/release and can request a policy-gated intent). Everything here is local by construction: every value comes from the player's own finger on the player's own screen, so nothing is revealed that the client was not already shown. Recognition is deterministic and clock-driven, so the whole model is testable without a device. A gesture is published on the `touchGesture` channel with a \"kind,dir,x,y,magnitude,pointers\" payload, and a button's optional intent is validated against the server policy so a script can grey out what this server forbids."
+  doc "Records a finger going down at (x, y) with the engine's finger id. False when the pointer table (10 fingers) is full."
+  fn pointer_down(id: number, x: number, y: number, now_ms: number) -> bool
+  doc "Records a finger moving. Ignored when the id is not down."
+  fn pointer_move(id: number, x: number, y: number, now_ms: number) -> nil
+  doc "Records a finger lifting and resolves the single-finger gesture (tap, double tap or swipe) it completes."
+  fn pointer_up(id: number, x: number, y: number, now_ms: number) -> nil
+  doc "Drops every pointer, e.g. on a focus loss or screen change."
+  fn clear_pointers() -> nil
+  doc "How many fingers are down."
+  fn pointer_count() -> number
+  doc "The fingers currently down, oldest first, as a table keyed \"0\",\"1\",… of {id, x, y, start_x, start_y, down_ms}."
+  fn pointers() -> Table
+  doc "Advances the recogniser (long press, drag, pinch, rotate) and hit-tests the on-screen buttons against the primary finger for this frame."
+  fn update(now_ms: number) -> nil
+  doc "Enables or disables one gesture (by name: tap, double_tap, long_press, drag, swipe, pinch, rotate). False for an unknown name."
+  fn set_gesture_enabled(gesture: string, enabled: bool) -> bool
+  doc "Whether a gesture is enabled. False for an unknown name."
+  fn gesture_enabled(gesture: string) -> bool
+  doc "The enabled-gesture mask as a bit set (tap=1, double_tap=2, long_press=4, drag=8, swipe=16, pinch=32, rotate=64)."
+  fn gesture_mask() -> number
+  doc "The last recognised gesture as {kind, dir, x, y, dx, dy, magnitude, pointers, at_ms}. `kind` is \"none\" before any gesture."
+  fn last_gesture() -> Table
+  doc "The recogniser thresholds as {tap_max_move, tap_max_ms, long_press_ms, double_tap_max_ms, swipe_min_dist, swipe_max_ms, pinch_min_scale}."
+  fn config() -> Table
+  doc "Sets the movement that still counts as a tap, in pixels. Must be finite and positive; a bad value is refused."
+  fn set_tap_max_move(px: number) -> bool
+  doc "Sets the duration that still counts as a tap, in milliseconds. Must be finite and positive."
+  fn set_tap_max_ms(ms: number) -> bool
+  doc "Sets the hold time before a long press fires, in milliseconds. Must be finite and positive."
+  fn set_long_press_ms(ms: number) -> bool
+  doc "Sets the window for a second tap to become a double tap, in milliseconds. Must be finite and positive."
+  fn set_double_tap_max_ms(ms: number) -> bool
+  doc "Sets the travel that makes a release a swipe, in pixels. Must be finite and positive."
+  fn set_swipe_min_dist(px: number) -> bool
+  doc "Sets the maximum duration of a swipe, in milliseconds. Must be finite and positive."
+  fn set_swipe_max_ms(ms: number) -> bool
+  doc "Sets the separation change that fires a pinch, as a scale fraction. Must be finite, positive and at most 1."
+  fn set_pinch_min_scale(scale: number) -> bool
+  doc "The direction a swipe of (dx, dy) travels — up, down, left or right — or \"none\" when it is shorter than `min_dist`. Pure: it reads no state, so it pins the geometry."
+  fn swipe_direction(dx: number, dy: number, min_dist: number) -> string
+  doc "Adds an on-screen button covering (min_x, min_y)..(max_x, max_y). False when the label is empty, longer than 24 bytes or non-printable, the rectangle is not finite or not positive-area, or the button cap (24) is reached."
+  fn add_button(label: string, min_x: number, min_y: number, max_x: number, max_y: number) -> bool
+  doc "Removes the button at `index`. False when out of range."
+  fn remove_button(index: number) -> bool
+  doc "Removes every button."
+  fn clear_buttons() -> nil
+  doc "How many buttons exist."
+  fn button_count() -> number
+  doc "The label at `index`, or an empty string when out of range."
+  fn button_label(index: number) -> string
+  doc "Whether the button at `index` is enabled; false when out of range."
+  fn button_enabled(index: number) -> bool
+  doc "Enables or disables the button at `index`. False when out of range."
+  fn set_button_enabled(index: number, enabled: bool) -> bool
+  doc "Sets the intent the button requests on press (an intent name such as \"zoom\"; empty clears it). False when out of range or the name is not a bounded identifier."
+  fn set_button_intent(index: number, intent: string) -> bool
+  doc "The intent the button at `index` requests, or an empty string."
+  fn button_intent(index: number) -> string
+  doc "A snapshot of the button at `index` as {label, enabled, held, toggled, allowed, presses, releases}. `allowed` is false when the button's intent is refused by this server's policy."
+  fn button_state(index: number) -> Table
+  doc "The overall touch state as {pointers, buttons, gesture}. `gesture` is the last gesture table."
+  fn state() -> Table
+  event touchGesture(gesture: string)
+}
+
 module Crystal {
   capability crystal
   doc "Client-side crystal-placement advisor. It answers one question a crystal-PvP player asks every fight: where is the best place to drop a crystal from here? It reads the entities the world grid already delivered and the blocks the level seam already answers, ranks candidate spots by the damage they would deal, and reports the ranking to the script. It never places a block, never sends a packet and never writes to the game: a crystal blast is an explosion the player triggers, and this only measures where it would hurt most. The damage figure is an ESTIMATE, not the engine's number — a crystal's blast falls off linearly with distance, so the model is `maxDamage * clamp(1 - distance / blastRadius, 0, 1)` measured to each target's hitbox, and a script must not treat it as authoritative. The self-damage term uses the same falloff from the placer, so a spot that would blow the placer up ranks below one that will not. Candidate generation is bounded (place range, level count, total candidates) and every bad value is refused rather than clamped, so one call can never walk the world."
