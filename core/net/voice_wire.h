@@ -13,6 +13,7 @@
 
 #include "berry/types.h"
 #include "berry/voice_crypto.h"
+#include "relay_wire.h"  // relaywire:: — shared by both UDP relays
 
 #include <cstring>
 #include <string>
@@ -171,65 +172,4 @@ inline Incoming Decode(const char* data, size_t n, VoiceSecureChannel& channel) 
 
 }  // namespace voicewire
 
-// ---------------------------------------------------------------------------
-// Relay envelope (F2). Shared by `VoiceRelay` (server) and
-// `VoiceRelayTransport` (client) so the two cannot drift, exactly as the secure
-// voice framing is shared above. See include/berry/voice_relay.h for the layout.
-// ---------------------------------------------------------------------------
-namespace relaywire {
-
-inline constexpr char kMagic[4] = {'B', 'V', 'R', 'Y'};
-inline constexpr u8 kVersion = 1;
-inline constexpr u8 kKindRegister = 1;
-inline constexpr u8 kKindData = 2;
-inline constexpr size_t kTagBytes = 64;       // hex room tag
-inline constexpr size_t kAuthBytes = 64;      // hex register auth
-inline constexpr size_t kEnvelopeBytes = 70;  // magic + version + kind + tag
-inline constexpr size_t kMinSecretBytes = 16;
-inline constexpr char kRoomDomain[] = "berry-relay-room";
-inline constexpr char kRegisterDomain[] = "berry-relay-register";
-
-inline bool HasPrefix(const char* data, size_t n) {
-  return n >= kEnvelopeBytes && std::memcmp(data, kMagic, 4) == 0 &&
-         (u8)data[4] == kVersion;
-}
-
-/// Builds the envelope prefix (magic + version + kind + tag).
-inline void PutPrefix(u8 kind, const std::string& tagHex, std::string* out) {
-  out->append(kMagic, 4);
-  out->push_back((char)kVersion);
-  out->push_back((char)kind);
-  out->append(tagHex);
-}
-
-/// A data datagram: the prefix followed by the opaque inner secure-voice
-/// datagram. False when `tagHex` is not exactly kTagBytes or `inner` is empty.
-inline bool BuildData(const std::string& tagHex, const std::string& inner,
-                      size_t mtu, std::string* out) {
-  if (out == nullptr || tagHex.size() != kTagBytes || inner.empty()) return false;
-  if (kEnvelopeBytes + inner.size() > mtu) return false;
-  std::string dg;
-  PutPrefix(kKindData, tagHex, &dg);
-  dg.append(inner);
-  *out = std::move(dg);
-  return true;
-}
-
-/// A register datagram: the prefix followed by the auth hex. False on a bad tag
-/// or auth length.
-inline bool BuildRegister(const std::string& tagHex, const std::string& authHex,
-                          size_t mtu, std::string* out) {
-  if (out == nullptr || tagHex.size() != kTagBytes ||
-      authHex.size() != kAuthBytes) {
-    return false;
-  }
-  if (kEnvelopeBytes + kAuthBytes > mtu) return false;
-  std::string dg;
-  PutPrefix(kKindRegister, tagHex, &dg);
-  dg.append(authHex);
-  *out = std::move(dg);
-  return true;
-}
-
-}  // namespace relaywire
 }  // namespace Berry

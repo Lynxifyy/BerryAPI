@@ -298,49 +298,75 @@ void BerryClient::BindScriptData(const ClientConfig& cfg) {
 }
 
 void BerryClient::BuildLan(const ClientConfig& cfg) {
-  // Cosmetic sync: a private multicast transport carries the signed envelope.
-  // The transport is opened first; if it cannot bind, the channel is still
-  // built (so a script sees a configured-but-unreachable channel) but nothing
-  // is sent or admitted until the socket is up.
+  // Cosmetic sync: a transport carries the signed envelope to peers. Two are
+  // possible: the LAN multicast transport (same subnet) and the relay transport
+  // (the presence backend, reaching another network). Exactly one is built. The
+  // transport is opened first; if it cannot bind, the channel is still built (so
+  // a script sees a configured-but-unreachable channel) but nothing is sent or
+  // admitted until the socket is up.
   if (cfg.enableCosmeticSync) {
-    syncTransport_ = std::make_unique<LanCosmeticTransport>();
-    LanTransportConfig tcfg;
-    if (!cfg.lanIface.empty()) tcfg.iface = cfg.lanIface;
-    if (!syncTransport_->Open(tcfg)) {
-      Log::Warn("BerryClient: cosmetic-sync transport failed to open "
-                "(no multicast?); channel disabled");
-      syncTransport_.reset();
+    const bool useRelay = !cfg.syncRelayHost.empty();
+    CosmeticSyncTransport* transport = nullptr;
+    if (useRelay) {
+      syncRelay_ = std::make_unique<CosmeticRelayTransport>();
+      RelayCosmeticConfig rcfg;
+      rcfg.relayHost = cfg.syncRelayHost;
+      rcfg.relayPort = cfg.syncRelayPort;
+      rcfg.room = cfg.syncRoom.empty() ? "default" : cfg.syncRoom;
+      rcfg.roomSecret = cfg.syncRoomSecret;
+      if (!syncRelay_->Open(rcfg)) {
+        Log::Warn("BerryClient: cosmetic-sync relay failed to open "
+                  "(room secret too short or bad relay?); channel disabled");
+        syncRelay_.reset();
+      } else {
+        transport = syncRelay_.get();
+      }
     } else {
+      syncTransport_ = std::make_unique<LanCosmeticTransport>();
+      LanTransportConfig tcfg;
+      if (!cfg.lanIface.empty()) tcfg.iface = cfg.lanIface;
+      if (!syncTransport_->Open(tcfg)) {
+        Log::Warn("BerryClient: cosmetic-sync transport failed to open "
+                  "(no multicast?); channel disabled");
+        syncTransport_.reset();
+      } else {
+        transport = syncTransport_.get();
+      }
+    }
+
+    if (transport != nullptr) {
       syncChannel_ = std::make_unique<CosmeticSyncChannel>();
       syncChannel_->SetVerifyKey(cfg.syncVerifyKey);
-      syncChannel_->SetTransport(syncTransport_.get());
+      syncChannel_->SetTransport(transport);
       // Remember the publishing side: a tick re-broadcasts the loadout only
       // when it changes, and only when a self id + signing secret are set.
       syncSelfId_ = cfg.syncSelfId;
       syncSignSecret_ = cfg.syncSignSecret;
       syncUseHmac_ = cfg.syncUseHmac;
-      Log::Info("BerryClient: cosmetic-sync channel on port %u (%s)",
-                (unsigned)syncTransport_->localPort(),
+      const u16 localPort =
+          useRelay ? syncRelay_->localPort() : syncTransport_->localPort();
+      Log::Info("BerryClient: cosmetic-sync channel on port %u via %s (%s)",
+                (unsigned)localPort, useRelay ? "relay" : "multicast",
                 syncChannel_->configured() ? "verify key set"
                                            : "NO verify key; receives refused");
-      // mDNS discovery for the same LAN: publish this client so a peer learns
-      // its address and port, and browse for peers. Discovery is best-effort —
-      // a socket that cannot bind leaves it null and the sync channel still
-      // works over the multicast group.
-      discovery_ = std::make_unique<LanDiscovery>();
-      LanDiscoveryConfig dcfg;
-      if (!cfg.lanIface.empty()) dcfg.iface = cfg.lanIface;
-      if (discovery_->Open(dcfg)) {
-        const std::string instance =
-            cfg.syncSelfId.empty() ? "berry-client" : cfg.syncSelfId;
-        discovery_->Publish(instance, syncTransport_->localPort(),
-                            "sync=1");
-        discovery_->Query();
-        Log::Info("BerryClient: LAN discovery on port %u as '%s'",
-                  (unsigned)discovery_->localPort(), instance.c_str());
-      } else {
-        Log::Warn("BerryClient: LAN discovery failed to open; peers not listed");
-        discovery_.reset();
+      // mDNS discovery is LAN-only: a relay client is reached by the relay, not
+      // by a subnet peer, so discovery is not built for it.
+      if (!useRelay) {
+        discovery_ = std::make_unique<LanDiscovery>();
+        LanDiscoveryConfig dcfg;
+        if (!cfg.lanIface.empty()) dcfg.iface = cfg.lanIface;
+        if (discovery_->Open(dcfg)) {
+          const std::string instance =
+              cfg.syncSelfId.empty() ? "berry-client" : cfg.syncSelfId;
+          discovery_->Publish(instance, syncTransport_->localPort(), "sync=1");
+          discovery_->Query();
+          Log::Info("BerryClient: LAN discovery on port %u as '%s'",
+                    (unsigned)discovery_->localPort(), instance.c_str());
+        } else {
+          Log::Warn(
+              "BerryClient: LAN discovery failed to open; peers not listed");
+          discovery_.reset();
+        }
       }
     }
   }
@@ -518,12 +544,13 @@ void BerryClient::RegisterBuiltinClips() {
 }
 
 void BerryClient::PollCosmeticSync() {
-  if (!syncChannel_ || !syncTransport_) return;
+  if (!syncChannel_ || (!syncTransport_ && !syncRelay_)) return;
   PublishLoadout();
   // Keep the mDNS cache fresh: drain a bounded slice, then re-query on a slow
   // interval so peers that joined after attach are found and known peers do not
   // age out of the TTL cache. Without the re-query the peer list would be
-  // correct only at attach and then decay to empty.
+  // correct only at attach and then decay to empty. A relay client has no
+  // discovery (it is reached by the relay), so this is a no-op for it.
   if (discovery_) {
     discovery_->Poll(1);
     const u64 now = NowMs();
@@ -537,17 +564,21 @@ void BerryClient::PollCosmeticSync() {
   // busy subnet, and apply each verified message. Receive runs the post-
   // signature defences (replay/rate/revoke) and the ownership gate, so a
   // forged or replayed loadout changes nothing.
-  syncTransport_->Poll(
-      [this](const std::string& message, const std::string&, u16) {
-        size_t applied = 0;
-        const CosmeticSyncResult r =
-            syncChannel_->Receive(message, cosmetics_.get(), &applied);
-        if (r != CosmeticSyncResult::Ok) {
-          Log::Debug("BerryClient: cosmetic sync refused: %s",
-                     CosmeticSyncResultName(r));
-        }
-      },
-      2);
+  const auto onMessage = [this](const std::string& message,
+                                const std::string&, u16) {
+    size_t applied = 0;
+    const CosmeticSyncResult r =
+        syncChannel_->Receive(message, cosmetics_.get(), &applied);
+    if (r != CosmeticSyncResult::Ok) {
+      Log::Debug("BerryClient: cosmetic sync refused: %s",
+                 CosmeticSyncResultName(r));
+    }
+  };
+  if (syncRelay_) {
+    syncRelay_->Poll(onMessage, 2);
+  } else {
+    syncTransport_->Poll(onMessage, 2);
+  }
 }
 
 bool BerryClient::PublishLoadout() {
@@ -626,6 +657,7 @@ void BerryClient::Detach() {
   if (syncChannel_) syncChannel_->SetTransport(nullptr);
   syncChannel_.reset();
   syncTransport_.reset();
+  syncRelay_.reset();
   Log::Info("BerryClient detached");
 }
 

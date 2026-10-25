@@ -14,6 +14,8 @@
 //   * a client with sync off builds no channel and polls nothing (fail closed).
 #include "berry/client.h"
 #include "berry/cosmetic.h"
+#include "berry/cosmetic_relay.h"
+#include "berry/cosmetic_relay_transport.h"
 #include "berry/cosmetic_sync.h"
 #include "berry/engine.h"
 #include "berry/lan_discovery.h"
@@ -343,6 +345,67 @@ int main() {
       std::string cmd = "rm -rf '" + root + "'";
       if (system(cmd.c_str()) != 0) { /* best-effort cleanup */ }
     }
+  }
+
+  //--- the presence backend: a client configured with a relay host builds the
+  //    relay transport (not the LAN one), no discovery, and a verified remote
+  //    loadout arrives through the relay and is applied (two networks) ---
+  {
+    // A relay room, as a backend would host it.
+    CosmeticRelay relay;
+    const std::string roomSecret = "0123456789abcdef0123456789abcdef";
+    CHECK(relay.AddRoom("lobby", roomSecret));
+    CHECK(relay.Open(CosmeticRelayConfig{}));  // binds an ephemeral port
+    const u16 relayPort = relay.localPort();
+    CHECK(relayPort > 0);
+
+    Engine& eng = Engine::Instance();
+    BerryConfigC cfg = SyncConfig();
+    // Swap the LAN transport for the relay path.
+    cfg.sync_relay_host = "127.0.0.1";
+    cfg.sync_relay_port = relayPort;
+    cfg.sync_room = "lobby";
+    cfg.sync_room_secret = roomSecret.c_str();
+    CHECK(eng.Bootstrap(cfg));
+    CHECK(eng.Attach());
+    BerryClient* client = eng.Client();
+    CHECK(client != nullptr);
+    CHECK(client->cosmeticSync() != nullptr);
+    CHECK(client->syncRelay() != nullptr);   // the relay transport, not LAN
+    CHECK(client->discovery() == nullptr);   // LAN-only, not built for relay
+
+    // A remote client reaches the same room through its own relay transport and
+    // publishes alice's loadout, which the client's frame poll applies.
+    CosmeticRelayTransport alice;
+    RelayCosmeticConfig acfg;
+    acfg.relayHost = "127.0.0.1";
+    acfg.relayPort = relayPort;
+    acfg.room = "lobby";
+    acfg.roomSecret = roomSecret;
+    acfg.bindAddr = "127.0.0.1";
+    acfg.registerIntervalMs = 100;
+    CHECK(alice.Open(acfg));
+    CosmeticSyncChannel aliceChan;
+    aliceChan.SetVerifyKey(CosmeticSyncKey::HmacSecret("shared"));
+    aliceChan.SetTransport(&alice);
+    CosmeticLoadout remote;
+    CHECK(remote.Equip("builtin.cape.red"));
+    CHECK(aliceChan.Publish("alice", remote, "shared", /*useHmac=*/true));
+
+    bool applied = false;
+    for (int i = 0; i < 200 && !applied; ++i) {
+      alice.Poll(nullptr, 5);
+      relay.Pump(5);
+      client->BeginFrame(16.0f, Vec2(1280, 720));
+      client->EndFrame();
+      applied = !client->cosmetics().RemotePlayers().empty();
+    }
+    CHECK(applied);
+    CHECK(client->cosmeticSync()->accepted() >= 1);
+
+    alice.Close();
+    eng.Detach();
+    relay.Close();
   }
 
   if (g_fail == 0) printf("test_client_lan: ALL OK\n");

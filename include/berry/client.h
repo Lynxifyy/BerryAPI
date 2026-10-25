@@ -37,6 +37,7 @@
 #include "berry/cosmetic_assets.h"
 #include "berry/cosmetic_device.h"
 #include "berry/cosmetic_sync.h"
+#include "berry/cosmetic_relay_transport.h"
 #include "berry/crystal.h"
 #include "berry/event.h"
 #include "berry/fs.h"
@@ -123,6 +124,16 @@ struct BERRY_API ClientConfig {
   /// disables publishing.
   std::string syncSignSecret;
   bool syncUseHmac = false;
+  /// Presence-backend media plane. When `syncRelayHost` is set, the sync
+  /// transport is a UDP relay transport (`CosmeticRelayTransport`) instead of
+  /// the LAN multicast transport, so two clients on different networks reach
+  /// each other through one relay. The room is keyed by `syncRoomSecret`, which
+  /// is what a room token (RoomTokenClient) delivers over HTTPS. Empty
+  /// `syncRelayHost` keeps the LAN multicast transport.
+  std::string syncRelayHost;    // numeric IPv4; empty = LAN multicast
+  u16 syncRelayPort = 47826;
+  std::string syncRoom;         // relay room name
+  std::string syncRoomSecret;   // raw room secret (>= 16 bytes)
   /// Enable LAN proximity voice. Off by default (microphone capture is
   /// privacy-sensitive); when on, the client binds an *authenticated and
   /// encrypted* voice transport (`SecureVoiceTransport`) to the voice service
@@ -354,6 +365,10 @@ class BERRY_API BerryClient {
   /// The LAN cosmetic-sync channel, or null when sync is disabled. Owns the
   /// multicast transport when enabled.
   CosmeticSyncChannel* cosmeticSync() { return syncChannel_.get(); }
+  /// The cosmetic-sync relay transport, or null when the LAN multicast path (or
+  /// no sync) is active. In production this is the presence backend's media
+  /// plane.
+  CosmeticRelayTransport* syncRelay() { return syncRelay_.get(); }
   /// The mDNS discovery the sync channel uses, or null when sync is disabled or
   /// discovery could not bind. Reads only: discovery names peers, and a loadout
   /// from one is still verified by the sync channel before it is applied.
@@ -477,6 +492,10 @@ class BERRY_API BerryClient {
   // message into a rendered remote loadout. The transport is destroyed after
   // the channel, so the channel's borrowed transport pointer is never dangling.
   std::unique_ptr<LanCosmeticTransport> syncTransport_;
+  /// The relay transport, when the config selects the presence backend instead
+  /// of the LAN multicast path. Exactly one of `syncTransport_`/`syncRelay_` is
+  /// built; `syncChannel_` borrows whichever it is.
+  std::unique_ptr<CosmeticRelayTransport> syncRelay_;
   std::unique_ptr<CosmeticSyncChannel> syncChannel_;
   // mDNS discovery for the sync channel: publishes this client so peers can find
   // it and browses for theirs. Built only when sync is enabled; polled on the

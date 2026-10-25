@@ -95,6 +95,10 @@ bool Engine::Bootstrap(const BerryConfigC& cfg) {
   if (cfg.sync_self_id) internal.syncSelfId = cfg.sync_self_id;
   if (cfg.sync_sign_secret) internal.syncSignSecret = cfg.sync_sign_secret;
   internal.syncUseHmac = cfg.sync_use_hmac != 0;
+  if (cfg.sync_relay_host) internal.syncRelayHost = cfg.sync_relay_host;
+  if (cfg.sync_relay_port != 0) internal.syncRelayPort = cfg.sync_relay_port;
+  if (cfg.sync_room) internal.syncRoom = cfg.sync_room;
+  if (cfg.sync_room_secret) internal.syncRoomSecret = cfg.sync_room_secret;
   internal.enableVoice = cfg.enable_voice != 0;
   if (cfg.voice_self_id) internal.voiceSelfId = cfg.voice_self_id;
   if (cfg.voice_identity_seed) internal.voiceIdentitySeed = cfg.voice_identity_seed;
@@ -189,6 +193,10 @@ bool Engine::Attach() {
     ccfg.syncSelfId = cfg_.syncSelfId;
     ccfg.syncSignSecret = cfg_.syncSignSecret;
     ccfg.syncUseHmac = cfg_.syncUseHmac;
+    ccfg.syncRelayHost = cfg_.syncRelayHost;
+    ccfg.syncRelayPort = cfg_.syncRelayPort;
+    ccfg.syncRoom = cfg_.syncRoom;
+    ccfg.syncRoomSecret = cfg_.syncRoomSecret;
     ccfg.enableVoice = cfg_.enableVoice;
     ccfg.voiceSelfId = cfg_.voiceSelfId;
     ccfg.voiceIdentitySeed = cfg_.voiceIdentitySeed;

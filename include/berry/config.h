@@ -62,6 +62,16 @@ typedef struct BerryConfigC {
   const char* sync_sign_secret;
   // 0 = Ed25519 (production), 1 = HMAC (local development).
   int sync_use_hmac;
+  // Presence-backend media plane for cosmetic sync. When sync_relay_host is
+  // set, the sync transport is a UDP relay transport instead of the LAN
+  // multicast transport, so two clients on different networks reach each other
+  // through one relay. The room is keyed by sync_room_secret, which is what a
+  // room token (RoomTokenClient) delivers over HTTPS. NULL/empty
+  // sync_relay_host keeps the LAN multicast transport.
+  const char* sync_relay_host;    // numeric IPv4; NULL/empty = LAN multicast
+  unsigned short sync_relay_port;  // 0 = the default (47826)
+  const char* sync_room;           // relay room name; NULL = "default"
+  const char* sync_room_secret;    // raw room secret (>= 16 bytes)
   // 0/1 enable LAN proximity voice (binds a private multicast socket).
   int enable_voice;
   // This client's voice session id, or NULL to leave the session stopped.

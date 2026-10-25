@@ -17,7 +17,11 @@
 //     is plain UDP, because the media is already end-to-end encrypted and a
 //     second transport layer would only add latency.
 //
-// Relay envelope (big-endian), one datagram per message:
+// The forwarding engine, the envelope and the room-tag derivation are shared
+// with the cosmetic-sync relay (core/net/room_relay.h, core/net/relay_wire.h):
+// the two relays move different payloads but have identical control planes. This
+// class is the voice-typed front-end. The envelope (big-endian), one datagram
+// per message:
 //
 //   offset size  field
 //   0      4     magic 'B','V','R','Y'
@@ -39,15 +43,15 @@
 #include "berry/types.h"
 #include "berry/net.h"
 
-#include <atomic>
-#include <mutex>
+#include <memory>
 #include <string>
-#include <thread>
-#include <unordered_map>
-#include <vector>
 
 namespace Berry {
 
+class RoomRelay;  // core/net/room_relay.h — the shared forwarding engine
+
+/// The voice relay's bind and bound settings. The fields map onto the shared
+/// `RoomRelayConfig`; kept as its own type so the voice call site reads plainly.
 struct BERRY_API VoiceRelayConfig {
   /// The UDP port to bind. 0 lets the kernel choose.
   u16 port = 47825;
@@ -87,7 +91,7 @@ class BERRY_API VoiceRelay {
   /// fails or no room is configured.
   bool Open(const VoiceRelayConfig& cfg);
   void Close();
-  bool open() const { return open_; }
+  bool open() const;
   u16 localPort() const;
 
   /// Forwards every queued datagram and ages out stale peers. `budgetMs` bounds
@@ -127,33 +131,7 @@ class BERRY_API VoiceRelay {
   static constexpr u8 kKindData = 2;
 
  private:
-  struct Peer {
-    u64 lastMs = 0;
-  };
-  struct Room {
-    std::string name;
-    std::string secret;
-    std::string tagHex;
-    std::unordered_map<std::string, Peer> peers;  // key: host:port
-  };
-
-  /// Finds a room by tag hex, or null. Caller holds `mutex_`.
-  Room* FindRoomLocked(const std::string& tagHex);
-  /// Handles one received datagram. Caller holds `mutex_`.
-  void HandleLocked(const char* data, size_t n, const std::string& host,
-                    u16 port, u64 now, size_t* forwarded);
-  /// Evicts peers older than the TTL. Caller holds `mutex_`.
-  void EvictLocked(u64 now);
-
-  UdpSocket sock_;
-  VoiceRelayConfig cfg_{};
-  bool open_ = false;
-  std::vector<Room> rooms_;
-  mutable std::mutex mutex_;
-  Stats stats_{};
-
-  std::atomic<bool> running_{false};
-  std::thread thread_;
+  std::unique_ptr<RoomRelay> relay_;
 };
 
 }  // namespace Berry

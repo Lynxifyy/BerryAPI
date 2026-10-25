@@ -65,6 +65,13 @@ namespace Berry {
 /// includes the internal one.
 class MulticastLock;
 
+/// Internal (core/net/cosmetic_frag.h): the shared fragment framing and
+/// receiver-side reassembly used by both cosmetic transports. Forward declared
+/// so this public header never includes the internal one.
+namespace cosmeticfrag {
+class Reassembler;
+}
+
 /// Where the transport listens and what it will accept.
 struct BERRY_API LanTransportConfig {
   /// The private multicast group the clients share. In the 239.0.0.0/8
@@ -169,16 +176,6 @@ class BERRY_API LanCosmeticTransport final : public CosmeticSyncTransport {
   static const char* Magic();
 
  private:
-  struct Reassembly {
-    std::string peer;   // host:port the fragments came from
-    u64 firstMs = 0;
-    u32 totalLen = 0;
-    u16 fragCount = 0;
-    u16 received = 0;
-    std::vector<u8> data;
-    std::vector<u8> have;
-  };
-
   /// A message that finished reassembling, ready to hand to the caller.
   struct Complete {
     std::string message;
@@ -198,9 +195,6 @@ class BERRY_API LanCosmeticTransport final : public CosmeticSyncTransport {
   void HandleDatagramLocked(const u8* data, size_t len, const std::string& host,
                             u16 port, std::vector<Complete>* complete);
 
-  /// Drops reassembly buffers older than the TTL and enforces the per-peer cap.
-  void ExpireLocked(const std::string& peer, u64 now);
-
   /// Records or refreshes a peer. Caller holds the lock.
   void TouchPeerLocked(const std::string& host, u16 port,
                        const std::string& playerId, u64 now);
@@ -215,7 +209,9 @@ class BERRY_API LanCosmeticTransport final : public CosmeticSyncTransport {
   u32 selfTag_ = 0;   // per-instance tag; a datagram carrying it is our own
 
   mutable std::mutex mutex_;
-  std::unordered_map<std::string, Reassembly> reassembly_;  // key: peer + msgId
+  /// Shared fragment reassembly (core/net/cosmetic_frag.h), rebuilt on Open so
+  /// its caps come from the config.
+  std::unique_ptr<cosmeticfrag::Reassembler> reassembler_;
   std::unordered_map<std::string, LanPeer> peers_;           // key: host:port
   Stats stats_{};
   std::function<u64()> clock_;

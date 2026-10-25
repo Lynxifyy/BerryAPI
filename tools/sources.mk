@@ -51,7 +51,10 @@ CORE_SRC := \
   core/net/lan_discovery.cpp \
   core/net/voice_transport.cpp \
   core/net/voice_secure_transport.cpp \
+  core/net/room_relay.cpp \
   core/net/voice_relay.cpp \
+  core/net/cosmetic_relay.cpp \
+  core/net/cosmetic_relay_transport.cpp \
   core/net/voice_relay_transport.cpp \
   core/net/room_token.cpp \
   core/net/multicast_lock.cpp \
@@ -252,6 +255,7 @@ TEST_SRC := \
   tests/test_voice_crypto.cpp \
   tests/test_voice_secure.cpp \
   tests/test_voice_relay.cpp \
+  tests/test_cosmetic_relay.cpp \
   tests/test_room_token.cpp \
   tests/test_multicast_lock.cpp \
   tests/test_replay_format.cpp \

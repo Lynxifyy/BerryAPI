@@ -53,6 +53,13 @@ struct EngineConfig {
   std::string syncSelfId;      // empty = verify/apply only, never publish
   std::string syncSignSecret;  // empty = never publish
   bool syncUseHmac = false;
+  /// Presence-backend media plane for cosmetic sync. When `syncRelayHost` is
+  /// set the sync transport is a UDP relay transport instead of the LAN
+  /// multicast transport, so two clients on different networks reach each other.
+  std::string syncRelayHost;    // numeric IPv4; empty = LAN multicast
+  u16 syncRelayPort = 47826;
+  std::string syncRoom;         // relay room name
+  std::string syncRoomSecret;   // raw room secret (>= 16 bytes)
   /// LAN proximity voice (opt-in). Off by default.
   bool enableVoice = false;
   std::string voiceSelfId;     // empty = transport bound but session stopped
