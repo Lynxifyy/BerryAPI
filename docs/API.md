@@ -639,9 +639,10 @@ Capability: `world`.
 | `replaymod.review_speed() -> number` | `world` | The playback speed multiplier. Must be finite and in (0, 64]; a bad value is refused. |
 | `replaymod.set_review_speed(speed: number) -> bool` | `world` | - |
 | `replaymod.review_present() -> number` | `world` | Draws the review through the frame's renderer when active; returns how many entities it drew. A no-op (0) when inactive or no replay is loaded. |
-| `replaymod.server_start(host: string, port: number) -> bool` | `world` | Binds the loopback playback server to `host:port`. `host` must be a loopback address (\"127.0.0.1\", \"::1\" or \"localhost\"); anything else is refused. A port of 0 asks the OS for a free one, which `server_port` reports. Returns false (with a reason in `last_error`) when the host is not loopback, the socket cannot bind, or the server is already running. |
+| `replaymod.server_start(host: string, port: number) -> bool` | `world` | Binds the loopback playback server to `host:port`. `host` must be a loopback address (\"127.0.0.1\", \"::1\" or \"localhost\"); anything else is refused. A port of 0 asks the OS for a free one, which `server_port` reports. Returns false (with a reason in `last_error`) when the host is not loopback, the socket cannot bind, the loaded replay's protocol version does not match this build, or a live multiplayer session is active (playback never runs alongside a live session). |
 | `replaymod.server_stop() -> nil` | `world` | - |
 | `replaymod.server_running() -> bool` | `world` | - |
+| `replaymod.server_live_blocked() -> bool` | `world` | True when the live-session guard is holding playback back: a live multiplayer session is active, so the server is neither started nor streaming. |
 | `replaymod.server_port() -> number` | `world` | - |
 | `replaymod.server_client_connected() -> bool` | `world` | - |
 | `replaymod.server_packets_sent() -> number` | `world` | How many packets the server has sent since a client joined. |

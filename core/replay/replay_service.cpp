@@ -24,6 +24,17 @@ bool ReplayService::Load(const std::string& bytes, ReplayError* err) {
     if (err) *err = e;
     return false;
   }
+  // A replay is only meaningful to the parsers of the build it was recorded
+  // against: the packet ids and layouts it carries are a property of the
+  // protocol version. Refuse a mismatch before adopting, so a wrong-version
+  // file never reaches the world, the review or the loopback server. The
+  // fingerprint error already means "recorded against another build", which is
+  // exactly this refusal.
+  const u32 expected = expectedProtocolVersion_.load();
+  if (expected != 0 && parsed->fingerprint.protocolVersion != expected) {
+    if (err) *err = ReplayError::BadFingerprint;
+    return false;
+  }
   std::lock_guard<std::mutex> lk(mutex_);
   review_.Stop();
   server_.Attach(nullptr);
@@ -77,6 +88,30 @@ EntityId ReplayService::localPlayer() const {
   id.raw = localPlayerRaw_.load();
   id.runtime = (u16)id.raw;
   return id;
+}
+
+void ReplayService::SetLiveSessionProbe(std::function<bool()> probe) {
+  std::lock_guard<std::mutex> lk(probeMutex_);
+  liveProbe_ = std::move(probe);
+}
+
+void ReplayService::SetExpectedProtocolVersion(u32 version) {
+  expectedProtocolVersion_.store(version);
+}
+
+u32 ReplayService::expectedProtocolVersion() const {
+  return expectedProtocolVersion_.load();
+}
+
+void ReplayService::ApplyServerGuards(ReplayServerConfig* cfg) const {
+  if (!cfg) return;
+  cfg->expectedProtocolVersion = expectedProtocolVersion_.load();
+  std::lock_guard<std::mutex> lk(probeMutex_);
+  // The probe is copied by value: a caller that outlives the install (a script
+  // binding that starts the server, then the script unloads) still gets a safe
+  // answer, and the copy holds the target by shared ownership of whatever it
+  // captured.
+  cfg->liveSessionActive = liveProbe_;
 }
 
 void ReplayService::Tick(u64 tick, LevelSeam& seam,

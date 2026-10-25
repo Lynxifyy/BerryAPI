@@ -29,6 +29,7 @@
 #include "berry/world_query.h"
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -83,6 +84,24 @@ class BERRY_API ReplayService {
   void SetLocalPlayer(EntityId id);
   EntityId localPlayer() const;
 
+  /// Installs the server's live-session probe: `probe` answers whether a LIVE
+  /// multiplayer session is active. While it does, the loopback server neither
+  /// starts nor streams, so a recorded packet can never reach a live session.
+  /// Empty (the default) means "never live", which is right for a host test.
+  void SetLiveSessionProbe(std::function<bool()> probe);
+
+  /// The network protocol version this build speaks. `Attach` refuses a loaded
+  /// replay whose fingerprint carries a different one, so a wrong-version file
+  /// never reaches the client's parsers. 0 disables the check (no build).
+  void SetExpectedProtocolVersion(u32 version);
+  u32 expectedProtocolVersion() const;
+
+  /// Fills `cfg`'s guard fields from this service's state — the expected
+  /// protocol version and the live-session probe — so a caller that starts the
+  /// server (a script binding, the engine) gets the guards without having to
+  /// remember them. Every production `Start` goes through this.
+  void ApplyServerGuards(ReplayServerConfig* cfg) const;
+
   /// Captures one tick from the seam while a capture session is recording.
   /// Driven by the World module's tick, next to the session recorder.
   void Tick(u64 tick, LevelSeam& seam, const std::vector<WorldDiffEvent>& diff);
@@ -113,6 +132,12 @@ class BERRY_API ReplayService {
   ReplayReview review_;
   ReplayServer server_;
   std::atomic<u64> localPlayerRaw_{0};
+  /// The protocol version `Attach` enforces on a loaded replay. 0 = no check.
+  std::atomic<u32> expectedProtocolVersion_{0};
+  /// The live-session probe, guarded by `probeMutex_` because it is installed
+  /// from the attach path and read from the frame thread.
+  mutable std::mutex probeMutex_;
+  std::function<bool()> liveProbe_;
 };
 
 }  // namespace Berry

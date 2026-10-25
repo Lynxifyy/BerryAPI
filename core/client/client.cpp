@@ -17,6 +17,7 @@
 
 #include "berry/engine.h"
 #include "berry/logger.h"
+#include "berry/replay_service.h"
 #include "berry/services.h"
 #include "berry/thread.h"
 
@@ -152,6 +153,11 @@ bool BerryClient::Attach(Engine& engine, const ClientConfig& cfg) {
   // struct layouts must be registered by the time a script asks the signature
   // cache or a layout to resolve. Verification happens inside the loader.
   LoadSigPacks(cfg);
+
+  // Replay guards before anything can start a playback: the capture's
+  // fingerprint and the loopback server's protocol/live checks, so a replay
+  // from another build or a live session cannot feed the game's parsers.
+  InstallReplayGuards(cfg);
 
   // Cosmetic asset data and model packs load, and the player-model hook is
   // installed, before the script: a script that equips a pack asset this frame
@@ -409,6 +415,20 @@ void BerryClient::LoadSigPacks(const ClientConfig& cfg) {
             "(floor %llu)",
             sigPackReport_.packsApplied, sigPackReport_.packsFailed,
             (unsigned long long)sigPackLoader_->sequenceFloor());
+}
+
+void BerryClient::InstallReplayGuards(const ClientConfig& cfg) {
+  ReplayService& replay = engine_->Replay();
+  // The capture stamps every recording with this build's protocol version, so a
+  // replay made against another build is refused on load by the check below.
+  ReplayFingerprint fp = replay.capture().fingerprint();
+  fp.protocolVersion = cfg.protocolVersion;
+  replay.capture().SetFingerprint(fp);
+  // The service enforces the version on Load/Attach and answers the live-session
+  // probe on every start/stream, so both guards reach the server and the loader
+  // through one place rather than each call site.
+  replay.SetExpectedProtocolVersion(cfg.protocolVersion);
+  replay.SetLiveSessionProbe(cfg.liveSessionActive);
 }
 
 void BerryClient::BuildCosmetics(const ClientConfig& cfg) {

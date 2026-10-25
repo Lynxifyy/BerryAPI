@@ -795,10 +795,12 @@ export type ReplayMod = {
   set_review_speed: (speed: number) -> boolean,
   -- Draws the review through the frame's renderer when active; returns how many entities it drew. A no-op (0) when inactive or no replay is loaded.
   review_present: () -> number,
-  -- Binds the loopback playback server to `host:port`. `host` must be a loopback address (\"127.0.0.1\", \"::1\" or \"localhost\"); anything else is refused. A port of 0 asks the OS for a free one, which `server_port` reports. Returns false (with a reason in `last_error`) when the host is not loopback, the socket cannot bind, or the server is already running.
+  -- Binds the loopback playback server to `host:port`. `host` must be a loopback address (\"127.0.0.1\", \"::1\" or \"localhost\"); anything else is refused. A port of 0 asks the OS for a free one, which `server_port` reports. Returns false (with a reason in `last_error`) when the host is not loopback, the socket cannot bind, the loaded replay's protocol version does not match this build, or a live multiplayer session is active (playback never runs alongside a live session).
   server_start: (host: string, port: number) -> boolean,
   server_stop: () -> (),
   server_running: () -> boolean,
+  -- True when the live-session guard is holding playback back: a live multiplayer session is active, so the server is neither started nor streaming.
+  server_live_blocked: () -> boolean,
   server_port: () -> number,
   server_client_connected: () -> boolean,
   -- How many packets the server has sent since a client joined.

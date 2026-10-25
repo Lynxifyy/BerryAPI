@@ -190,6 +190,17 @@ struct BERRY_API ClientConfig {
   /// the resolved player-model layout. An empty reader keeps the cosmetic
   /// skeleton seam fail-closed even when `playerModelRenderTarget` is set.
   PlayerModelBoneReader playerModelBones;
+  /// The network protocol version this client's build speaks, so the loopback
+  /// replay server refuses a replay recorded against another protocol (its
+  /// packet ids and layouts would feed this build's parsers wrong bytes). 0
+  /// leaves the check off, which is right for a host with no build.
+  u32 protocolVersion = 0;
+  /// A probe the embedder supplies that reports whether a LIVE multiplayer
+  /// session is currently active (the player is connected to a real server).
+  /// The replay server refuses to start and stops streaming while it returns
+  /// true, so a recorded session's packets can never be injected into a live
+  /// one. Empty means "never live"; the embedder installs a real probe.
+  std::function<bool()> liveSessionActive;
 };
 
 //----------------------------------------------------------------------------
@@ -413,6 +424,14 @@ class BERRY_API BerryClient {
   /// hook (with `cfg.playerModelBones`) on `cfg.playerModelRenderTarget`. A no-op
   /// for each half the config leaves empty; each fails closed on its own.
   void BuildCosmetics(const ClientConfig& cfg);
+
+  /// Installs the replay guards from the config: the capture's build fingerprint
+  /// (so a recording carries the protocol version it was made against) and the
+  /// loopback server's protocol-version check + live-session probe. A replay
+  /// recorded against another protocol is then refused on load, and playback is
+  /// refused while a live session is active, so a recorded packet can never
+  /// reach a live one.
+  void InstallReplayGuards(const ClientConfig& cfg);
 
   /// Authors the built-in animation clips into the animator, so a built-in cape
   /// flaps and a built-in aura spins without a script or a pack. A clip is added

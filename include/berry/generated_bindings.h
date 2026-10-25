@@ -434,6 +434,7 @@ inline const BindingSpec* BindingSpecs() {
       {"replaymod.server_start", CapKind::World, 2, "ReplayMod"},
       {"replaymod.server_stop", CapKind::World, 0, "ReplayMod"},
       {"replaymod.server_running", CapKind::World, 0, "ReplayMod"},
+      {"replaymod.server_live_blocked", CapKind::World, 0, "ReplayMod"},
       {"replaymod.server_port", CapKind::World, 0, "ReplayMod"},
       {"replaymod.server_client_connected", CapKind::World, 0, "ReplayMod"},
       {"replaymod.server_packets_sent", CapKind::World, 0, "ReplayMod"},
@@ -445,7 +446,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 420; }
+inline size_t BindingSpecCount() { return 421; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -934,6 +935,7 @@ inline const char* const kReplayModNames[] = {
     "replaymod.server_start",
     "replaymod.server_stop",
     "replaymod.server_running",
+    "replaymod.server_live_blocked",
     "replaymod.server_port",
     "replaymod.server_client_connected",
     "replaymod.server_packets_sent",
@@ -973,7 +975,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Radial", kRadialNames, 18},
       {"Crystal", kCrystalNames, 19},
       {"Voice", kVoiceNames, 22},
-      {"ReplayMod", kReplayModNames, 39},
+      {"ReplayMod", kReplayModNames, 40},
   };
   return kModules;
 }

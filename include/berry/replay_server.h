@@ -49,6 +49,7 @@
 #include "berry/replay_format.h"
 #include "berry/replay_world.h"
 
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -71,13 +72,27 @@ struct BERRY_API ReplayServerConfig {
   /// The most datagrams one `Pump` will process before returning, so a busy
   /// client cannot pin the caller.
   size_t maxDatagramsPerPump = 64;
+  /// The network protocol version this build speaks. A replay whose fingerprint
+  /// carries a different version is refused by `Attach` (the recorded packet
+  /// ids and layouts are a property of the protocol, so feeding another
+  /// version's bytes to this client's parsers would be undefined). 0 disables
+  /// the check — a host test that builds a synthetic replay has no build.
+  u32 expectedProtocolVersion = 0;
+  /// A probe the server calls to learn whether a LIVE multiplayer session is
+  /// active. When it returns true, `Start` refuses and a running server stops
+  /// streaming, so a recorded session's packets can never be fed into a live
+  /// one. Empty means "never live" (a host test has no session), which is why
+  /// the production wiring always installs a real probe.
+  std::function<bool()> liveSessionActive;
 };
 
-/// Why the server refused to start.
+/// Why the server refused to start (or to attach a replay).
 enum class ReplayServerError : u32 {
   Ok = 0,
-  NotLoopback,   // the configured host is not a loopback address
-  BindFailed,    // the socket could not bind
+  NotLoopback,        // the configured host is not a loopback address
+  BindFailed,         // the socket could not bind
+  LiveSessionActive,  // a live multiplayer session is active; playback refused
+  BadProtocolVersion, // the replay's protocol version is not the build's
   AlreadyRunning,
 };
 
@@ -104,7 +119,12 @@ class BERRY_API ReplayServer {
   /// Sets the replay the server streams. The file must outlive the server or
   /// the next `Attach`. A null or empty file leaves the server with nothing to
   /// send, and a joining client is told the stream ended.
-  void Attach(const ReplayFile* file);
+  ///
+  /// Refuses (returning `BadProtocolVersion`) a file whose fingerprint carries a
+  /// protocol version other than `config().expectedProtocolVersion`, unless that
+  /// expected version is 0. On a refusal the server keeps its previous replay, so
+  /// a mismatched file never displaces a good one.
+  ReplayServerError Attach(const ReplayFile* file);
 
   /// Processes pending client datagrams and sends the packets that are due.
   /// Returns the number of datagrams processed. Call it from the tick or a
@@ -117,6 +137,10 @@ class BERRY_API ReplayServer {
   u64 packetsSent() const;
   /// The tick the stream is currently at.
   u64 streamTick() const;
+  /// True when the live-session guard is currently holding playback back: a
+  /// live session is active, so the server is neither started nor streaming.
+  /// A caller uses this to explain why nothing plays.
+  bool liveBlocked() const;
   /// Restarts the stream for the connected client at the nearest keyframe at or
   /// before `tick`. False when no client is connected.
   bool Seek(u64 tick);
@@ -157,6 +181,9 @@ class BERRY_API ReplayServer {
   bool running_ = false;
   bool paused_ = false;
   const ReplayFile* file_ = nullptr;
+  /// The live-session probe, stored separately from `cfg_` so `liveBlocked()`
+  /// answers correctly even when `Start` refused (which leaves `cfg_` alone).
+  std::function<bool()> liveProbe_;
   Client client_;
   u64 packetsSent_ = 0;
 };

@@ -4746,6 +4746,10 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     cfg.host = args[0].ToDisplay();
     const f64 p = args[1].AsNumber();
     cfg.port = (p > 0 && p <= 65535) ? (u16)p : 0;
+    // Apply the service's guards (protocol version + live-session probe) so a
+    // script cannot start playback without them: a wrong-version replay is
+    // refused and a live session blocks the start.
+    services_.replay->ApplyServerGuards(&cfg);
     // A refused host (or a busy port) is a normal "no": the reason is in
     // `last_error`. Only a missing service is an error.
     const ReplayServerError e = services_.replay->server().Start(cfg);
@@ -4764,6 +4768,11 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
   install("replaymod.server_running", [this](ScriptContext&, const std::vector<ScriptValue>&) {
     if (!services_.replay) return ScriptValue::Bool(false);
     return ScriptValue::Bool(services_.replay->server().running());
+  });
+
+  install("replaymod.server_live_blocked", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    if (!services_.replay) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(services_.replay->server().liveBlocked());
   });
 
   install("replaymod.server_port", [this](ScriptContext&, const std::vector<ScriptValue>&) {

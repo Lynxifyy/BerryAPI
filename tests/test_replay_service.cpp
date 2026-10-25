@@ -349,6 +349,31 @@ static void TestReplayModBindings() {
         ScriptStatus::Ok);
   CHECK(!out.Truthy());
 
+  // The live-session guard: with a live session active the binding refuses to
+  // start (the guard reaches the server through ApplyServerGuards), and
+  // `server_live_blocked` reports it. Cleared, it starts again.
+  svc.SetLiveSessionProbe([]() { return true; });
+  CHECK(CallBinding(bindings, "replaymod.server_start",
+                    {ScriptValue::Str("127.0.0.1"), ScriptValue::Num(0.0)},
+                    {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.IsBool() && !out.Truthy());
+  CHECK(CallBinding(bindings, "replaymod.last_error", {}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+  CHECK(out.IsString() && out.AsString() == "live_session_active");
+  CHECK(CallBinding(bindings, "replaymod.server_live_blocked", {}, {"world"},
+                    &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  svc.SetLiveSessionProbe([]() { return false; });
+  CHECK(CallBinding(bindings, "replaymod.server_start",
+                    {ScriptValue::Str("127.0.0.1"), ScriptValue::Num(0.0)},
+                    {"world"}, &out) == ScriptStatus::Ok);
+  CHECK(out.IsBool() && out.Truthy());
+  CHECK(CallBinding(bindings, "replaymod.server_live_blocked", {}, {"world"},
+                    &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(CallBinding(bindings, "replaymod.server_stop", {}, {"world"}, &out) ==
+        ScriptStatus::Ok);
+
   // Status is a real, non-empty line.
   CHECK(CallBinding(bindings, "replaymod.status", {}, {"world"}, &out) ==
         ScriptStatus::Ok);
@@ -435,6 +460,52 @@ static void TestFrameHookDrawsReview() {
   eng.Detach();
 }
 
+static void TestReplayProtocolGuard() {
+  // A replay recorded against another protocol version must be refused by the
+  // service, so a wrong-version file never reaches the world, the review or the
+  // loopback server. The check is off until a version is set, matching a host
+  // with no build.
+  ReplayService svc;
+  ShimLevel level;
+  level.AddEntity(Id(1), Snap(1, Vec3(0, 0, 0)));
+  svc.capture().SetFingerprint(ReplayFingerprint{});
+  RecordTape(svc, level, 6);
+
+  // Stamp the recording with a protocol version, then export.
+  ReplayFingerprint fp;
+  fp.protocolVersion = 700;
+  svc.capture().SetFingerprint(fp);
+  std::string tape;
+  CHECK(svc.Save(&tape) == ReplayError::Ok);
+
+  // With no expected version, the tape loads (the check is off).
+  CHECK(svc.expectedProtocolVersion() == 0);
+  CHECK(svc.Load(tape, nullptr));
+  svc.Unload();
+
+  // Pin a different version: the load is refused with a fingerprint mismatch and
+  // nothing is loaded.
+  svc.SetExpectedProtocolVersion(999);
+  ReplayError err = ReplayError::Ok;
+  CHECK(!svc.Load(tape, &err));
+  CHECK(err == ReplayError::BadFingerprint);
+  CHECK(!svc.loaded());
+  CHECK(svc.file() == nullptr);
+
+  // Pin the matching version: it loads.
+  svc.SetExpectedProtocolVersion(700);
+  CHECK(svc.Load(tape, &err));
+  CHECK(err == ReplayError::Ok);
+  CHECK(svc.loaded());
+
+  // The guard plumbing fills a server config from the service's state.
+  svc.SetLiveSessionProbe([]() { return true; });
+  ReplayServerConfig cfg;
+  svc.ApplyServerGuards(&cfg);
+  CHECK(cfg.expectedProtocolVersion == 700);
+  CHECK(cfg.liveSessionActive && cfg.liveSessionActive());
+}
+
 }  // namespace
 
 int main() {
@@ -442,6 +513,7 @@ int main() {
   TestServiceReviewDraws();
   TestReplayModBindings();
   TestFrameHookDrawsReview();
+  TestReplayProtocolGuard();
 
   if (g_fail == 0) {
     printf("test_replay_service: ALL OK\n");
