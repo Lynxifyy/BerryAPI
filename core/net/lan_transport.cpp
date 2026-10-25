@@ -2,6 +2,7 @@
 // for the wire format and the fail-closed rules.
 #include "berry/lan_transport.h"
 #include "berry/logger.h"
+#include "multicast_lock.h"
 
 #include <algorithm>
 #include <chrono>
@@ -97,6 +98,11 @@ bool LanCosmeticTransport::Open(const LanTransportConfig& cfg) {
   // live, so a wrap cannot splice two messages (and a shape mismatch drops the
   // reassembly anyway).
   msgSeq_ = (u16)(clock_() & 0xffff);
+  // Android drops multicast to a joined group without a Wi-Fi multicast lock,
+  // so hold one before joining. Best-effort: a failed acquire still leaves a
+  // unicast socket, and `multicastJoined` reports the join outcome.
+  mcastLock_ = std::make_unique<MulticastLock>();
+  mcastLock_->Acquire("BerryAPI cosmetic");
   // A failed group join is not fatal: a unicast-only socket still works between
   // two clients that know each other's address, and the caller can see why.
   joined_ = sock_.JoinMulticast(cfg.group.c_str(), cfg.iface.c_str());
@@ -112,6 +118,10 @@ bool LanCosmeticTransport::Open(const LanTransportConfig& cfg) {
 
 void LanCosmeticTransport::Close() {
   sock_.Close();
+  if (mcastLock_) {
+    mcastLock_->Release();
+    mcastLock_.reset();
+  }
   std::lock_guard<std::mutex> lk(mutex_);
   open_ = false;
   joined_ = false;

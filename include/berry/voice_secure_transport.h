@@ -49,12 +49,18 @@
 #include "berry/voice.h"
 #include "berry/voice_crypto.h"
 
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace Berry {
+
+/// Internal (core/net/multicast_lock.h): the Android Wi-Fi multicast lock the
+/// transport holds so a joined group actually receives on a device. Forward
+/// declared so this public header never includes the internal one.
+class MulticastLock;
 
 struct BERRY_API SecureVoiceConfig {
   /// The private multicast group (a different group from the cosmetic channel).
@@ -145,6 +151,9 @@ class BERRY_API SecureVoiceTransport final : public VoiceTransport {
   UdpSocket sock_;
   SecureVoiceConfig cfg_{};
   VoiceSecureChannel channel_;
+  /// Held while the group is joined, so Android does not drop multicast to the
+  /// device. Null on a platform without the lock.
+  std::unique_ptr<MulticastLock> mcastLock_;
   bool open_ = false;
   bool joined_ = false;
   u64 lastAnnounceMs_ = 0;

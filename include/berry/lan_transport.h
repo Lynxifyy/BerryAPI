@@ -52,12 +52,18 @@
 #include "berry/net.h"
 
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace Berry {
+
+/// Internal (core/net/multicast_lock.h): the Android Wi-Fi multicast lock held
+/// while the group is joined. Forward declared so this public header never
+/// includes the internal one.
+class MulticastLock;
 
 /// Where the transport listens and what it will accept.
 struct BERRY_API LanTransportConfig {
@@ -201,6 +207,8 @@ class BERRY_API LanCosmeticTransport final : public CosmeticSyncTransport {
 
   UdpSocket sock_;
   LanTransportConfig cfg_{};
+  /// Held while the group is joined (Android). Null elsewhere.
+  std::unique_ptr<MulticastLock> mcastLock_;
   bool open_ = false;
   bool joined_ = false;
   u16 msgSeq_ = 0;

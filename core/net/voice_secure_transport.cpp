@@ -5,6 +5,7 @@
 
 #include "berry/event.h"
 #include "berry/logger.h"
+#include "multicast_lock.h"
 
 #include <algorithm>
 #include <cstring>
@@ -64,6 +65,12 @@ bool SecureVoiceTransport::Open(const SecureVoiceConfig& cfg,
   }
   cfg_ = cfg;
   open_ = true;
+  // On a device the Wi-Fi power management drops multicast to a joined group
+  // unless we hold a multicast lock, so acquire one *before* joining. It is
+  // best-effort: a failed acquire leaves the socket usable for unicast and is
+  // reported by `multicastJoined`, never a reason to refuse to open.
+  mcastLock_ = std::make_unique<MulticastLock>();
+  mcastLock_->Acquire("BerryAPI voice");
   joined_ = sock_.JoinMulticast(cfg.group.c_str(), cfg.iface.c_str());
   if (!joined_) {
     Log::Warn("voice: secure multicast join failed: %s",
@@ -79,6 +86,12 @@ bool SecureVoiceTransport::Open(const SecureVoiceConfig& cfg,
 
 void SecureVoiceTransport::Close() {
   sock_.Close();
+  // Drop the multicast lock with the socket: leaving Wi-Fi multicast on after
+  // the channel is gone would keep the radio awake for nothing.
+  if (mcastLock_) {
+    mcastLock_->Release();
+    mcastLock_.reset();
+  }
   std::lock_guard<std::mutex> lk(mutex_);
   open_ = false;
   joined_ = false;

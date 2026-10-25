@@ -51,6 +51,7 @@ CORE_SRC := \
   core/net/lan_discovery.cpp \
   core/net/voice_transport.cpp \
   core/net/voice_secure_transport.cpp \
+  core/net/multicast_lock.cpp \
   core/script/crypto.cpp \
   core/script/ed25519.cpp \
   core/script/manifest.cpp \
@@ -247,6 +248,7 @@ TEST_SRC := \
   tests/test_voice.cpp \
   tests/test_voice_crypto.cpp \
   tests/test_voice_secure.cpp \
+  tests/test_multicast_lock.cpp \
   tests/test_replay_format.cpp \
   tests/test_replay_capture.cpp \
   tests/test_replay_world.cpp \
