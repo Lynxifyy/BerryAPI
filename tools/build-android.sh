@@ -97,7 +97,8 @@ LZ4_COMMON_FLAGS=(-std=c99 -O2 -fPIC -fvisibility=hidden -w
 MBEDTLS_COMMON_FLAGS=(-std=c99 -O2 -fPIC -fvisibility=hidden -w
                       "-I$ROOT/third_party/mbedtls/include"
                       "-DMBEDTLS_CONFIG_FILE=\"mbedtls/mbedtls_config.h\"")
-LDFLAGS=(-shared -fvisibility=hidden -Wl,--gc-sections -Wl,-z,relro -Wl,-z,now)
+LDFLAGS=(-shared -fvisibility=hidden -Wl,--gc-sections -Wl,-z,relro -Wl,-z,now
+         -Wl,--version-script="$ROOT/tools/berry.exports.map")
 
 # ---------------------------------------------------------------------------
 # Dobby (vendored). Compile from source by default.
@@ -133,7 +134,8 @@ if [[ "${BERRY_DOBBY:-1}" == "1" ]]; then
     echo "build-android: cmake required to build Dobby from source" >&2
     exit 2
   fi
-  COMMON_FLAGS+=("-DBERRY_HOOK_ENGINE_DOBBY=1" "-DHOOK_MACHINE_ARCH_ARM64")
+  COMMON_FLAGS+=("-DBERRY_HOOK_ENGINE_DOBBY=1" "-DHOOK_MACHINE_ARCH_ARM64"
+                 "-I$ROOT/third_party/Dobby/include")
   LDFLAGS+=("-ldl" "-llog")
 fi
 

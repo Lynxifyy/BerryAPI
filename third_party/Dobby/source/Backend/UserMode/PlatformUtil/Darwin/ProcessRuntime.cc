@@ -133,7 +133,8 @@ const stl::vector<RuntimeModule> &ProcessRuntime::getModuleMap() {
 RuntimeModule ProcessRuntime::getModule(const char *name) {
   auto modules = getModuleMap();
   for (auto module : modules) {
-    if (strstr(module.path, name) != 0) {
+    auto filename = strrchr(module.path, '/');
+    if (filename && strcmp(filename + 1, name) == 0) {
       return module;
     }
   }

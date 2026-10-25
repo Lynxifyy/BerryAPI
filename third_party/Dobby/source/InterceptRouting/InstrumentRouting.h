@@ -28,7 +28,6 @@ struct InstrumentRouting : InterceptRouting {
 
   void BuildRouting() {
     __FUNC_CALL_TRACE__();
-
     GenerateInstrumentClosureTrampoline();
 
     GenerateTrampoline();

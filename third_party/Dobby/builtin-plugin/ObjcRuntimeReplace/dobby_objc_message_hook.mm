@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <objc/runtime.h>
+#include <CoreFoundation/CoreFoundation.h>
 
 /* clang -rewrite-objc main.m */
 
@@ -13,7 +14,7 @@ void DobbyHookMessageEx(const char *class_name, const char *selector_name, void 
   if (!method_) {
     method_ = class_getClassMethod(class_, sel_);
     if (!method_) {
-      // ERROR_LOG("Not found class: %s, selector: %s method\n", class_name, selector_name);
+      printf("Not found class: %s, selector: %s method\n", class_name, selector_name);
       return;
     }
   }
@@ -33,7 +34,7 @@ void *DobbyMessageMethodResolver(const char *class_name, const char *selector_na
     method_ = class_getClassMethod(class_, sel_);
 
   if (!method_) {
-    // DEBUG_LOG("Not found class: %s, selector: %s method\n", class_name, selector_name);
+    printf("Not found class: %s, selector: %s method\n", class_name, selector_name);
     return nullptr;
   }
   return (void *)method_getImplementation(method_);

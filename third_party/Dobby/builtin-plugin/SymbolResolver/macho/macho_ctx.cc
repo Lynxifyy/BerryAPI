@@ -87,6 +87,9 @@ void macho_ctx_t::init(mach_header_t *header, bool is_runtime_mode, mach_header_
     curr_cmd = (load_command *)((uintptr_t)curr_cmd + curr_cmd->cmdsize);
   }
 
+  if (!text_segment)
+    return;
+
   uintptr_t slide = (uintptr_t)header - (uintptr_t)text_segment->vmaddr;
   uintptr_t linkedit_base = (uintptr_t)slide + linkedit_segment->vmaddr - linkedit_segment->fileoff;
   if (!is_runtime_mode) {

@@ -241,8 +241,9 @@ void HookManager::BackendEmulateShim() {
 }
 
 #ifdef BERRY_HOOK_HAVE_DOBBY
-// Implemented in backend_dobby.cpp — never defined on the host shim build.
-void HookManager::UseDobby();
+// UseDobby() is declared in hooks.h and defined in backend_dobby.cpp; it is
+// never defined on the host shim build. An out-of-line redeclaration here
+// would be a qualified declaration with no definition, which clang rejects.
 #endif
 
 void HookManager::Track(void* target, HookSymbol symbol) {

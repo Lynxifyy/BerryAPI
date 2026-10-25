@@ -17,7 +17,7 @@ DEPFLAGS := -MMD -MP
 # The injectable shared library (android/linux target build).
 # Compile with -fPIC and -fvisibility=hidden; only BERRY_API symbols escape.
 SHARED_CXXFLAGS ?= -std=c++17 -O2 -fPIC -fvisibility=hidden -DBERRY_BUILD_SHARED -Iinclude -Ithird_party/ed25519 $(MBEDTLS_INCLUDES) $(LZ4_INCLUDES) $(LUAU_INCLUDES)
-SHARED_LDFLAGS  ?= -shared -pthread -ldl
+SHARED_LDFLAGS  ?= -shared -pthread -ldl -Wl,--version-script=tools/berry.exports.map
 SHARED_NAME     ?= libBerryAPI.so
 
 include tools/sources.mk
