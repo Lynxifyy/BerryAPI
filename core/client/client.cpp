@@ -214,6 +214,18 @@ bool BerryClient::Attach(Engine& engine, const ClientConfig& cfg) {
   worker_ = std::make_unique<ScriptWorker>();
   worker_->Start();
 
+  // Run the script's on_load on the worker before any tick, so a subscription
+  // or one-time setup it registers exists before the first tick's events. A
+  // missing on_load is not an error (most scripts implement only a subset).
+  if (script_ && script_->host()) {
+    worker_->Post([this]() {
+      ThreadModel::Instance().AssertScripts();
+      ScriptHost* host = script_ ? script_->host() : nullptr;
+      if (!host || !host->loaded()) return;
+      host->RunHook(ScriptHooks::OnLoad());
+    });
+  }
+
   attached_ = true;
   Log::Info("BerryClient attached (script: %s)", script_ ? "loaded" : "none");
   return true;
@@ -681,6 +693,13 @@ void BerryClient::RunTickOnWorker(GameTick tick) {
   } else {
     host->RunHook(ScriptHooks::OnTick());
   }
+  // Deliver any persistent-subscription events the engine queued since the last
+  // tick. Runs after on_tick so a hook that subscribes this tick is live for
+  // the next one, and it is a no-op when nothing subscribed. A host the tick
+  // faulted is unloaded, so this returns immediately.
+  if (host->loaded() && !host->suspended()) {
+    api_->bus().Pump(*host);
+  }
 }
 
 Vec2 BerryClient::screenSize() const {
@@ -724,6 +743,21 @@ bool BerryClient::ReloadScript() {
   const ReloadResult r = script_->Reload(false);
   if (r.attempted && !r.reloaded && !r.unchanged) {
     lastScriptError_ = r.error.message;
+  }
+  if (r.reloaded) {
+    // A new revision may have renamed or dropped the functions old
+    // subscriptions point at, so the previous revision's subscriptions are
+    // dropped and the fresh host re-registers through on_load. The reload
+    // swaps the host on the worker's timeline; posting the on_load keeps the
+    // re-registration on the worker with every other script call.
+    const std::string name = script_->manifest().name;
+    worker_->Post([this, name]() {
+      ThreadModel::Instance().AssertScripts();
+      api_->bus().OffAll(name);
+      ScriptHost* host = script_ ? script_->host() : nullptr;
+      if (!host || !host->loaded()) return;
+      host->RunHook(ScriptHooks::OnLoad());
+    });
   }
   return r.reloaded;
 }

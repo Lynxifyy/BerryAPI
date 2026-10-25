@@ -403,9 +403,18 @@ Capability: `cosmetic`.
 
 Capability: `events`.
 
+| Function | Capability | Description |
+| --- | --- | --- |
+| `events.on(channel: string, handler: string) -> number` | `events` | Registers `handler` (a function exported by the script) on `channel`. Returns a subscription id, or 0 when refused (empty/oversized channel or handler name, unknown channel, or the subscription cap is reached). The handler is called with the payload as its first argument; a channel with no payload delivers an empty string. Re-registering the same (channel, handler) pair returns the existing id rather than adding a duplicate. |
+| `events.off(id: number) -> bool` | `events` | Removes the subscription with `id`. Returns true when one was removed. |
+| `events.off_all() -> number` | `events` | Removes every subscription the calling script holds. Returns how many were removed. |
+| `events.subscriptions() -> number` | `events` | How many subscriptions the calling script holds. |
+| `events.emit(channel: string, payload: string) -> number` | `events` | Publishes `payload` on `channel` to every subscriber (this script included, unless it has no subscription). Returns how many handlers were dispatched. An empty or oversized channel is refused (returns 0). |
+| `events.channels() -> string` | `events` | The declared channels and every channel a script has subscribed to, comma-separated and sorted, so a script can discover what it can listen for. |
+
 Events (await with `Events.once`):
 
-- `hit(damage: number)` — Event channels scripts may await with Events.once. The world-diff channels are driven by the reactive world grid: entityEntered and entityLeft carry \"<id>:<type>\", entityUpdated fires when an entity's position, health or state changed between ticks, and blockChanged carries \"x,y,z,block\". A script never polls for these. The lifecycle channels (entityHurt, entityDeath, entitySpawn) are driven by the combat bus and the world diff and carry \"<id>:<detail>\" (entityHurt's detail is the damage, entitySpawn's is the type), so a script can filter by id without a parser.
+- `hit(damage: number)` — -
 - `kill(victim: string)` — -
 - `tick_count(count: number)` — -
 - `entityEntered(entity: string)` — -

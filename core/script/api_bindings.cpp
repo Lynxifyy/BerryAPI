@@ -2933,6 +2933,54 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Str(out);
   });
 
+  //--- Events (the persistent script bus) ----------------------------------
+  //
+  // `Events.once` (async.cpp) suspends the caller for one event; this is the
+  // push side. A handler is a function the script exports; the bus invokes it
+  // on the script worker between hooks, so the same budgets, capability gate
+  // and error isolation that govern on_tick govern a handler. Every binding
+  // fails closed: a refused subscription returns 0 (never a live id), an
+  // unknown channel is refused, and the subscription is scoped to the calling
+  // script (ctx.scriptName()), so one script cannot see or cancel another's.
+  install("events.on", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    const std::string channel = args[0].AsString();
+    const std::string handler = args[1].AsString();
+    const ScriptEventBus::SubscriptionId id =
+        bus_.On(channel, handler, ctx.scriptName());
+    return ScriptValue::Num((f64)id);
+  });
+
+  install("events.off", [this](ScriptContext& ctx, const std::vector<ScriptValue>& args) {
+    const f64 raw = args[0].AsNumber();
+    if (!std::isfinite(raw) || raw <= 0) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(bus_.Off((ScriptEventBus::SubscriptionId)raw,
+                                      ctx.scriptName()));
+  });
+
+  install("events.off_all", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    return ScriptValue::Num((f64)bus_.OffAll(ctx.scriptName()));
+  });
+
+  install("events.subscriptions", [this](ScriptContext& ctx, const std::vector<ScriptValue>&) {
+    return ScriptValue::Num((f64)bus_.CountFor(ctx.scriptName()));
+  });
+
+  install("events.emit", [this](ScriptContext&, const std::vector<ScriptValue>& args) {
+    const std::string channel = args[0].AsString();
+    const std::string payload = args[1].AsString();
+    return ScriptValue::Num((f64)bus_.Emit(channel, payload));
+  });
+
+  install("events.channels", [this](ScriptContext&, const std::vector<ScriptValue>&) {
+    const std::vector<std::string> chans = bus_.Channels();
+    std::string out;
+    for (const std::string& c : chans) {
+      if (!out.empty()) out += ",";
+      out += c;
+    }
+    return ScriptValue::Str(out);
+  });
+
   //--- Shader (script-registered post-processing) --------------------------
   //
   // Registration is validated before any GL call; a device that refuses the

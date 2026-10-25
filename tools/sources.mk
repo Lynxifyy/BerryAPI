@@ -70,6 +70,7 @@ CORE_SRC := \
   core/script/loader.cpp \
   core/script/pack.cpp \
   core/script/async.cpp \
+  core/script/script_bus.cpp \
   core/script/url.cpp \
   core/script/api_bindings.cpp \
   core/script/intent.cpp \
@@ -264,7 +265,8 @@ TEST_SRC := \
   tests/test_replay_world.cpp \
   tests/test_replay_review.cpp \
   tests/test_replay_server.cpp \
-  tests/test_replay_service.cpp
+  tests/test_replay_service.cpp \
+  tests/test_script_bus.cpp
 
 # Vendored Luau (MIT). See third_party/luau/PROVENANCE.md for the pinned
 # version and why these units and not the CLI. Compiled with -w because upstream

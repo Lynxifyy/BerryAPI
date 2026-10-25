@@ -487,6 +487,22 @@ export type Animator = {
   set_target: (entity: number) -> (),
 }
 
+-- Capability required: events.
+export type Events = {
+  -- Registers `handler` (a function exported by the script) on `channel`. Returns a subscription id, or 0 when refused (empty/oversized channel or handler name, unknown channel, or the subscription cap is reached). The handler is called with the payload as its first argument; a channel with no payload delivers an empty string. Re-registering the same (channel, handler) pair returns the existing id rather than adding a duplicate.
+  on: (channel: string, handler: string) -> number,
+  -- Removes the subscription with `id`. Returns true when one was removed.
+  off: (id: number) -> boolean,
+  -- Removes every subscription the calling script holds. Returns how many were removed.
+  off_all: () -> number,
+  -- How many subscriptions the calling script holds.
+  subscriptions: () -> number,
+  -- Publishes `payload` on `channel` to every subscriber (this script included, unless it has no subscription). Returns how many handlers were dispatched. An empty or oversized channel is refused (returns 0).
+  emit: (channel: string, payload: string) -> number,
+  -- The declared channels and every channel a script has subscribed to, comma-separated and sorted, so a script can discover what it can listen for.
+  channels: () -> string,
+}
+
 -- Capability required: input.
 export type Intent = {
   -- Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound, crystal_advise) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share.

@@ -505,7 +505,19 @@ module Animator {
 
 module Events {
   capability events
-  doc "Event channels scripts may await with Events.once. The world-diff channels are driven by the reactive world grid: entityEntered and entityLeft carry \"<id>:<type>\", entityUpdated fires when an entity's position, health or state changed between ticks, and blockChanged carries \"x,y,z,block\". A script never polls for these. The lifecycle channels (entityHurt, entityDeath, entitySpawn) are driven by the combat bus and the world diff and carry \"<id>:<detail>\" (entityHurt's detail is the damage, entitySpawn's is the type), so a script can filter by id without a parser."
+  doc "The script event bus. `Events.on` registers a persistent handler for a channel; the handler runs on the script worker every time the channel fires, until `Events.off`/`off_all` or the script unloads. `Events.emit` publishes a channel so every subscriber receives it. Channels are the declared event names below plus any name a script emits; a channel name is bounded and validated. Delivery is bounded and never re-entered: a handler that publishes its own channel is delivered on a later pump, an event that arrives while the script is suspended is held in a bounded queue (and dropped, counted, when the queue is full) rather than growing without limit, and a handler that faults the host stops further delivery until reload. This is the push counterpart to `Events.once`, which suspends the caller for a single event."
+  doc "Registers `handler` (a function exported by the script) on `channel`. Returns a subscription id, or 0 when refused (empty/oversized channel or handler name, unknown channel, or the subscription cap is reached). The handler is called with the payload as its first argument; a channel with no payload delivers an empty string. Re-registering the same (channel, handler) pair returns the existing id rather than adding a duplicate."
+  fn on(channel: string, handler: string) -> number
+  doc "Removes the subscription with `id`. Returns true when one was removed."
+  fn off(id: number) -> bool
+  doc "Removes every subscription the calling script holds. Returns how many were removed."
+  fn off_all() -> number
+  doc "How many subscriptions the calling script holds."
+  fn subscriptions() -> number
+  doc "Publishes `payload` on `channel` to every subscriber (this script included, unless it has no subscription). Returns how many handlers were dispatched. An empty or oversized channel is refused (returns 0)."
+  fn emit(channel: string, payload: string) -> number
+  doc "The declared channels and every channel a script has subscribed to, comma-separated and sorted, so a script can discover what it can listen for."
+  fn channels() -> string
   event hit(damage: number)
   event kill(victim: string)
   event tick_count(count: number)

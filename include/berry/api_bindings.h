@@ -53,6 +53,7 @@
 #include "berry/package.h"
 #include "berry/render.h"
 #include "berry/script.h"
+#include "berry/script_bus.h"
 #include "berry/scriptmod.h"
 #include "berry/session_recorder.h"
 #include "berry/replay_service.h"
@@ -263,6 +264,12 @@ class BERRY_API ScriptApi {
   RenderCommandQueue& queue() { return queue_; }
   const RenderCommandQueue& queue() const { return queue_; }
 
+  /// The script event bus. The client pumps it on the script worker (see
+  /// `ScriptEventBus::Pump`) between hooks, so a persistent `Events.on`
+  /// handler runs on the worker like every other script callback.
+  ScriptEventBus& bus() { return bus_; }
+  const ScriptEventBus& bus() const { return bus_; }
+
   //--- introspection (tests) ------------------------------------------------
   /// True when the binding `name` is installed.
   bool installed(const std::string& name) const;
@@ -310,6 +317,11 @@ class BERRY_API ScriptApi {
   // Why the last replay_mod.load failed, for the script to read back.
   mutable std::mutex replayErrorMutex_;
   std::string lastReplayError_;
+
+  // The script event bus: persistent subscriptions and their bounded delivery
+  // queue. One per ScriptApi, so a subscription is scoped to the script the
+  // api serves.
+  ScriptEventBus bus_;
 
   // Published by the render thread, read by the script thread.
   std::atomic<f32> frameMs_{0.0f};

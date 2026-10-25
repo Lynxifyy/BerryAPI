@@ -198,6 +198,56 @@ local res = await async.http_get("https://api.example.com/state", 2000)
 - A task that never becomes ready is bounded by its own timeout and faults the
   host rather than leaking a suspended invocation.
 
+## The script event bus (`Events.on`)
+
+`Events.once` is a one-shot await: it suspends the caller and resumes it with a
+single payload. `Events.on` is the push counterpart a long-lived mod wants — a
+named handler that runs every time a channel fires, for the life of the script:
+
+```
+function on_load()
+  events.on("combatConfirmed", "on_hit")   -- returns a subscription id
+end
+
+function on_hit(payload)
+  -- runs on the script worker each time a hit is confirmed
+end
+
+events.off(id)          -- remove one subscription
+events.off_all()        -- remove every subscription this script holds
+events.subscriptions()  -- how many this script holds
+events.channels()       -- every channel (declared + script-defined), comma-joined
+```
+
+The design is the threading split. Engine channels fire on the game-tick thread,
+the render thread and the transport threads, but script code may only run on the
+script worker. A `ScriptEventBus` listener therefore never calls into the
+script: it copies the payload into a bounded queue. `BerryClient` pumps that
+queue on the worker once per tick, after `on_tick`, and invokes the handler
+through `ScriptHost::RunHook` — the same path `on_tick` uses, so budgets,
+capability gating and error isolation apply unchanged.
+
+That split is also what makes re-entrancy impossible to get wrong:
+
+- A handler that calls `Events.emit` appends to the queue; the new event is
+  delivered on a later pump. A per-pump delivery cap bounds a handler that emits
+  its own channel, so it can never spin.
+- The queue is bounded (`kMaxQueued`). A full queue drops and *counts* what it
+  dropped (`ScriptEventBus::dropped()`), so a flood is observable rather than
+  fatal.
+- An event that arrives while the script is suspended is held, not run: the
+  async layer owns the host then, and delivery resumes once it is live again.
+- A handler that faults the host unloads it (error isolation), exactly like a
+  faulting `on_tick`; the remaining events stay queued for a reload.
+
+Subscriptions are validated and scoped: a channel must match the IDL's declared
+names or a script-defined name of the right shape, a handler must be a
+function-shaped identifier, and every subscription is owned by the calling
+script — `Events.off` refuses an id it does not own, so one script cannot cancel
+another's handler. Re-registering the same `(channel, handler)` pair is
+idempotent, so a hot reload that re-runs `on_load` does not accumulate duplicate
+deliveries.
+
 ## IDL codegen
 
 `api/berry.idl` is the single source of truth. `make idl` regenerates:

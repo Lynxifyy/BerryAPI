@@ -275,6 +275,12 @@ inline const BindingSpec* BindingSpecs() {
       {"animator.clear", CapKind::Cosmetic, 0, "Animator"},
       {"animator.target", CapKind::Cosmetic, 0, "Animator"},
       {"animator.set_target", CapKind::Cosmetic, 1, "Animator"},
+      {"events.on", CapKind::Events, 2, "Events"},
+      {"events.off", CapKind::Events, 1, "Events"},
+      {"events.off_all", CapKind::Events, 0, "Events"},
+      {"events.subscriptions", CapKind::Events, 0, "Events"},
+      {"events.emit", CapKind::Events, 2, "Events"},
+      {"events.channels", CapKind::Events, 0, "Events"},
       {"intent.allowed", CapKind::Input, 1, "Intent"},
       {"intent.classify", CapKind::Input, 1, "Intent"},
       {"intent.server", CapKind::Input, 0, "Intent"},
@@ -446,7 +452,7 @@ inline const BindingSpec* BindingSpecs() {
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 421; }
+inline size_t BindingSpecCount() { return 427; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -759,6 +765,14 @@ inline const char* const kAnimatorNames[] = {
     "animator.target",
     "animator.set_target",
 };
+inline const char* const kEventsNames[] = {
+    "events.on",
+    "events.off",
+    "events.off_all",
+    "events.subscriptions",
+    "events.emit",
+    "events.channels",
+};
 inline const char* const kIntentNames[] = {
     "intent.allowed",
     "intent.classify",
@@ -967,6 +981,7 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Input", kInputNames, 3},
       {"Cosmetic", kCosmeticNames, 12},
       {"Animator", kAnimatorNames, 22},
+      {"Events", kEventsNames, 6},
       {"Intent", kIntentNames, 6},
       {"Shader", kShaderNames, 10},
       {"Package", kPackageNames, 6},
@@ -980,7 +995,41 @@ inline const ModuleBindings* ModuleBindingTable() {
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 29; }
+inline size_t ModuleBindingCount() { return 30; }
+
+// Event channel declared in the IDL. A declared channel is
+// bridged from the engine bus by the script bus; a script may
+// also subscribe to and publish its own channels, which are
+// delivered in-process. Only a declared name carries a payload
+// this layer can decode from the engine bus.
+struct EventSpec {
+  const char* name;
+  const char* module;
+  int arity;
+};
+
+inline const EventSpec* EventSpecs() {
+  static const EventSpec kEvents[] = {
+      {"hit", "Events", 1},
+      {"kill", "Events", 1},
+      {"tick_count", "Events", 1},
+      {"entityEntered", "Events", 1},
+      {"entityLeft", "Events", 1},
+      {"entityUpdated", "Events", 1},
+      {"blockChanged", "Events", 1},
+      {"entityHurt", "Events", 1},
+      {"entityDeath", "Events", 1},
+      {"entitySpawn", "Events", 1},
+      {"combatPredicted", "Events", 1},
+      {"combatConfirmed", "Events", 1},
+      {"combatMissed", "Events", 1},
+      {"radialSelected", "Events", 1},
+      {"crystalAdvice", "Events", 1},
+  };
+  return kEvents;
+}
+
+inline size_t EventSpecCount() { return 15; }
 
 }  // namespace api
 }  // namespace Berry

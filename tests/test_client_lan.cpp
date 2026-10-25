@@ -408,6 +408,84 @@ int main() {
     relay.Close();
   }
 
+  //--- the script event bus, driven through the real client: on_load runs on
+  //    the worker and subscribes through the production path, and an engine
+  //    event is delivered to the script's handler on a later tick's pump.
+  //    (The handler's payload delivery is asserted against a real Luau VM in
+  //    test_script_bus; here the client wiring — subscribe on load, pump on
+  //    tick, drain the queue — is what is exercised.) ---
+  {
+    const std::string root = MakeTempDir("bus");
+    CHECK(!root.empty());
+    if (!root.empty()) {
+      const std::string dir = root + "/script";
+      std::string cmd = "mkdir -p '" + dir + "'";
+      CHECK(system(cmd.c_str()) == 0);
+      WriteFileRaw(dir + "/manifest.json",
+                   "{\"name\":\"bus-script\",\"version\":\"1.0.0\","
+                   "\"entry\":\"main.luau\",\"capabilities\":[\"events\"]}");
+      // on_load subscribes to a declared channel and to a script-only one.
+      WriteFileRaw(dir + "/main.luau",
+          "local M = {}\n"
+          "function M.on_load()\n"
+          "  events.on(\"combatConfirmed\", \"on_combat\")\n"
+          "  events.on(\"myCustom\", \"on_custom\")\n"
+          "  return 0\n"
+          "end\n"
+          "function M.on_combat(payload) M.last = payload return 0 end\n"
+          "function M.on_custom(payload) M.last = payload return 0 end\n"
+          "return M\n");
+
+      Engine& eng = Engine::Instance();
+      BerryConfigC cfg = BerryConfigC();
+      cfg.size = sizeof(cfg);
+      cfg.abi_version = BERRY_ABI_VERSION;
+      cfg.auto_attach_modules = 1;
+      cfg.enable_render = 1;
+      cfg.enable_client = 1;
+      cfg.dev_mode = 1;                 // unsigned script for the test
+      cfg.script_directory = dir.c_str();
+      CHECK(eng.Bootstrap(cfg));
+      CHECK(eng.Attach());
+      BerryClient* client = eng.Client();
+      CHECK(client != nullptr);
+
+      ScriptEventBus& bus = client->api().bus();
+      // on_load is posted to the worker at attach; drive ticks until it has run
+      // and the two subscriptions exist (bounded wait, not a blind sleep).
+      bool subscribed = false;
+      for (int i = 0; i < 200 && !subscribed; ++i) {
+        eng.OnGameTick((GameTick)i);
+        subscribed = bus.CountFor("bus-script") == 2;
+        if (!subscribed) usleep(1000);
+      }
+      CHECK(subscribed);
+      // The declared channel is bridged on the engine bus.
+      CHECK(EventBus::Instance().HasListeners("combatConfirmed"));
+
+      // An engine event is queued by the listener and delivered on a later
+      // tick's pump. `delivered()` proves the handler ran.
+      const u64 before = bus.delivered();
+      const char* payload = "hit-42";
+      EventBus::Instance().Emit("combatConfirmed", (void*)&payload);
+      bool delivered = false;
+      for (int i = 200; i < 400 && !delivered; ++i) {
+        eng.OnGameTick((GameTick)i);
+        delivered = bus.delivered() > before;
+        if (!delivered) usleep(1000);
+      }
+      CHECK(delivered);
+      CHECK(bus.queued() == 0);
+
+      // Detach must drop the engine listener with the script's subscriptions.
+      eng.Detach();
+      CHECK(!EventBus::Instance().HasListeners("combatConfirmed"));
+
+      std::string rm = "rm -rf '" + root + "'";
+      if (system(rm.c_str()) != 0) { /* best-effort cleanup */ }
+    }
+  }
+
   if (g_fail == 0) printf("test_client_lan: ALL OK\n");
   return g_fail;
 }

@@ -338,6 +338,34 @@ def emit_cpp(modules):
     out.append("")
     out.append("inline size_t ModuleBindingCount() { return %d; }" % len(mods))
     out.append("")
+    # Event channels, so the runtime script bus and the docs share one list. A
+    # subscription is validated against this table rather than against a
+    # hand-written list that could drift from the IDL.
+    events = []
+    for mod in modules:
+        for ev in mod.events:
+            events.append((ev.name, mod.name, len(ev.params)))
+    out.append("// Event channel declared in the IDL. A declared channel is")
+    out.append("// bridged from the engine bus by the script bus; a script may")
+    out.append("// also subscribe to and publish its own channels, which are")
+    out.append("// delivered in-process. Only a declared name carries a payload")
+    out.append("// this layer can decode from the engine bus.")
+    out.append("struct EventSpec {")
+    out.append("  const char* name;")
+    out.append("  const char* module;")
+    out.append("  int arity;")
+    out.append("};")
+    out.append("")
+    out.append("inline const EventSpec* EventSpecs() {")
+    out.append("  static const EventSpec kEvents[] = {")
+    for name, module, arity in events:
+        out.append("      {\"%s\", \"%s\", %d}," % (name, module, arity))
+    out.append("  };")
+    out.append("  return kEvents;")
+    out.append("}")
+    out.append("")
+    out.append("inline size_t EventSpecCount() { return %d; }" % len(events))
+    out.append("")
     out.append("}  // namespace api")
     out.append("}  // namespace Berry")
     out.append("")
@@ -530,6 +558,18 @@ def self_test():
         for fn in mod.functions:
             if fn.capability is None:
                 failures.append("binding %s has no capability" % fn.binding)
+    # The event table the script bus validates against must be non-empty and
+    # every channel must carry a name and a module, so a subscription can never
+    # be accepted against a half-declared event.
+    event_count = sum(len(mod.events) for mod in modules)
+    if event_count == 0:
+        failures.append("api/berry.idl declares no event channels")
+    for mod in modules:
+        for ev in mod.events:
+            if not ev.name:
+                failures.append("event in %s has no name" % mod.name)
+            if not mod.name:
+                failures.append("event %s has no module" % ev.name)
     if failures:
         for f in failures:
             sys.stderr.write("idlgen self-test: %s\n" % f)
