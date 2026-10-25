@@ -1,7 +1,9 @@
 // Capability manifests + signing. See include/berry/manifest.h for the rules.
 #include "berry/manifest.h"
+#include "berry/generated_bindings.h"  // api::ScriptApiVersion (IDL source of truth)
 #include "berry/logger.h"
 #include "berry/module.h"   // kCap* mask bits for CapabilitySet::ToModuleMask
+#include "berry/package.h"  // SemVer, for the api_version comparison
 #include "json_min.h"
 
 #include <algorithm>
@@ -251,6 +253,7 @@ const char* ManifestErrorName(ManifestError e) {
     case ManifestError::UnsupportedAlgorithm: return "unsupported-algorithm";
     case ManifestError::MissingSourceHash: return "missing-source-hash";
     case ManifestError::SourceHashMismatch: return "source-hash-mismatch";
+    case ManifestError::BadApiVersion: return "bad-api-version";
   }
   return "unknown";
 }
@@ -364,6 +367,21 @@ bool ScriptManifest::Parse(const std::string& json, ScriptManifest* out,
   }
   m.capabilities = set;
 
+  if (const detail::json::Value* api = root.Get("api_version")) {
+    if (!api->IsString()) {
+      return fail(ManifestError::BadApiVersion, "api_version must be a string");
+    }
+    // A declared requirement must be a real SemVer: a typo must fail the load
+    // rather than read as "no requirement", which would silently drop the
+    // compatibility check.
+    SemVer v;
+    if (!SemVer::Parse(api->str, &v)) {
+      return fail(ManifestError::BadApiVersion,
+                  "malformed api_version: " + api->str);
+    }
+    m.apiVersion = api->str;
+  }
+
   if (const detail::json::Value* sig = root.Get("signature")) {
     if (sig->IsString()) m.signature = sig->str;
   }
@@ -400,7 +418,29 @@ std::string ScriptManifest::CanonicalPayload() const {
   s += "\nsource_sha256=";
   s += sourceSha256;
   s += "\n";
+  // Emitted only when the manifest declares a requirement, so a manifest
+  // written before api_version existed keeps the exact payload it was signed
+  // with. Placed last so appending it does not shift any earlier line.
+  if (!apiVersion.empty()) {
+    s += "api_version=";
+    s += apiVersion;
+    s += "\n";
+  }
   return s;
+}
+
+const char* ScriptManifest::BuildApiVersion() { return api::ScriptApiVersion(); }
+
+bool ScriptManifest::ApiVersionSatisfied(const std::string& required,
+                                         const std::string& available) {
+  if (required.empty()) return true;   // no requirement declared
+  SemVer want, have;
+  // Both sides must parse: an unparseable requirement is a failure, not a
+  // wildcard. `available` comes from the generated header, so a bad value
+  // there is a build bug that must surface rather than load everything.
+  if (!SemVer::Parse(required, &want)) return false;
+  if (!SemVer::Parse(available, &have)) return false;
+  return CompareSemVer(want, have) <= 0;
 }
 
 std::string ScriptManifest::SourceHash(const std::string& source) {

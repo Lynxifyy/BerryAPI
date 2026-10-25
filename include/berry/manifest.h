@@ -155,6 +155,9 @@ enum class ManifestError : u32 {
   UnsupportedAlgorithm,
   MissingSourceHash,
   SourceHashMismatch,
+  /// The manifest's `api_version` is not a parseable SemVer. A malformed
+  /// version is a failure, never a silent "no requirement".
+  BadApiVersion,
 };
 
 const char* ManifestErrorName(ManifestError e);
@@ -165,6 +168,14 @@ struct BERRY_API ScriptManifest {
   std::string entry;         // relative entry file, e.g. "main.luau"
   std::string author;        // optional
   std::string description;   // optional
+  /// Minimum SCRIPT API version the script needs, as declared in the
+  /// manifest's `api_version` field (SemVer). Empty means the script declares
+  /// no requirement, which is the pre-versioning behaviour: such a manifest
+  /// loads on any build. When present it is part of the signed payload, so a
+  /// script cannot raise its requirement without a new signature, and the
+  /// loader refuses a script whose requirement is newer than this build's
+  /// generated API version (see api::ScriptApiVersion()).
+  std::string apiVersion;
   CapabilitySet capabilities;
   /// Hex SHA-256 of the entry source. Part of the signed payload, so a
   /// signature attests to the code that will actually run and not just to the
@@ -190,8 +201,15 @@ struct BERRY_API ScriptManifest {
 
   /// Canonical signed payload: a deterministic serialization of every
   /// security-relevant field (name, version, entry, author, sorted
-  /// capabilities, source hash). Deliberately excludes description and the
-  /// signature itself so cosmetic edits do not invalidate a signature.
+  /// capabilities, source hash, and the api_version requirement when one is
+  /// declared). Deliberately excludes description and the signature itself so
+  /// cosmetic edits do not invalidate a signature.
+  ///
+  /// The `api_version=` line is emitted only when the manifest declares one,
+  /// so a pre-versioning manifest keeps the exact bytes it was signed with and
+  /// an already-published signature still verifies. A manifest that declares a
+  /// requirement binds it into the payload, so the requirement cannot be
+  /// raised or lowered without invalidating the signature.
   std::string CanonicalPayload() const;
 
   /// Hex SHA-256 of CanonicalPayload().
@@ -223,6 +241,19 @@ struct BERRY_API ScriptManifest {
 
   /// Hex SHA-256 of `source`, the value a manifest's sourceSha256 must carry.
   static std::string SourceHash(const std::string& source);
+
+  /// The SCRIPT API version this build implements, as the IDL declares it
+  /// (api/berry.idl `api_version`, surfaced through api::ScriptApiVersion()).
+  /// Returned as a plain string so a caller does not need the generated
+  /// header; the loader compares it against a manifest's requirement.
+  static const char* BuildApiVersion();
+
+  /// True when `required` is satisfied by `available`: an empty requirement is
+  /// always satisfied, and otherwise the usual SemVer total order applies
+  /// (`required <= available`). A malformed requirement is NOT satisfied, so a
+  /// bad value fails closed rather than reading as "no requirement".
+  static bool ApiVersionSatisfied(const std::string& required,
+                                  const std::string& available);
 
   /// True when the entry path is safe: relative, no "..", no absolute path,
   /// no drive/backslash tricks. Guards against path traversal in the loader.

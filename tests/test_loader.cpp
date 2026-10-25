@@ -55,12 +55,14 @@ Keys MakeKeys() {
 std::string SignedManifest(const Keys& keys, const std::string& name,
                            const std::string& version,
                            const std::vector<std::string>& caps,
-                           const std::string& source) {
+                           const std::string& source,
+                           const std::string& apiVersion = "") {
   ScriptManifest m;
   m.name = name;
   m.version = version;
   m.entry = "main.luau";
   m.author = "Lynxifyy";
+  m.apiVersion = apiVersion;
   CHECK(CapabilitySet::ParseAll(caps, &m.capabilities, nullptr));
   m.sourceSha256 = ScriptManifest::SourceHash(source);
   CHECK(m.SignEd25519(keys.sec));
@@ -69,6 +71,7 @@ std::string SignedManifest(const Keys& keys, const std::string& name,
   json += "\"version\":\"" + m.version + "\",";
   json += "\"entry\":\"" + m.entry + "\",";
   json += "\"author\":\"" + m.author + "\",";
+  if (!apiVersion.empty()) json += "\"api_version\":\"" + apiVersion + "\",";
   json += "\"capabilities\":[";
   for (size_t i = 0; i < caps.size(); ++i) {
     if (i) json += ",";
@@ -543,6 +546,130 @@ void TestPythonSignerInterop() {
 
 }  // namespace
 
+//----------------------------------------------------------------------------
+// Script API version gate (Phase 17).
+//
+// A manifest declares the minimum script API it needs; the loader refuses a
+// script that asks for a newer surface than this build implements. A script
+// with no requirement loads everywhere (pre-versioning behaviour), and the
+// requirement is part of the signed payload so it cannot be raised silently.
+//----------------------------------------------------------------------------
+
+void TestApiVersionGate() {
+  const Keys keys = MakeKeys();
+  const std::string build = ScriptManifest::BuildApiVersion();
+
+  // No requirement: loads as before.
+  {
+    MemoryScriptFileSystem fs;
+    ScriptLoader loader(SignedConfig(keys), &fs);
+    ScriptManifest out;
+    LoadOutcome outcome;
+    CHECK(loader.VerifyOnly(SignedManifest(keys, "v", "1.0.0", {"render"}, kSource),
+                            kSource, &out, &outcome, nullptr));
+    CHECK(outcome.ok());
+  }
+
+  // Requirement equal to this build: loads.
+  {
+    MemoryScriptFileSystem fs;
+    ScriptLoader loader(SignedConfig(keys), &fs);
+    ScriptManifest out;
+    LoadOutcome outcome;
+    CHECK(loader.VerifyOnly(
+        SignedManifest(keys, "v", "1.0.0", {"render"}, kSource, build),
+        kSource, &out, &outcome, nullptr));
+    CHECK(outcome.ok());
+    CHECK(out.apiVersion == build);
+  }
+
+  // Requirement newer than this build: refused with the precise reason.
+  {
+    MemoryScriptFileSystem fs;
+    ScriptLoader loader(SignedConfig(keys), &fs);
+    ScriptManifest out;
+    LoadOutcome outcome;
+    CHECK(!loader.VerifyOnly(
+        SignedManifest(keys, "v", "1.0.0", {"render"}, kSource, "99.0.0"),
+        kSource, &out, &outcome, nullptr));
+    CHECK(outcome.error == LoadError::ApiVersionUnsupported);
+    CHECK(outcome.message.find("99.0.0") != std::string::npos);
+  }
+
+  // An older requirement is satisfied by a newer build.
+  {
+    MemoryScriptFileSystem fs;
+    ScriptLoader loader(SignedConfig(keys), &fs);
+    ScriptManifest out;
+    LoadOutcome outcome;
+    CHECK(loader.VerifyOnly(
+        SignedManifest(keys, "v", "1.0.0", {"render"}, kSource, "0.0.1"),
+        kSource, &out, &outcome, nullptr));
+    CHECK(outcome.ok());
+  }
+
+  // The gate is enforceable on the Load path too, and reported there.
+  {
+    MemoryScriptFileSystem fs;
+    ScriptLoader loader(SignedConfig(keys), &fs);
+    WriteScript(&fs, "scripts/new", keys, "new", "1.0.0", {"render"}, kSource);
+    // Rewrite the manifest to declare an unsupported requirement.
+    fs.Write("scripts/new/manifest.json",
+             SignedManifest(keys, "new", "1.0.0", {"render"}, kSource, "99.0.0"));
+    LoadedScript script;
+    LoadOutcome outcome;
+    CHECK(!loader.Load("scripts/new", &script, &outcome, nullptr));
+    CHECK(outcome.error == LoadError::ApiVersionUnsupported);
+  }
+
+  // The development escape hatch turns the check off but changes nothing else.
+  {
+    MemoryScriptFileSystem fs;
+    ScriptLoaderConfig cfg = SignedConfig(keys);
+    cfg.enforceApiVersion = false;
+    ScriptLoader loader(cfg, &fs);
+    ScriptManifest out;
+    LoadOutcome outcome;
+    CHECK(loader.VerifyOnly(
+        SignedManifest(keys, "v", "1.0.0", {"render"}, kSource, "99.0.0"),
+        kSource, &out, &outcome, nullptr));
+    CHECK(outcome.ok());
+  }
+
+  // Tampering with the requirement after signing is caught. The gate runs
+  // before the signature check, so a tampered requirement that is ALSO
+  // unsupported is refused as unsupported; a tampered requirement that the
+  // build does satisfy still has to pass the signature, which it cannot,
+  // because api_version is a signed field.
+  {
+    MemoryScriptFileSystem fs;
+    ScriptLoader loader(SignedConfig(keys), &fs);
+    ScriptManifest out;
+    LoadOutcome outcome;
+
+    // (a) Raised past this build: refused by the gate.
+    std::string raised = SignedManifest(keys, "v", "1.0.0", {"render"},
+                                        kSource, "1.0.0");
+    const size_t atRaised = raised.find("\"api_version\":\"1.0.0\"");
+    CHECK(atRaised != std::string::npos);
+    raised.replace(atRaised, std::string("\"api_version\":\"1.0.0\"").size(),
+                   "\"api_version\":\"2.0.0\"");
+    CHECK(!loader.VerifyOnly(raised, kSource, &out, &outcome, nullptr));
+    CHECK(outcome.error == LoadError::ApiVersionUnsupported);
+
+    // (b) Lowered to a still-satisfied value: the gate passes, and the
+    // signature rejects the edit because the payload changed.
+    std::string lowered = SignedManifest(keys, "v", "1.0.0", {"render"},
+                                         kSource, "1.0.0");
+    const size_t atLowered = lowered.find("\"api_version\":\"1.0.0\"");
+    CHECK(atLowered != std::string::npos);
+    lowered.replace(atLowered, std::string("\"api_version\":\"1.0.0\"").size(),
+                    "\"api_version\":\"0.0.1\"");
+    CHECK(!loader.VerifyOnly(lowered, kSource, &out, &outcome, nullptr));
+    CHECK(outcome.error == LoadError::BadSignature);
+  }
+}
+
 int main() {
   TestLoadsSignedScript();
   TestRefusesSwappedSource();
@@ -557,6 +684,7 @@ int main() {
   TestDevModeSkipsSignature();
   TestVerifyOnly();
   TestPythonSignerInterop();
+  TestApiVersionGate();
   if (g_fail == 0) printf("test_loader: ALL OK\n");
   return g_fail;
 }

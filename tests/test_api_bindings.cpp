@@ -16,6 +16,7 @@
 #include "berry/generated_bindings.h"
 #include "berry/hud.h"
 #include "berry/input.h"
+#include "berry/logger.h"
 #include "berry/perf.h"
 #include "berry/render.h"
 #include "berry/script.h"
@@ -2979,6 +2980,94 @@ static void TestGameReadsFailClosedWithoutService() {
   CHECK(!out.Truthy());
 }
 
+//----------------------------------------------------------------------------
+// Deprecation policy (Phase 17).
+//
+// A binding the IDL marks deprecated still resolves and still gates on its
+// capability; the runtime warns exactly once per script per binding. The gate
+// is the one path every native call takes, so the warning cannot be missed.
+//----------------------------------------------------------------------------
+
+static void TestDeprecatedBindingStillWorksAndWarns() {
+  std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
+  WorldHandle* world = worldMod->Service<WorldHandle>();
+  CHECK(world != nullptr);
+  auto shim = std::make_shared<Berry::Test::ShimLevel>();
+  shim->SetBlock(Vec3(1, 64, 1), 42);
+  world->SetSeam(shim);
+
+  ScriptApi::Services services;
+  services.world = world;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  // The deprecated alias is installed and callable: deprecation does not
+  // remove the binding.
+  CHECK(bindings.Has("world.block_id_at"));
+  CHECK(api::IsBindingDeprecated("world.block_id_at"));
+
+  ScriptHost host("dep-test", Grant({"world"}), nullptr);
+  host.SetBindings(&bindings);
+
+  ScriptValue out;
+  Log::Capture(true);
+  CHECK(host.CallBinding("world.block_id_at",
+                         {ScriptValue::Num(1), ScriptValue::Num(64),
+                          ScriptValue::Num(1)},
+                         &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 42);
+  const std::string first = Log::LastMessage();
+  CHECK(first.find("deprecated binding 'world.block_id_at'") != std::string::npos);
+
+  // A second call from the SAME script does not warn again (once per script).
+  Log::Capture(true);
+  Log::SetLevel(LogLevel::Warn);
+  // Reset the captured message by logging a sentinel through the same sink.
+  Log::Warn("sentinel");
+  CHECK(Log::LastMessage() == "sentinel");
+  CHECK(host.CallBinding("world.block_id_at",
+                         {ScriptValue::Num(1), ScriptValue::Num(64),
+                          ScriptValue::Num(1)},
+                         &out) == ScriptStatus::Ok);
+  CHECK(Log::LastMessage() == "sentinel");   // no new warning
+
+  // A fresh script warns again: the notice is per script, not global.
+  ScriptHost host2("dep-test-2", Grant({"world"}), nullptr);
+  host2.SetBindings(&bindings);
+  Log::Capture(true);
+  Log::Warn("sentinel2");
+  CHECK(host2.CallBinding("world.block_id_at",
+                          {ScriptValue::Num(1), ScriptValue::Num(64),
+                           ScriptValue::Num(1)},
+                          &out) == ScriptStatus::Ok);
+  CHECK(Log::LastMessage().find("deprecated binding") != std::string::npos);
+
+  // The non-deprecated spelling never warns.
+  Log::Capture(true);
+  Log::Warn("sentinel3");
+  CHECK(host.CallBinding("world.block_at",
+                         {ScriptValue::Num(1), ScriptValue::Num(64),
+                          ScriptValue::Num(1)},
+                         &out) == ScriptStatus::Ok);
+  CHECK(Log::LastMessage() == "sentinel3");
+
+  // A denied call never warns: the warning is emitted only after the
+  // capability gate lets the call through.
+  ScriptHost noCap("dep-test-3", Grant({}), nullptr);
+  noCap.SetBindings(&bindings);
+  Log::Capture(true);
+  Log::Warn("sentinel4");
+  CHECK(noCap.CallBinding("world.block_id_at",
+                          {ScriptValue::Num(1), ScriptValue::Num(64),
+                           ScriptValue::Num(1)},
+                          &out) == ScriptStatus::CapabilityDenied);
+  // The host logs its own denial; what matters is that no DEPRECATION warning
+  // was emitted, because the call never reached the binding.
+  CHECK(Log::LastMessage().find("deprecated binding") == std::string::npos);
+  Log::Capture(false);
+}
+
 static void TestCrystalBindings() {
   std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
   WorldHandle* world = worldMod->Service<WorldHandle>();
@@ -3457,6 +3546,7 @@ int main() {
   TestTouchFailsClosedWithoutService();
   TestGameReadsBindings();
   TestGameReadsFailClosedWithoutService();
+  TestDeprecatedBindingStillWorksAndWarns();
   TestFrameHookDrawsRadialMenu();
   TestCrystalBindings();
   TestCrystalFailsClosedWithoutService();

@@ -2,8 +2,12 @@
 
 # BerryAPI script API
 
+Script API version: `1.0.0`.
+
 Generated from `api/berry.idl`. Each function lists the capability a
-script must be granted before it can call it.
+script must be granted before it can call it. A function marked
+deprecated still resolves; it is scheduled for removal in a future
+major script-API version (see `docs/DEPRECATION.md`).
 
 ## Combat
 
@@ -121,7 +125,7 @@ Capability: `world`.
 | `world.get_biome(x: number, y: number, z: number) -> string` | `world` | The biome name at a block coordinate, or \"\" when the seam has no answer. |
 | `world.get_light(x: number, y: number, z: number) -> number` | `world` | The light level (0..15) at a block coordinate, or -1 when the seam has no answer. |
 | `world.get_chunk_state(x: number, y: number, z: number) -> string` | `world` | The load state of the chunk containing a block coordinate: \"unloaded\", \"loaded\" or \"rendered\". |
-| `world.block_id_at(x: number, y: number, z: number) -> number` | `world` | The numeric block id at integer coordinates (0 = air). Alias of `block_at`, spelled to make the numeric return obvious. |
+| `world.block_id_at(x: number, y: number, z: number) -> number` | `world` | **Deprecated.** Use `world.block_at`, which returns the same numeric id. `block_id_at` is an alias kept only for scripts written against the first release and is scheduled for removal in script API 2.0.0. The numeric block id at integer coordinates (0 = air). Alias of `block_at`, spelled to make the numeric return obvious. |
 
 ## Entity
 

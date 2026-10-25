@@ -63,6 +63,19 @@ make lib             # builds build/libBerryAPI.so
 - `api/berry.idl` is the single source of truth for the script API; run
   `make idl` after editing it. `make idl-check` (part of `make test`) runs the
   generator self-test and fails when the generated files drift.
+- The IDL declares the **script API version** (`api_version`), surfaced as
+  `api::ScriptApiVersion()`. A manifest may require a minimum in its
+  `api_version` field; the loader refuses a newer requirement
+  (`LoadError::ApiVersionUnsupported`) before the signature check, and the
+  requirement is part of the signed payload so it cannot be changed without
+  invalidating the signature. A manifest with no requirement keeps its exact
+  pre-versioning payload, so old signatures still verify. See
+  `docs/DEPRECATION.md`.
+- Retire a binding in stages: mark it `deprecated "…"` in the IDL (flows into
+  the C++ table, TS/Luau types and `docs/API.md`), keep it working and gated,
+  and remove it only at the next major script-API bump. The runtime warns once
+  per script per binding from inside `ScriptBindings::Invoke` — the one path
+  every native call takes — and only after the capability gate passes.
 - Scripts are capability-gated per call and budgeted per invocation; a fault
   puts the host in `Faulted` and it refuses further calls until reload.
 - The capability gate fails closed. A binding's requirement defaults to

@@ -47,6 +47,13 @@ class IdlError(Exception):
     pass
 
 
+# A script-API version: major.minor.patch with an optional -prerelease and
+# +build metadata. Kept loose (the loader parses it with the same SemVer rules
+# the package layer uses) but strict enough to reject a typo at generation time.
+_SEMVER_RE = re.compile(
+    r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+
+
 # IDL capability name -> CapKind enum value. Kept explicit so a typo in the IDL
 # fails the build instead of silently mapping to CapKind::Unknown, which the
 # runtime gate denies (a binding must name a capability, or say "nocap").
@@ -95,13 +102,14 @@ class Param:
 
 
 class Function:
-    def __init__(self, name, params, ret, capability, doc, module):
+    def __init__(self, name, params, ret, capability, doc, module, deprecated=None):
         self.name = name
         self.params = params
         self.ret = ret
         self.capability = capability
         self.doc = doc
         self.module = module
+        self.deprecated = deprecated
 
     @property
     def binding(self):
@@ -160,10 +168,15 @@ def _check_type(typ, where):
 
 
 def parse(text):
+    """Parses the IDL. Returns (api_version, modules). `api_version` is the
+    script-API version the IDL declares (a SemVer string), or "" when the
+    document omits the declaration."""
     modules = []
     current = None
     pending_doc = None
     pending_cap = None
+    pending_deprecated = None
+    api_version = ""
     seen_fns = set()
     seen_events = set()
 
@@ -172,7 +185,13 @@ def parse(text):
         if not line or line.startswith("#"):
             continue
         try:
-            if line.startswith("module "):
+            if line.startswith("api_version "):
+                if modules:
+                    raise IdlError("api_version must precede the first module")
+                api_version = line.split(None, 1)[1].strip()
+                if not _SEMVER_RE.match(api_version):
+                    raise IdlError("bad api_version %r" % api_version)
+            elif line.startswith("module "):
                 m = re.match(r"module\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{", line)
                 if not m:
                     raise IdlError("bad module declaration")
@@ -180,6 +199,7 @@ def parse(text):
                 modules.append(current)
                 pending_doc = None
                 pending_cap = None
+                pending_deprecated = None
             elif line == "}":
                 current = None
             elif line.startswith("capability "):
@@ -190,17 +210,23 @@ def parse(text):
                     raise IdlError("unknown capability %r" % cap)
                 current.capability = cap
                 pending_cap = cap
+            elif line.startswith("deprecated "):
+                if current is None:
+                    raise IdlError("deprecated outside a module")
+                pending_deprecated = _unquote(line.split(None, 1)[1].strip())
             elif line.startswith("doc "):
                 pending_doc = _unquote(line.split(None, 1)[1].strip())
             elif line.startswith("fn "):
                 if current is None:
                     raise IdlError("fn outside a module")
-                fn = _parse_fn(line, current, pending_doc, pending_cap)
+                fn = _parse_fn(line, current, pending_doc, pending_cap,
+                               pending_deprecated)
                 if fn.binding in seen_fns:
                     raise IdlError("duplicate binding %s" % fn.binding)
                 seen_fns.add(fn.binding)
                 current.functions.append(fn)
                 pending_doc = None
+                pending_deprecated = None
             elif line.startswith("event "):
                 if current is None:
                     raise IdlError("event outside a module")
@@ -210,11 +236,12 @@ def parse(text):
                 seen_events.add(ev.channel)
                 current.events.append(ev)
                 pending_doc = None
+                pending_deprecated = None
             else:
                 raise IdlError("unrecognised declaration: %r" % line)
         except IdlError as exc:
             raise IdlError("api/berry.idl:%d: %s" % (lineno, exc))
-    return modules
+    return api_version, modules
 
 
 def _unquote(s):
@@ -223,7 +250,7 @@ def _unquote(s):
     return s
 
 
-def _parse_fn(line, module, doc, cap):
+def _parse_fn(line, module, doc, cap, deprecated=None):
     m = re.match(r"fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*->\s*(\S+)\s*$", line)
     if not m:
         raise IdlError("bad fn declaration: %r" % line)
@@ -237,7 +264,8 @@ def _parse_fn(line, module, doc, cap):
         _check_type(ptype, "fn %s" % name)
         params.append(Param(pname, ptype))
     _check_type(ret, "fn %s return" % name)
-    return Function(name, params, ret, cap or module.capability, doc or "", module.name)
+    return Function(name, params, ret, cap or module.capability, doc or "",
+                    module.name, deprecated)
 
 
 def _parse_event(line, module, doc):
@@ -267,7 +295,28 @@ def _capability_enum(cap):
 # C++ header
 #----------------------------------------------------------------------------
 
-def emit_cpp(modules):
+def _cxx_string_literal(text):
+    """Escapes `text` into a C++ string literal body (without the quotes)."""
+    out = []
+    for ch in text:
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ord(ch) < 0x20:
+            out.append("\\x%02x" % ord(ch))
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
+def emit_cpp(api_version, modules):
     out = [BANNER, "#pragma once", "",
            "#include \"berry/export.h\"",
            "#include \"berry/types.h\"",
@@ -278,23 +327,39 @@ def emit_cpp(modules):
            "namespace Berry {",
            "namespace api {",
            "",
+           "// The script-API version this build implements, from the IDL's",
+           "// `api_version` declaration. A script manifest declares the minimum",
+           "// script API it needs; the loader refuses a script that asks for a",
+           "// newer surface than this header describes. Distinct from",
+           "// BERRY_ABI_VERSION (the injector config layout) and BERRY_VERSION_*",
+           "// (the library release).",
+           "inline const char* ScriptApiVersion() { return \"%s\"; }" % api_version,
+           "",
            "// Capability a generated binding requires. Parsed from the IDL so the",
            "// runtime gate and the documentation share one source of truth.",
+           "//",
+           "// `deprecated` is null for a live binding, or the advice text from the",
+           "// IDL's `deprecated \"...\"` line. A deprecated binding still resolves",
+           "// and still gates on its capability; the loader warns once per script",
+           "// that calls it. Removal is a major script-API bump.",
            "struct BindingSpec {",
            "  const char* name;",
            "  CapKind capability;",
            "  int arity;",
            "  const char* module;",
+           "  const char* deprecated;",
            "};",
            ""]
     specs = []
     for mod in modules:
         for fn in mod.functions:
-            specs.append((fn.binding, _capability_enum(fn.capability), len(fn.params), mod.name))
+            specs.append((fn.binding, _capability_enum(fn.capability), len(fn.params),
+                          mod.name, fn.deprecated))
     out.append("inline const BindingSpec* BindingSpecs() {")
     out.append("  static const BindingSpec kSpecs[] = {")
-    for name, cap, arity, module in specs:
-        out.append("      {\"%s\", %s, %d, \"%s\"}," % (name, cap, arity, module))
+    for name, cap, arity, module, dep in specs:
+        dep_lit = "nullptr" if dep is None else _cxx_string_literal(dep)
+        out.append("      {\"%s\", %s, %d, \"%s\", %s}," % (name, cap, arity, module, dep_lit))
     out.append("  };")
     out.append("  return kSpecs;")
     out.append("}")
@@ -310,6 +375,13 @@ def emit_cpp(modules):
     out.append("    if (name == specs[i].name) return &specs[i];")
     out.append("  }")
     out.append("  return nullptr;")
+    out.append("}")
+    out.append("")
+    out.append("/// True when `name` is a binding the IDL marks deprecated. A name that")
+    out.append("/// is not part of the surface is not deprecated (it does not exist).")
+    out.append("inline bool IsBindingDeprecated(const std::string& name) {")
+    out.append("  const BindingSpec* spec = FindBindingSpec(name);")
+    out.append("  return spec != nullptr && spec->deprecated != nullptr;")
     out.append("}")
     out.append("")
     # Per-module name lists, useful for docs/tests.
@@ -381,8 +453,10 @@ def _ts_type(t):
     return TYPE_MAP[t][1]
 
 
-def emit_ts(modules):
-    out = [BANNER.replace("//", "//"), "// TypeScript definitions for the BerryAPI script surface.",
+def emit_ts(api_version, modules):
+    out = [BANNER.replace("//", "//"),
+           "// TypeScript definitions for the BerryAPI script surface.",
+           "// Script API version: %s" % api_version,
            "", "export type TaskId = number;", "export type WidgetId = number;",
            "export interface ActorHandle { id: number; }",
            "export interface Vec3 { x: number; y: number; z: number; }",
@@ -399,8 +473,15 @@ def emit_ts(modules):
         for fn in mod.functions:
             args = ", ".join("%s: %s" % (p.name, _ts_type(p.type)) for p in fn.params)
             ret = "void" if fn.ret == "nil" else _ts_type(fn.ret)
-            if fn.doc:
+            if fn.doc and not fn.deprecated:
                 out.append("  /** %s */" % fn.doc)
+            elif fn.doc or fn.deprecated:
+                out.append("  /**")
+                if fn.doc:
+                    out.append("   * %s" % fn.doc)
+                if fn.deprecated:
+                    out.append("   * @deprecated %s" % fn.deprecated)
+                out.append("   */")
             out.append("  %s(%s): %s;" % (fn.name, args, ret))
         out.append("}")
         out.append("")
@@ -432,9 +513,10 @@ def _luau_type(t):
     return TYPE_MAP[t][2]
 
 
-def emit_luau(modules):
+def emit_luau(api_version, modules):
     out = ["-- " + BANNER.replace("// ", ""),
-           "-- Luau type definitions for the BerryAPI script surface.", "",
+           "-- Luau type definitions for the BerryAPI script surface.",
+           "-- Script API version: %s" % api_version, "",
            "export type TaskId = number", "export type WidgetId = number",
            "export type ActorHandle = { id: number }",
            "export type Vec3 = { x: number, y: number, z: number }",
@@ -451,6 +533,8 @@ def emit_luau(modules):
             ret = "()" if fn.ret == "nil" else _luau_type(fn.ret)
             if fn.doc:
                 out.append("  -- %s" % fn.doc)
+            if fn.deprecated:
+                out.append("  -- @deprecated %s" % fn.deprecated)
             out.append("  %s: (%s) -> %s," % (fn.name, args, ret))
         out.append("}")
         out.append("")
@@ -467,11 +551,14 @@ def emit_luau(modules):
 # Docs
 #----------------------------------------------------------------------------
 
-def emit_docs(modules):
+def emit_docs(api_version, modules):
     out = ["<!-- " + BANNER.replace("// ", "") + " -->", "",
            "# BerryAPI script API", "",
+           "Script API version: `%s`." % api_version, "",
            "Generated from `api/berry.idl`. Each function lists the capability a",
-           "script must be granted before it can call it.", ""]
+           "script must be granted before it can call it. A function marked",
+           "deprecated still resolves; it is scheduled for removal in a future",
+           "major script-API version (see `docs/DEPRECATION.md`).", ""]
     for mod in modules:
         out.append("## %s" % mod.name)
         out.append("")
@@ -486,8 +573,11 @@ def emit_docs(modules):
             for fn in mod.functions:
                 sig = "%s(%s)" % (fn.binding, ", ".join(
                     "%s: %s" % (p.name, p.type) for p in fn.params))
+                desc = fn.doc or "-"
+                if fn.deprecated:
+                    desc = "**Deprecated.** %s %s" % (fn.deprecated, desc)
                 out.append("| `%s -> %s` | `%s` | %s |" % (
-                    sig, fn.ret, fn.capability, fn.doc or "-"))
+                    sig, fn.ret, fn.capability, desc))
             out.append("")
         if mod.events:
             out.append("Events (await with `Events.once`):")
@@ -516,6 +606,21 @@ SELF_TEST_CASES = [
     # (description, idl text, expect_error)
     ("minimal",
      "module A {\n capability render\n fn go() -> nil\n}\n", False),
+    ("api_version accepted",
+     "api_version 1.2.3\nmodule A {\n capability render\n fn go() -> nil\n}\n",
+     False),
+    ("bad api_version rejected",
+     "api_version 1.2\nmodule A {\n capability render\n fn go() -> nil\n}\n",
+     True),
+    ("api_version after a module rejected",
+     "module A {\n capability render\n fn go() -> nil\n}\napi_version 1.0.0\n",
+     True),
+    ("deprecated accepted",
+     "module A {\n capability render\n deprecated \"use go2\"\n"
+     " fn go() -> nil\n}\n", False),
+    ("deprecated outside a module rejected",
+     "deprecated \"x\"\nmodule A {\n capability render\n fn go() -> nil\n}\n",
+     True),
     ("duplicate binding",
      "module A {\n capability render\n fn go() -> nil\n fn go() -> nil\n}\n", True),
     ("unknown type",
@@ -549,12 +654,24 @@ def self_test():
                 "error" if got_error else "ok"))
     # The real IDL must parse and must produce a non-empty, fail-closed table.
     try:
-        modules = parse(open(IDL_PATH).read())
+        api_version, modules = parse(open(IDL_PATH).read())
     except IdlError as exc:
         failures.append("api/berry.idl did not parse: %s" % exc)
-        modules = []
+        api_version, modules = "", []
     if not modules:
         failures.append("api/berry.idl produced no modules")
+    # The API version is the contract a script manifest binds to, so a missing
+    # or malformed one is a build failure, not a warning.
+    if not _SEMVER_RE.match(api_version):
+        failures.append("api/berry.idl has no valid api_version (%r)" % api_version)
+    deprecated = [fn.binding for mod in modules for fn in mod.functions
+                  if fn.deprecated]
+    # A deprecation must say what to use instead, so a script author is never
+    # left with a bare "deprecated" and no migration path.
+    for mod in modules:
+        for fn in mod.functions:
+            if fn.deprecated is not None and not fn.deprecated.strip():
+                failures.append("binding %s is deprecated with no advice" % fn.binding)
     for mod in modules:
         for fn in mod.functions:
             if fn.capability is None:
@@ -585,16 +702,16 @@ def main(argv):
     with open(IDL_PATH, "r") as fh:
         text = fh.read()
     try:
-        modules = parse(text)
+        api_version, modules = parse(text)
     except IdlError as exc:
         sys.stderr.write("idlgen: %s\n" % exc)
         return 1
 
     outputs = {
-        os.path.join(ROOT, "include", "berry", "generated_bindings.h"): emit_cpp(modules),
-        os.path.join(ROOT, "generated", "berry.d.ts"): emit_ts(modules),
-        os.path.join(ROOT, "generated", "berry.luau"): emit_luau(modules),
-        os.path.join(ROOT, "docs", "API.md"): emit_docs(modules),
+        os.path.join(ROOT, "include", "berry", "generated_bindings.h"): emit_cpp(api_version, modules),
+        os.path.join(ROOT, "generated", "berry.d.ts"): emit_ts(api_version, modules),
+        os.path.join(ROOT, "generated", "berry.luau"): emit_luau(api_version, modules),
+        os.path.join(ROOT, "docs", "API.md"): emit_docs(api_version, modules),
     }
 
     if check:

@@ -262,6 +262,25 @@ deliveries.
 the build when the generated files drift from the IDL, so the code and the docs
 cannot disagree.
 
+### API versioning and deprecation
+
+The IDL opens with an `api_version` declaration, and the generator emits it as
+`Berry::api::ScriptApiVersion()`. A manifest may declare the minimum script API
+it needs in its `api_version` field; the loader refuses a script that asks for a
+newer surface than the build implements (`LoadError::ApiVersionUnsupported`),
+before the signature check, so a script written for a later surface is rejected
+with a precise reason instead of faulting on a missing binding. The requirement
+is part of the signed payload, so it cannot be raised or lowered without
+invalidating the signature, and a manifest that never declared one keeps its
+pre-versioning payload byte-for-byte.
+
+A binding is retired in stages: mark it with a `deprecated "…"` line in the IDL
+(which flows into the C++ table, the TS/Luau definitions and `docs/API.md`), keep
+it working and gated, and remove it only at the next major script-API bump. The
+runtime warns once per script per binding from the capability gate — the single
+path every native call takes — and only for a call that passed the gate. See
+`docs/DEPRECATION.md` for the full policy and the change checklist.
+
 ### Binding the surface to services (`api_bindings.h`)
 
 The table lists what scripts may call; `ScriptApi` is what makes it callable.

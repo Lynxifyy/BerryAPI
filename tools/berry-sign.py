@@ -25,6 +25,13 @@ include/berry/manifest.h and must stay byte-identical to it:
     author=<author>\n
     capabilities=<sorted, comma-joined canonical capability list>\n
     source_sha256=<hex sha256 of the entry file>\n
+    [api_version=<declared script API requirement>\n]   # only when declared
+
+The trailing api_version line is present ONLY when the manifest declares one.
+A manifest written before script-API versioning keeps the exact bytes it was
+signed with, so an already-published signature still verifies; a manifest that
+declares a requirement binds it, so the requirement cannot change without
+invalidating the signature.
 
 Ed25519 is implemented here in pure Python (RFC 8032 reference construction)
 so the tool has no dependencies and can run on a bare build machine. It is
@@ -207,6 +214,11 @@ def canonical_payload(manifest):
         "capabilities=" + ",".join(canonical),
         "source_sha256=" + manifest.get("source_sha256", ""),
     ]
+    # Only emitted when declared, so a manifest that predates api_version keeps
+    # the exact payload it was signed with. Mirrors ScriptManifest::CanonicalPayload.
+    api_version = manifest.get("api_version")
+    if api_version:
+        lines.append("api_version=" + api_version)
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 

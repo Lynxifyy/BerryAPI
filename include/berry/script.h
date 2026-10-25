@@ -245,6 +245,16 @@ class BERRY_API ScriptContext {
   void SetScratch(const std::string& key, ScriptValue v);
   bool GetScratch(const std::string& key, ScriptValue* out) const;
 
+  /// Records that this script called a deprecated binding. Returns true the
+  /// first time for a given name, so the runtime warns once per script per
+  /// binding instead of once per call. Kept on the context (which lives for
+  /// the whole script) rather than in a global, so a warning is attributable
+  /// to the script that actually made the call.
+  bool NoteDeprecatedUse(const std::string& binding);
+
+  /// The deprecated bindings this script has called, in first-use order.
+  const std::vector<std::string>& deprecatedUses() const { return deprecatedUses_; }
+
  private:
   std::string scriptName_;
   CapabilitySet granted_;
@@ -255,6 +265,7 @@ class BERRY_API ScriptContext {
   bool hasError_ = false;
   std::string errorMessage_;
   std::vector<std::pair<std::string, ScriptValue>> scratch_;
+  std::vector<std::string> deprecatedUses_;
 };
 
 //----------------------------------------------------------------------------

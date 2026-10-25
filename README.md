@@ -66,6 +66,7 @@ See [docs/BUILD.md](docs/BUILD.md) for NDK details, Dobby CMake, and hook flags.
 - [Modules](docs/MODULES.md) — per-module API walkthrough
 - [Scripting](docs/SCRIPTING.md) — manifests, runtime budgets, hot reload, async, IDL codegen, client modules
 - [Script API reference](docs/API.md) — generated from `api/berry.idl`
+- [Versioning & deprecation](docs/DEPRECATION.md) — the script API version, manifest requirements, retiring a binding
 - [Hooking](docs/HOOKING.md) — shim vs Dobby backends, VTable patches
 - [Signatures](docs/SIGNATURES.md) — writing signature tables, AArch64 xrefs
 - [Threading](docs/THREADING.md) — tick/render/script threads and assertions
