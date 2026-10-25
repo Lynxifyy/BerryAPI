@@ -64,10 +64,44 @@ bool BerryClient::Attach(Engine& engine, const ClientConfig& cfg) {
   cosmetics_ = std::make_unique<CosmeticService>();
   // The animator drives the rendered rig through this seam: the cosmetic
   // renderer resolves bones through it, so a clip a script plays moves the
-  // local rig instead of sitting in a table. Its base is null; a device adapter
-  // installs a real skeleton seam behind it.
-  animatorSeam_ = std::make_unique<AnimatedSkeletonSource>(nullptr, animator_.get());
+  // local rig instead of sitting in a table. Its base is the on-device player
+  // model source (built below), so an animated bone layers on top of the real
+  // rig; until the device half is installed the base is null and the animator
+  // animates every entity the base would have resolved (i.e. none).
+  playerModelSkeleton_ = std::make_unique<PlayerModelSkeletonSource>();
+  animatorSeam_ = std::make_unique<AnimatedSkeletonSource>(
+      playerModelSkeleton_.get(), animator_.get());
   cosmetics_->SetSkeletonSource(animatorSeam_.get());
+  // The camera source lets a device render seam project real geometry through
+  // the frame's own camera; the renderer is bound once the engine is up (below).
+  cosmeticCamera_ = std::make_unique<RendererCameraSource>();
+  cosmetics_->SetCameraSource(cosmeticCamera_.get());
+  // Per-asset custom animations sample from the same clip store a script
+  // authors: the adapter is the seam the cosmetic renderer reads a named clip
+  // through, so an asset's `animation` moves it on its own bone. Without it
+  // every asset is placed rigidly.
+  animationSource_ = std::make_unique<AnimatorAnimationSource>(animator_.get());
+  cosmetics_->SetAnimationSource(animationSource_.get());
+  // The on-device mesh backend and the seam that resolves a draw item's
+  // geometry/texture handles against the asset store. On the host the backend
+  // is the null stub: the seam then drops every item (fail closed), which is
+  // the correct headless behaviour. The asset store itself is process-wide
+  // (`CosmeticAssetStore::Instance()`), so the seam borrows it directly.
+  cosmeticMeshBackend_.reset(CreateCosmeticMeshBackend());
+  if (cosmeticMeshBackend_ && cosmeticMeshBackend_->Init()) {
+    cosmeticRenderSeam_ = std::make_unique<DeviceCosmeticRenderSeam>(
+        &CosmeticAssetStore::Instance(), cosmeticMeshBackend_.get());
+    cosmetics_->SetRenderSeam(cosmeticRenderSeam_.get());
+    Log::Info("BerryClient: cosmetic mesh backend '%s' ready",
+              cosmeticMeshBackend_->name());
+  } else {
+    // No mesh backend: leave the service's seam unset rather than installing a
+    // seam that can only drop. A script still authors cosmetics; nothing draws
+    // on a headless host.
+    cosmeticMeshBackend_.reset();
+    Log::Info("BerryClient: no cosmetic mesh backend (headless); cosmetics "
+              "are authored but not drawn");
+  }
   // The local velocity source reaches the world through the same seam every
   // other read uses; the cosmetic sway and `input.velocity` both pull from it.
   velocitySource_ = std::make_unique<WorldVelocitySource>(world_, localPlayer_);
@@ -118,6 +152,17 @@ bool BerryClient::Attach(Engine& engine, const ClientConfig& cfg) {
   // struct layouts must be registered by the time a script asks the signature
   // cache or a layout to resolve. Verification happens inside the loader.
   LoadSigPacks(cfg);
+
+  // Cosmetic asset data and model packs load, and the player-model hook is
+  // installed, before the script: a script that equips a pack asset this frame
+  // needs the asset's geometry handle and the pack's catalog entry to already
+  // exist, and the hook must be live before the first rendered frame resolves
+  // bones.
+  BuildCosmetics(cfg);
+
+  // Register the built-in starter assets so a fresh client has something to
+  // show. Idempotent; a second call adds nothing.
+  CosmeticRegistry::Instance().RegisterBuiltins();
 
   // Build the services view the ScriptApi binds. The replay service lives on
   // the engine (the World module feeds its capture and the engine drives its
@@ -366,6 +411,92 @@ void BerryClient::LoadSigPacks(const ClientConfig& cfg) {
             (unsigned long long)sigPackLoader_->sequenceFloor());
 }
 
+void BerryClient::BuildCosmetics(const ClientConfig& cfg) {
+  // Cosmetic asset data loads first: a pack names geometry/texture handles, so
+  // the handles must exist before the pack's assets are registered (otherwise a
+  // pack asset would resolve to a retired handle and draw nothing).
+  if (!cfg.cosmeticAssetDirectory.empty()) {
+    cosmeticAssets_ = std::make_unique<CosmeticAssetLoader>(
+        fs_.get(), cfg.cosmeticAssetDirectory);
+    const auto report = cosmeticAssets_->LoadDirectory();
+    Log::Info("BerryClient: cosmetic assets: %zu meshes, %zu textures, "
+              "%zu refused%s",
+              report.meshes, report.textures, report.failed,
+              report.truncated ? " (truncated)" : "");
+  }
+
+  // Model packs register into the catalog the wardrobe reads. Loading after the
+  // assets means a pack's handles resolve; a pack that names a handle no asset
+  // supplied still registers (the asset simply draws nothing), which keeps a
+  // missing texture from discarding a whole cape.
+  if (!cfg.cosmeticPackDirectory.empty()) {
+    packs_->SetRoot(cfg.cosmeticPackDirectory);
+    const PackLoadReport report = packs_->LoadDirectory();
+    Log::Info("BerryClient: cosmetic packs: %zu loaded, %zu refused%s",
+              report.packsLoaded, report.packsFailed,
+              report.truncated ? " (truncated)" : "");
+  }
+
+  // Author the built-in clips into the animator, so the built-in cape flaps and
+  // the aura spins out of the box. A pack or a script can override a clip by
+  // name; the built-ins are added only when the name is free, so a creator's
+  // clip of the same name wins and the built-in never clobbers it.
+  RegisterBuiltinClips();
+
+  // The player-model hook is what makes the bones real: it refreshes the
+  // per-build reader's cache from the rendered pose, so the cosmetic renderer
+  // resolves bones the game actually computed. A missing target or reader
+  // leaves the skeleton source fail-closed (nothing resolves), which is the
+  // correct default for a build whose layout is unknown.
+  if (cfg.playerModelRenderTarget && cfg.playerModelBones.valid()) {
+    playerModelSkeleton_->SetReader(cfg.playerModelBones);
+    playerModelHook_ = std::make_unique<PlayerModelHook>();
+    playerModelHook_->SetReader(cfg.playerModelBones);
+    if (playerModelHook_->Install(cfg.playerModelRenderTarget,
+                                  HookManager::Instance().Backend())) {
+      Log::Info("BerryClient: player-model hook installed");
+    } else {
+      Log::Warn("BerryClient: player-model hook refused; cosmetics resolve no "
+                "bones");
+      playerModelHook_.reset();
+    }
+  } else {
+    Log::Info("BerryClient: no player-model target/reader; cosmetics resolve "
+              "no bones (fail closed)");
+  }
+}
+
+void BerryClient::RegisterBuiltinClips() {
+  if (!animator_) return;
+  // The cape's flap: the back bone lifts and rolls a little over a loop. Keys
+  // are authored at the extremes and the midpoint so the lerp reads as a slow
+  // flap rather than a triangle wave. Registered only when the name is free, so
+  // a creator pack or a script that authors `builtin.cape.flap` wins.
+  if (!animator_->hasClip("builtin.cape.flap")) {
+    if (animator_->AddClip("builtin.cape.flap", 2.0f, true)) {
+      animator_->AddKey("builtin.cape.flap", Bone::Back, 0.0f, Vec3(0, 0, 0),
+                        Vec3(0, 0, 0), 1.0f);
+      animator_->AddKey("builtin.cape.flap", Bone::Back, 1.0f, Vec3(0, 0, -0.08f),
+                        Vec3(-12.0f, 0, 4.0f), 1.0f);
+      animator_->AddKey("builtin.cape.flap", Bone::Back, 2.0f, Vec3(0, 0, 0),
+                        Vec3(0, 0, 0), 1.0f);
+    }
+  }
+  // The aura's spin: the torso bone rolls a full turn over a loop, so a
+  // billboard aura reads as a slow rotation. A one-shot would stop at the end
+  // and then hold; a loop keeps it turning.
+  if (!animator_->hasClip("builtin.aura.spin")) {
+    if (animator_->AddClip("builtin.aura.spin", 3.0f, true)) {
+      animator_->AddKey("builtin.aura.spin", Bone::Torso, 0.0f, Vec3(0, 0, 0),
+                        Vec3(0, 0, 0), 1.0f);
+      animator_->AddKey("builtin.aura.spin", Bone::Torso, 1.5f, Vec3(0, 0.05f, 0),
+                        Vec3(0, 0, 180.0f), 1.1f);
+      animator_->AddKey("builtin.aura.spin", Bone::Torso, 3.0f, Vec3(0, 0, 0),
+                        Vec3(0, 0, 360.0f), 1.0f);
+    }
+  }
+}
+
 void BerryClient::PollCosmeticSync() {
   if (!syncChannel_ || !syncTransport_) return;
   PublishLoadout();
@@ -439,7 +570,23 @@ void BerryClient::Detach() {
   if (cosmetics_) {
     cosmetics_->SetSkeletonSource(nullptr);
     cosmetics_->SetVelocitySource(nullptr);
+    // The animation source is borrowed by the service and owns nothing, but the
+    // clear keeps the seam honest before the adapter (and its Animator) die.
+    cosmetics_->SetAnimationSource(nullptr);
+    cosmetics_->SetRenderSeam(nullptr);
+    cosmetics_->SetCameraSource(nullptr);
   }
+  // The player-model hook must be uninstalled before its detour target and the
+  // skeleton source it feeds are released, or the game would call into freed
+  // memory.
+  if (playerModelHook_) playerModelHook_->Uninstall();
+  playerModelHook_.reset();
+  playerModelSkeleton_.reset();
+  animationSource_.reset();
+  cosmeticRenderSeam_.reset();
+  cosmeticMeshBackend_.reset();
+  cosmeticAssets_.reset();
+  cosmeticCamera_.reset();
   // Stop the backend after the renderer is no longer presenting, then release
   // the seam before the backend it points at.
   renderSeam_.reset();

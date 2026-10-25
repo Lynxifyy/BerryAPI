@@ -90,6 +90,18 @@ class Hook {
   void* target() const { return target_; }
   IHook* backend() const { return backend_; }
 
+  /// Removes the detour (if any) and clears the state, so the Hook can be
+  /// re-installed on a new target. Idempotent. Non-copyable and non-movable,
+  /// so a caller that needs to drop a live hook calls this rather than
+  /// assigning a fresh Hook.
+  void Reset() {
+    if (backend_ && fine_ && symbol_.target) backend_->Uninstall(symbol_.target);
+    symbol_ = HookSymbol{};
+    orig_ = nullptr;
+    target_ = nullptr;
+    fine_ = false;
+  }
+
  private:
   IHook* backend_ = nullptr;
   HookSymbol symbol_;

@@ -36,6 +36,9 @@ CORE_SRC := \
   core/modules/input.cpp \
   core/modules/pvp.cpp \
   core/modules/cosmetic.cpp \
+  core/modules/cosmetic_assets.cpp \
+  core/modules/cosmetic_device.cpp \
+  core/modules/cosmetic_gles.cpp \
   core/modules/shader.cpp \
   core/modules/governor.cpp \
   core/lifecycle/engine.cpp \
@@ -216,6 +219,8 @@ TEST_SRC := \
   tests/test_loader.cpp \
   tests/test_api_bindings.cpp \
   tests/test_cosmetic.cpp \
+  tests/test_cosmetic_assets.cpp \
+  tests/test_cosmetic_device.cpp \
   tests/test_client_lan.cpp \
   tests/test_pack.cpp \
   tests/test_intent.cpp \

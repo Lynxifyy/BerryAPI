@@ -149,6 +149,12 @@ int main() {
     CHECK(client->discovery() == nullptr);
     client->BeginFrame(16.0f, Vec2(1280, 720));   // a no-op poll
     client->EndFrame();
+    // The built-in clips are authored at attach, so a built-in cape/aura
+    // animates without a script or a pack. The client's own animator owns them,
+    // and the animation seam samples from that same store.
+    CHECK(client->animator().hasClip("builtin.cape.flap"));
+    CHECK(client->animator().hasClip("builtin.aura.spin"));
+    CHECK(client->cosmetics().animationSource() != nullptr);
     eng.Detach();
   }
 

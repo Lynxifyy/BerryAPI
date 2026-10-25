@@ -34,6 +34,8 @@
 #include "berry/audio.h"
 #include "berry/combat_state.h"
 #include "berry/cosmetic.h"
+#include "berry/cosmetic_assets.h"
+#include "berry/cosmetic_device.h"
 #include "berry/cosmetic_sync.h"
 #include "berry/crystal.h"
 #include "berry/event.h"
@@ -167,6 +169,27 @@ struct BERRY_API ClientConfig {
   /// writes through a temp file plus rename, so a persistence attempt cannot
   /// escape the directory or observe a partial write.
   std::string scriptDataDirectory;
+  /// Root directory for cosmetic model packs (`*.pack.json`). When set, the
+  /// client loads every pack at attach and on `cosmetic.reload_packs`, so a
+  /// creator's assets appear without a new build. Empty disables pack loading
+  /// (the built-ins still register).
+  std::string cosmeticPackDirectory;
+  /// Root directory for cosmetic asset data (`*.mesh.json` / `*.tex.json`).
+  /// When set, the client loads every mesh and texture at attach, so a pack's
+  /// `geometry`/`texture` handles resolve to real data. Empty leaves the asset
+  /// store empty (a pack asset then draws nothing).
+  std::string cosmeticAssetDirectory;
+  /// The game's player-render function, resolved by the embedder (a signature
+  /// scan against the target build). When non-null, the client installs the
+  /// player-model hook and fills the per-build bone reader, so cosmetics attach
+  /// to the rendered rig. Null (the default) leaves the skeleton seam without a
+  /// reader, which resolves nothing — the correct fail-closed default for a
+  /// build whose layout is unknown.
+  void* playerModelRenderTarget = nullptr;
+  /// The per-build bone reader the hook refreshes. The embedder fills it from
+  /// the resolved player-model layout. An empty reader keeps the cosmetic
+  /// skeleton seam fail-closed even when `playerModelRenderTarget` is set.
+  PlayerModelBoneReader playerModelBones;
 };
 
 //----------------------------------------------------------------------------
@@ -200,6 +223,34 @@ class BERRY_API WorldVelocitySource final : public LocalVelocitySource {
  private:
   WorldHandle* world_ = nullptr;
   EntityId local_;
+};
+
+//----------------------------------------------------------------------------
+// RendererCameraSource — the production CosmeticCameraSource.
+//----------------------------------------------------------------------------
+
+/// Reports the frame camera from the Renderer (the same camera the overlay
+/// projects with), so a device cosmetic render seam draws real geometry through
+/// the frame's own projection. Returns false when no renderer is bound or its
+/// camera is invalid, so a consumer treats the frame as unprojectable rather
+/// than using a stale one.
+class BERRY_API RendererCameraSource final : public CosmeticCameraSource {
+ public:
+  RendererCameraSource() = default;
+  explicit RendererCameraSource(Renderer* r) : renderer_(r) {}
+
+  void SetRenderer(Renderer* r) { renderer_ = r; }
+
+  bool Camera(CameraState* out) const override {
+    if (!renderer_) return false;
+    const CameraState cam = renderer_->camera();
+    if (!cam.valid) return false;
+    if (out) *out = cam;
+    return true;
+  }
+
+ private:
+  Renderer* renderer_ = nullptr;
 };
 
 //----------------------------------------------------------------------------
@@ -281,6 +332,12 @@ class BERRY_API BerryClient {
   PacketLog& packets() { return *packets_; }
   IntentValidator& intents() { return *intents_; }
   CosmeticPackLoader& packs() { return *packs_; }
+  /// The cosmetic asset loader (mesh/texture store), or null when no asset
+  /// directory is configured. For diagnostics and tests.
+  CosmeticAssetLoader* cosmeticAssets() { return cosmeticAssets_.get(); }
+  /// The cosmetic asset store: the process-wide mesh/texture catalog the render
+  /// seam resolves a draw item's handles against.
+  static CosmeticAssetStore& assets() { return CosmeticAssetStore::Instance(); }
   AsyncRuntime& async() { return *async_; }
 
   /// The LAN cosmetic-sync channel, or null when sync is disabled. Owns the
@@ -350,6 +407,17 @@ class BERRY_API BerryClient {
   /// per-script directory name is derived from the loaded manifest, so two
   /// scripts never share a sandbox.
   void BindScriptData(const ClientConfig& cfg);
+
+  /// Loads cosmetic model packs from `cfg.cosmeticPackDirectory` and cosmetic
+  /// asset data from `cfg.cosmeticAssetDirectory`, and installs the player-model
+  /// hook (with `cfg.playerModelBones`) on `cfg.playerModelRenderTarget`. A no-op
+  /// for each half the config leaves empty; each fails closed on its own.
+  void BuildCosmetics(const ClientConfig& cfg);
+
+  /// Authors the built-in animation clips into the animator, so a built-in cape
+  /// flaps and a built-in aura spins without a script or a pack. A clip is added
+  /// only when its name is free, so a creator's clip of the same name wins.
+  void RegisterBuiltinClips();
 
   /// Drains the sync transport and applies every verified loadout to the
   /// cosmetic service. Runs on the frame thread, before the overlays draw, so
@@ -427,6 +495,22 @@ class BERRY_API BerryClient {
   // the correct headless behaviour.
   std::unique_ptr<IRenderBackend> renderBackend_;
   std::unique_ptr<RenderSeam> renderSeam_;
+
+  // The on-device cosmetic render path: the mesh backend (GLES on device, null
+  // headless), the render seam that binds resolved items to it, the player-model
+  // hook that refreshes bones, the skeleton source that answers them, and the
+  // asset loader/store for real geometry. Built at attach; each fails closed
+  // (draws nothing / resolves nothing) when its platform half is unavailable.
+  std::unique_ptr<ICosmeticMeshBackend> cosmeticMeshBackend_;
+  std::unique_ptr<DeviceCosmeticRenderSeam> cosmeticRenderSeam_;
+  std::unique_ptr<PlayerModelHook> playerModelHook_;
+  std::unique_ptr<PlayerModelSkeletonSource> playerModelSkeleton_;
+  std::unique_ptr<CosmeticAssetLoader> cosmeticAssets_;
+  std::unique_ptr<RendererCameraSource> cosmeticCamera_;
+  // The per-asset custom-animation seam: adapts the Animator's named clips so a
+  // cosmetic's own `animation` moves it. Borrowed by the cosmetic service, so it
+  // is torn down after the service's animation source is cleared.
+  std::unique_ptr<AnimatorAnimationSource> animationSource_;
 
   // The VM-facing binding table: the IDL bindings plus the async bindings.
   ScriptBindings bindings_;

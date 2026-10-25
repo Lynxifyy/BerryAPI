@@ -350,6 +350,10 @@ class BERRY_API ScriptApi {
   u64 lastAnimatorMs_ = 0;
   /// Frame clock for replay-camera playback, kept separate for the same reason.
   u64 lastReplayMs_ = 0;
+  /// Frame clock for the cosmetic per-asset animation, kept separate so a
+  /// custom clip (a flapping cape) advances at the real frame delta even when
+  /// no replay camera is active.
+  u64 lastCosmeticAnimMs_ = 0;
   /// Frame clock for the radial menu's open/close animation, kept separate for
   /// the same reason.
   u64 lastRadialMs_ = 0;

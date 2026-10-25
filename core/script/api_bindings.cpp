@@ -407,6 +407,18 @@ void ScriptApi::InitFrameHook() {
         // asset presents through the one RenderSeam like every other overlay.
         // DrawLocal needs no skeleton bound: it resolves nothing and returns 0.
         if (services_.cosmetics && services_.renderer) {
+          // Advance the per-asset animation clock by the real frame delta
+          // BEFORE resolving, so a custom clip (a flapping cape) steps with the
+          // rendered frame. A stall is clamped so an animation never jumps.
+          {
+            const u64 now = NowMs();
+            if (lastCosmeticAnimMs_ != 0 && now > lastCosmeticAnimMs_) {
+              f32 dt = (f32)(now - lastCosmeticAnimMs_) / 1000.0f;
+              if (dt > 0.1f) dt = 0.1f;
+              services_.cosmetics->AdvanceAnimations(dt);
+            }
+            lastCosmeticAnimMs_ = now;
+          }
           services_.cosmetics->DrawLocal(*services_.renderer, services_.localPlayer);
           // Remote cosmetics (from the LAN sync channel) draw through the same
           // path, gated by the skeleton seam and the ownership check the

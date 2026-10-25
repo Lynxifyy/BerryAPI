@@ -91,6 +91,11 @@ using GeometryId = u64;
 using TextureId = u64;
 
 struct BERRY_API CosmeticAsset {
+  /// The longest custom-animation clip name an asset may carry. Bounded so a
+  /// hostile pack cannot inflate an asset with an unbounded string; it matches
+  /// the animator's own clip-name cap.
+  static constexpr size_t kMaxAnimationNameLen = 64;
+
   std::string id;            // stable id, e.g. "pack.cape.dragon"
   CosmeticSlot slot = CosmeticSlot::None;
   Bone bone = Bone::None;    // DefaultBoneFor(slot) when None
@@ -113,6 +118,16 @@ struct BERRY_API CosmeticAsset {
   /// bone's velocity: the asset leans back and lags as the player moves, so a
   /// cape is not welded stiffly to the back while sprinting or falling.
   f32 trail = 0.0f;
+  /// The name of an animation clip (authored in the script layer or a pack) that
+  /// plays on this asset's bone. Empty means no custom animation: the asset is
+  /// placed rigidly by its static offset. A named clip makes the asset move on
+  /// its own — a flapping cape, a spinning aura, a bobbing hat — layered on top
+  /// of the bone transform, so two assets on the same bone can animate
+  /// differently.
+  std::string animation;
+  /// Playback rate for `animation` (1 = authored speed). Must be finite and
+  /// positive; a bad value is refused at registration.
+  f32 animationSpeed = 1.0f;
 
   bool valid() const { return !id.empty() && slot != CosmeticSlot::None; }
   /// The bone to attach to, resolving None to the slot default.
@@ -136,6 +151,7 @@ enum class CosmeticError : u32 {
   NotOwned,
   BadTransform,     // NaN / non-finite offset, rotation or scale
   BadScale,         // non-positive scale
+  BadAnimation,     // over-long animation name, or non-finite/non-positive speed
   SlotOccupied,     // reserved for strict one-per-slot registries
   TooManyAssets,
 };
@@ -322,14 +338,71 @@ struct BERRY_API CosmeticDrawItem {
   /// The motion that produced this item's trailing pose (blocks/second), so a
   /// shader or a replay can reproduce the sway without re-deriving it.
   Vec3 velocity;
+  /// The custom-animation clip this item is playing, or "" when it is placed
+  /// rigidly. Carried so a seam (or a replay) can identify the pose's source.
+  std::string animation;
+  /// The clip's play time (seconds) at the moment the item was resolved, so a
+  /// shader or a replay can reproduce the exact pose without its own clock.
+  f32 animationTime = 0.0f;
+};
+
+/// The pose a named clip applies to an asset on top of its static attach
+/// transform. An invalid pose is a no-op, so a missing clip leaves the asset
+/// exactly where its offset puts it.
+struct BERRY_API CosmeticAnimPose {
+  Vec3 offset;               // blocks
+  Vec3 rotation;             // degrees: pitch, yaw, roll
+  f32 scale = 1.0f;
+  bool valid = false;
+};
+
+/// Supplies the animation pose for an asset's clip. A seam, so the core does
+/// not depend on the Animator (the client binds it) and the host harness can
+/// script a pose deterministically. Every call is pure: the same (clip, bone,
+/// time) always yields the same pose, so a replay reproduces a cosmetic exactly.
+class BERRY_API CosmeticAnimationSource {
+ public:
+  virtual ~CosmeticAnimationSource() = default;
+  /// The pose `clip` applies to `bone` at `timeSeconds`. Returns false when the
+  /// clip is unknown, the bone has no key, or the source cannot sample it, in
+  /// which case the caller places the asset rigidly.
+  virtual bool Sample(const std::string& clip, Bone bone, f32 timeSeconds,
+                      CosmeticAnimPose* out) const = 0;
 };
 
 /// Receives resolved cosmetics for drawing. The device implementation binds
 /// the geometry/texture ids to GLES programs; the host captures them.
+///
+/// A seam that draws real 3D geometry needs the frame's camera, so the service
+/// brackets a present with `BeginFrame`/`EndFrame` when a camera source is
+/// bound. Both default to a no-op, so a seam that only captures submissions (a
+/// host test, a 2D path) is unaffected.
 class BERRY_API CosmeticRenderSeam {
  public:
   virtual ~CosmeticRenderSeam() = default;
   virtual void SubmitGeometry(const CosmeticDrawItem& item) = 0;
+
+  /// Opens a present with the frame's camera and surface size. The default is a
+  /// no-op.
+  virtual void BeginFrame(const CameraState& cam, const Vec2& screenSize) {
+    (void)cam;
+    (void)screenSize;
+  }
+  /// Closes a present opened by `BeginFrame`. The default is a no-op.
+  virtual void EndFrame() {}
+};
+
+/// Supplies the frame's camera to the cosmetic service, so a device seam can
+/// project real geometry. A seam rather than a direct dependency: the service
+/// must not assume the renderer, and the host harness scripts a camera
+/// deterministically.
+class BERRY_API CosmeticCameraSource {
+ public:
+  virtual ~CosmeticCameraSource() = default;
+  /// Fills `out` with the frame's camera. Returns false when none is available,
+  /// in which case the seam frame is opened with an invalid camera (or not at
+  /// all) rather than a guessed one.
+  virtual bool Camera(CameraState* out) const = 0;
 };
 
 /// The trailing pose a slack asset takes for a given motion. Pure, so the
@@ -357,9 +430,22 @@ BERRY_API CosmeticTrailPose CosmeticTrailingPose(f32 trail, const Vec3& velocity
                                                  const Vec3& boneRotation);
 
 /// Composes an asset's attach transform onto a bone transform. Exposed so the
-/// math is testable without a seam.
+/// math is testable without a seam. This overload places the asset rigidly (no
+/// custom animation); the four-argument overload layers a clip's pose on top.
 BERRY_API CosmeticDrawItem ComposeAttach(const CosmeticAsset& asset,
                                          const CosmeticBoneTransform& bone,
+                                         EntityId entity);
+
+/// Composes an asset's attach transform onto a bone transform, layering the
+/// custom-animation pose `anim` (when valid) on top of the static offset. The
+/// animation offset is applied in the bone's local frame (scaled by the bone
+/// scale) and its rotation/scale add to the static ones, so a clip authored for
+/// an asset composes predictably no matter which bone it is attached to. An
+/// invalid `anim` (an unknown clip) is a no-op: the asset is placed exactly as
+/// the three-argument overload would.
+BERRY_API CosmeticDrawItem ComposeAttach(const CosmeticAsset& asset,
+                                         const CosmeticBoneTransform& bone,
+                                         const CosmeticAnimPose& anim,
                                          EntityId entity);
 
 //----------------------------------------------------------------------------
@@ -406,9 +492,23 @@ class BERRY_API CosmeticService {
     velocitySource_ = s;
     ClearResolveCache();
   }
+  /// The frame camera source, so a device render seam can project real geometry.
+  /// Swapping it invalidates no cached resolve (a resolve is world-space; only
+  /// the projection changes), so the cache is left intact.
+  void SetCameraSource(CosmeticCameraSource* s) { cameraSource_ = s; }
+  /// The animation source for per-asset custom clips. Swapping it invalidates
+  /// every cached resolve: an entry composed against the old source's poses
+  /// would be stale. A null source means every asset is placed rigidly (no
+  /// custom animation), which is the correct default when no clip exists.
+  void SetAnimationSource(CosmeticAnimationSource* s) {
+    animationSource_ = s;
+    ClearResolveCache();
+  }
   const CosmeticSkeletonSource* skeletonSource() const { return skeleton_; }
   const CosmeticRenderSeam* renderSeam() const { return seam_; }
   const LocalVelocitySource* velocitySource() const { return velocitySource_; }
+  const CosmeticCameraSource* cameraSource() const { return cameraSource_; }
+  const CosmeticAnimationSource* animationSource() const { return animationSource_; }
 
   /// The local player's velocity (blocks/second), or zero when unknown.
   Vec3 LocalVelocity() const {
@@ -416,6 +516,19 @@ class BERRY_API CosmeticService {
     if (velocitySource_ && velocitySource_->LocalVelocity(&v)) return v;
     return Vec3(0, 0, 0);
   }
+
+  //--- custom-animation clock ----------------------------------------------
+  /// Advances the clock the per-asset custom clips are sampled against. The
+  /// service owns no clock of its own: this is the whole time input, so a host
+  /// test drives it deterministically and a paused client does not advance. A
+  /// non-finite or negative delta is ignored. An asset's clip is sampled at
+  /// `animationTime() * asset.animationSpeed`, so two assets can run the same
+  /// clip at different rates.
+  void AdvanceAnimations(f32 dtSeconds);
+  /// The current animation clock, in seconds.
+  f32 animationTime() const { return animClock_.load(); }
+  /// Resets the animation clock to zero (e.g. when a loadout is cleared).
+  void ResetAnimationClock() { animClock_.store(0.0f); }
 
   //--- local loadout --------------------------------------------------------
   /// A snapshot of the local loadout. Returned by value so a caller never
@@ -512,15 +625,25 @@ class BERRY_API CosmeticService {
   /// Drops the least recently used entry. Caller must hold cacheMutex_.
   void EvictLruLocked() const;
 
+  /// True when any asset in `loadout` names a custom clip and an animation
+  /// source is bound, so the resolve's pose changes every frame and must not be
+  /// cached. Reads only the seam pointer and the (immutable) registry.
+  bool AnimationAppliesTo(const CosmeticLoadout& loadout) const;
+
   CosmeticSkeletonSource* skeleton_ = nullptr;
   CosmeticRenderSeam* seam_ = nullptr;
   LocalVelocitySource* velocitySource_ = nullptr;
+  CosmeticCameraSource* cameraSource_ = nullptr;
+  CosmeticAnimationSource* animationSource_ = nullptr;
 
   mutable std::mutex mutex_;
   CosmeticLoadout local_;
   CosmeticWardrobe wardrobe_;
   std::map<std::string, CosmeticLoadout> remote_;
   std::atomic<bool> localOnly_{true};
+  /// The custom-animation clock. Atomic: a script advances it on the worker
+  /// while the render thread samples it. Advanced only by `AdvanceAnimations`.
+  std::atomic<f32> animClock_{0.0f};
   mutable CosmeticStats stats_;
 
   /// One cached resolve, keyed by (raw, runtime) entity id; invalidated when

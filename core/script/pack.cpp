@@ -108,7 +108,8 @@ const std::set<std::string>& PackKeys() {
 const std::set<std::string>& AssetKeys() {
   static const std::set<std::string> k = {
       "id", "slot", "bone", "geometry", "texture", "offset",
-      "rotation", "scale", "tint", "trail", "pack", "author", "tags"};
+      "rotation", "scale", "tint", "trail", "animation", "animation_speed",
+      "pack", "author", "tags"};
   return k;
 }
 
@@ -270,6 +271,23 @@ PackError CosmeticPackLoader::ParsePack(const std::string& text,
     if (!ReadTags(item, &asset.tags, &adetail)) {
       return fail(PackError::BadAsset,
                   "asset '" + asset.id + "': " + adetail);
+    }
+    // A custom-animation clip name (bounded) and its playback rate. The clip
+    // itself is authored in the script layer (Animator) or another pack; the
+    // asset only names it, so a missing clip fails closed to a rigid placement.
+    if (const Value* an = item.Get("animation")) {
+      if (!an->IsString() || !SafeText(an->str, 64)) {
+        return fail(PackError::BadAsset,
+                    "asset '" + asset.id + "' has a bad animation name");
+      }
+      asset.animation = an->str;
+    }
+    if (const Value* sp = item.Get("animation_speed")) {
+      if (!sp->IsNumber() || !std::isfinite(sp->number) || sp->number <= 0) {
+        return fail(PackError::BadAsset,
+                    "asset '" + asset.id + "' has a bad animation_speed");
+      }
+      asset.animationSpeed = (f32)sp->number;
     }
 
     // Provenance defaults to the pack's own identity; an asset may name its own.

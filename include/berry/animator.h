@@ -124,6 +124,13 @@ class BERRY_API Animator {
   /// The bone's pose at the current play time.
   BonePose SampleNow(Bone bone) const;
 
+  /// A bone's interpolated pose at `time` within a NAMED clip, independent of
+  /// the current selection or playback state. Used by per-asset custom
+  /// animations, where several clips play at once on different bones. A looping
+  /// clip wraps `time` into its duration; a one-shot clip clamps at the ends.
+  /// Returns an invalid pose when the clip is unknown or the bone has no key.
+  BonePose SampleClip(const std::string& clip, Bone bone, f32 time) const;
+
   /// The whole current pose: one entry per bone that has at least one key in the
   /// current clip, at the current time. Empty when no clip is selected.
   std::vector<std::pair<Bone, BonePose>> SamplePose() const;
@@ -144,6 +151,10 @@ class BERRY_API Animator {
   /// Caller holds `mutex_`.
   bool BracketLocked(Bone bone, f32 time, const AnimKey** lo,
                      const AnimKey** hi, f32* t) const;
+  /// The same bracket against a specific clip, so a named-clip sample does not
+  /// depend on the current selection. Caller holds `mutex_`.
+  bool BracketClipLocked(const AnimClip& c, Bone bone, f32 time,
+                         const AnimKey** lo, const AnimKey** hi, f32* t) const;
   /// Samples against the current clip without taking the lock. Caller holds it.
   BonePose SampleLocked(Bone bone, f32 time) const;
   const AnimClip* FindLocked(const std::string& name) const;
@@ -196,6 +207,39 @@ class BERRY_API AnimatedSkeletonSource final : public CosmeticSkeletonSource {
   CosmeticSkeletonSource* base_ = nullptr;
   Animator* animator_ = nullptr;
   std::atomic<u64> targetRaw_{0};
+};
+
+/// Adapts an `Animator`'s named clips to the cosmetic renderer's animation
+/// seam, so a per-asset custom clip (`CosmeticAsset::animation`) is sampled from
+/// the same clip store a script authors. This is what makes a cosmetic's own
+/// animation real: without it the renderer has no source and every asset is
+/// placed rigidly.
+///
+/// The animator's clip store is keyed by name and independent of playback
+/// state, so this seam never disturbs what a script is playing: it is a pure
+/// read. It is a thin pass-through to `Animator::SampleClip`.
+class BERRY_API AnimatorAnimationSource final : public CosmeticAnimationSource {
+ public:
+  explicit AnimatorAnimationSource(Animator* animator) : animator_(animator) {}
+  void SetAnimator(Animator* animator) { animator_ = animator; }
+
+  bool Sample(const std::string& clip, Bone bone, f32 timeSeconds,
+              CosmeticAnimPose* out) const override {
+    if (out) *out = CosmeticAnimPose{};
+    if (!animator_ || clip.empty()) return false;
+    const Animator::BonePose pose = animator_->SampleClip(clip, bone, timeSeconds);
+    if (!pose.valid) return false;
+    if (out) {
+      out->offset = pose.position;
+      out->rotation = pose.rotation;
+      out->scale = pose.scale;
+      out->valid = true;
+    }
+    return true;
+  }
+
+ private:
+  Animator* animator_ = nullptr;
 };
 
 }  // namespace Berry
