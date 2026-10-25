@@ -27,6 +27,7 @@ const KindRow kKinds[] = {
     {"events", CapKind::Events},     {"audio", CapKind::Audio},
     {"cosmetic", CapKind::Cosmetic}, {"packets", CapKind::Packets},
     {"voice", CapKind::Voice},       {"crystal", CapKind::Crystal},
+    {"gamereads", CapKind::GameReads},
 };
 // "nocap" is deliberately NOT in the table above: it is a binding REQUIREMENT,
 // never a manifest grant, so a manifest must not be able to write it and a

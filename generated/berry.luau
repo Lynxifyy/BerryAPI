@@ -896,6 +896,87 @@ export type ReplayMod = {
   status: () -> string,
 }
 
+-- Capability required: gamereads.
+export type Inventory = {
+  -- How many slots the inventory reports, capped at 256.
+  slot_count: () -> number,
+  -- The stack in `slot` as {empty, id, name, count, damage, max_damage}. An out-of-range or unreadable slot reads as empty.
+  slot: (index: number) -> {[string]: any},
+  -- Every non-empty stack, in slot order, as a table keyed \"0\",\"1\",…, each a stack table.
+  items: () -> {[string]: any},
+  -- How many non-empty stacks the inventory holds.
+  item_count: () -> number,
+  -- The selected hotbar slot, or -1 when unknown.
+  selected_slot: () -> number,
+  -- The total count of `id` across the inventory, 0 when none. An empty or oversized id is refused (0).
+  count_of: (id: string) -> number,
+  -- Whether the inventory holds at least `min_count` of `id` (`min_count` <= 0 means \"any\"). False for a bad id or no source.
+  has: (id: string, min_count: number) -> boolean,
+  -- True while a source is bound (the inventory can be read).
+  available: () -> boolean,
+}
+
+-- Capability required: gamereads.
+export type Server = {
+  -- The session as one table: {connected, host, port, version, protocol, player_count, max_players, motd, gamemode, dimension, latency_ms}.
+  info: () -> {[string]: any},
+  -- True while a session is connected.
+  connected: () -> boolean,
+  host: () -> string,
+  port: () -> number,
+  version: () -> string,
+  -- The negotiated protocol number, 0 when unknown.
+  protocol: () -> number,
+  -- The players the tab list already shows.
+  player_count: () -> number,
+  max_players: () -> number,
+  motd: () -> string,
+  -- The local player's own gamemode name.
+  gamemode: () -> string,
+  -- The local player's own dimension name.
+  dimension: () -> string,
+  -- Round-trip time to the server in milliseconds, 0 when unknown.
+  latency_ms: () -> number,
+}
+
+-- Capability required: gamereads.
+export type Chat = {
+  -- The recent chat, oldest first, as a table keyed \"0\",\"1\",…, each {sender, text, at_ms, system}. Capped at 128 lines.
+  messages: () -> {[string]: any},
+  -- How many lines the history holds, capped at 128.
+  count: () -> number,
+  -- The text of line `index` (0 = oldest), or an empty string when out of range.
+  text: (index: number) -> string,
+  -- The sender of line `index`, or an empty string for a system line or an out-of-range index.
+  sender: (index: number) -> string,
+  -- Whether line `index` is a system line. False when out of range.
+  is_system: (index: number) -> boolean,
+  -- The most recent line's text, or an empty string when the history is empty.
+  last: () -> string,
+  -- True while a source is bound (the chat can be read).
+  available: () -> boolean,
+}
+
+-- Capability required: gamereads.
+export type Screen = {
+  -- The screen as one table: {open, name, title, width, height, keyboard_open}.
+  state: () -> {[string]: any},
+  -- True while a menu is open.
+  open: () -> boolean,
+  -- The open screen's name (\"chat\", \"inventory\", \"pause\", …), or an empty string when none.
+  name: () -> string,
+  -- The open screen's title, or an empty string.
+  title: () -> string,
+  -- The open screen's width in pixels, 0 when closed.
+  width: () -> number,
+  -- The open screen's height in pixels, 0 when closed.
+  height: () -> number,
+  -- True while a text keyboard is open.
+  keyboard_open: () -> boolean,
+  -- True while a source is bound (the screen can be read).
+  available: () -> boolean,
+}
+
 export type AsyncFacade = {
   wait: (ticks: number) -> ((),
   eventsOnce: (channel: string) -> (unknown,

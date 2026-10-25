@@ -3873,6 +3873,268 @@ size_t ScriptApi::InstallBindings(ScriptBindings* out) {
     return ScriptValue::Tbl(std::move(t));
   });
 
+  //--- Game reads (inventory, server, chat, screen) -------------------------
+  //
+  // Read-only views of state the client already holds for its own player. Each
+  // read pulls through the seam and fails closed (empty) when no source is
+  // bound, which is the same shape an unbound seam produces, so a script never
+  // has to special-case "no data" versus "no seam". Nothing here sends a
+  // packet, opens a screen or mutates game state.
+  auto reads = [this]() -> GameReads* { return services_.reads; };
+  auto stackTable = [](const ItemStack& s) {
+    ScriptTable t;
+    t["empty"] = ScriptValue::Bool(s.empty);
+    t["id"] = ScriptValue::Str(s.id);
+    t["name"] = ScriptValue::Str(s.name);
+    t["count"] = ScriptValue::Num((f64)s.count);
+    t["damage"] = ScriptValue::Num((f64)s.damage);
+    t["max_damage"] = ScriptValue::Num((f64)s.maxDamage);
+    return t;
+  };
+
+  install("inventory.slot_count", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Num(r ? (f64)r->slotCount() : 0.0);
+  });
+
+  install("inventory.slot", [reads, stackTable](ScriptContext&, const std::vector<ScriptValue>& args) {
+    GameReads* r = reads();
+    const f64 n = args[0].AsNumber();
+    // A slot index must be a whole, non-negative number; anything else names no
+    // slot and reads as empty rather than being truncated into a real one.
+    if (!r || !std::isfinite(n) || n < 0.0 || n != std::floor(n)) {
+      return ScriptValue::Tbl(stackTable(ItemStack{}));
+    }
+    return ScriptValue::Tbl(stackTable(r->slot((size_t)n)));
+  });
+
+  install("inventory.items", [reads, stackTable](ScriptContext&, const std::vector<ScriptValue>&) {
+    ScriptTable t;
+    if (GameReads* r = reads()) {
+      const std::vector<ItemStack> items = r->items();
+      for (size_t i = 0; i < items.size(); ++i) {
+        t[std::to_string(i)] = ScriptValue::Tbl(stackTable(items[i]));
+      }
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("inventory.item_count", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Num(r ? (f64)r->items().size() : 0.0);
+  });
+
+  install("inventory.selected_slot", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Num(r ? (f64)r->selectedSlot() : -1.0);
+  });
+
+  install("inventory.count_of", [reads](ScriptContext&, const std::vector<ScriptValue>& args) {
+    GameReads* r = reads();
+    return ScriptValue::Num(r ? (f64)r->countOf(args[0].ToDisplay()) : 0.0);
+  });
+
+  install("inventory.has", [reads](ScriptContext&, const std::vector<ScriptValue>& args) {
+    GameReads* r = reads();
+    if (!r) return ScriptValue::Bool(false);
+    const f64 n = args[1].AsNumber();
+    // A non-finite threshold means "any" (<=0), matching the C++ contract,
+    // rather than being cast into an arbitrary integer.
+    const i32 minCount = std::isfinite(n) ? (i32)n : 0;
+    return ScriptValue::Bool(r->has(args[0].ToDisplay(), minCount));
+  });
+
+  install("inventory.available", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    return ScriptValue::Bool(reads() != nullptr);
+  });
+
+  install("server.info", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    ServerInfo i;
+    if (GameReads* r = reads()) i = r->server();
+    ScriptTable t;
+    t["connected"] = ScriptValue::Bool(i.connected);
+    t["host"] = ScriptValue::Str(i.host);
+    t["port"] = ScriptValue::Num((f64)i.port);
+    t["version"] = ScriptValue::Str(i.version);
+    t["protocol"] = ScriptValue::Num((f64)i.protocol);
+    t["player_count"] = ScriptValue::Num((f64)i.playerCount);
+    t["max_players"] = ScriptValue::Num((f64)i.maxPlayers);
+    t["motd"] = ScriptValue::Str(i.motd);
+    t["gamemode"] = ScriptValue::Str(i.gamemode);
+    t["dimension"] = ScriptValue::Str(i.dimension);
+    t["latency_ms"] = ScriptValue::Num((f64)i.latencyMs);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("server.connected", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Bool(r && r->server().connected);
+  });
+
+  install("server.host", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Str(r ? r->server().host : std::string());
+  });
+
+  install("server.port", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Num(r ? (f64)r->server().port : 0.0);
+  });
+
+  install("server.version", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Str(r ? r->server().version : std::string());
+  });
+
+  install("server.protocol", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Num(r ? (f64)r->server().protocol : 0.0);
+  });
+
+  install("server.player_count", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Num(r ? (f64)r->server().playerCount : 0.0);
+  });
+
+  install("server.max_players", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Num(r ? (f64)r->server().maxPlayers : 0.0);
+  });
+
+  install("server.motd", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Str(r ? r->server().motd : std::string());
+  });
+
+  install("server.gamemode", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Str(r ? r->server().gamemode : std::string());
+  });
+
+  install("server.dimension", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Str(r ? r->server().dimension : std::string());
+  });
+
+  install("server.latency_ms", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Num(r ? (f64)r->server().latencyMs : 0.0);
+  });
+
+  auto chatTable = [](const ChatMessage& m) {
+    ScriptTable t;
+    t["sender"] = ScriptValue::Str(m.sender);
+    t["text"] = ScriptValue::Str(m.text);
+    t["at_ms"] = ScriptValue::Num((f64)m.atMs);
+    t["system"] = ScriptValue::Bool(m.system);
+    return t;
+  };
+
+  install("chat.messages", [reads, chatTable](ScriptContext&, const std::vector<ScriptValue>&) {
+    ScriptTable t;
+    if (GameReads* r = reads()) {
+      const std::vector<ChatMessage> msgs = r->chat();
+      for (size_t i = 0; i < msgs.size(); ++i) {
+        t[std::to_string(i)] = ScriptValue::Tbl(chatTable(msgs[i]));
+      }
+    }
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("chat.count", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Num(r ? (f64)r->chatCount() : 0.0);
+  });
+
+  install("chat.text", [reads](ScriptContext&, const std::vector<ScriptValue>& args) {
+    GameReads* r = reads();
+    const f64 n = args[0].AsNumber();
+    if (!r || !std::isfinite(n) || n < 0.0 || n != std::floor(n)) {
+      return ScriptValue::Str(std::string());
+    }
+    return ScriptValue::Str(r->chatText((size_t)n));
+  });
+
+  install("chat.sender", [reads](ScriptContext&, const std::vector<ScriptValue>& args) {
+    GameReads* r = reads();
+    const f64 n = args[0].AsNumber();
+    if (!r || !std::isfinite(n) || n < 0.0 || n != std::floor(n)) {
+      return ScriptValue::Str(std::string());
+    }
+    const std::vector<ChatMessage> msgs = r->chat();
+    if ((size_t)n >= msgs.size()) return ScriptValue::Str(std::string());
+    return ScriptValue::Str(msgs[(size_t)n].sender);
+  });
+
+  install("chat.is_system", [reads](ScriptContext&, const std::vector<ScriptValue>& args) {
+    GameReads* r = reads();
+    const f64 n = args[0].AsNumber();
+    if (!r || !std::isfinite(n) || n < 0.0 || n != std::floor(n)) {
+      return ScriptValue::Bool(false);
+    }
+    const std::vector<ChatMessage> msgs = r->chat();
+    if ((size_t)n >= msgs.size()) return ScriptValue::Bool(false);
+    return ScriptValue::Bool(msgs[(size_t)n].system);
+  });
+
+  install("chat.last", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    if (!r) return ScriptValue::Str(std::string());
+    const std::vector<ChatMessage> msgs = r->chat();
+    return ScriptValue::Str(msgs.empty() ? std::string() : msgs.back().text);
+  });
+
+  install("chat.available", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    return ScriptValue::Bool(reads() != nullptr);
+  });
+
+  install("screen.state", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    ScreenState s;
+    if (GameReads* r = reads()) s = r->screen();
+    ScriptTable t;
+    t["open"] = ScriptValue::Bool(s.open);
+    t["name"] = ScriptValue::Str(s.name);
+    t["title"] = ScriptValue::Str(s.title);
+    t["width"] = ScriptValue::Num((f64)s.width);
+    t["height"] = ScriptValue::Num((f64)s.height);
+    t["keyboard_open"] = ScriptValue::Bool(s.keyboardOpen);
+    return ScriptValue::Tbl(std::move(t));
+  });
+
+  install("screen.open", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Bool(r && r->screen().open);
+  });
+
+  install("screen.name", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Str(r ? r->screen().name : std::string());
+  });
+
+  install("screen.title", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Str(r ? r->screen().title : std::string());
+  });
+
+  install("screen.width", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Num(r ? (f64)r->screen().width : 0.0);
+  });
+
+  install("screen.height", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Num(r ? (f64)r->screen().height : 0.0);
+  });
+
+  install("screen.keyboard_open", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    GameReads* r = reads();
+    return ScriptValue::Bool(r && r->screen().keyboardOpen);
+  });
+
+  install("screen.available", [reads](ScriptContext&, const std::vector<ScriptValue>&) {
+    return ScriptValue::Bool(reads() != nullptr);
+  });
+
   //--- Crystal (client-side placement advisor) -----------------------------
   //
   // The script tunes the advisor and either asks for a one-shot analysis or

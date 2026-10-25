@@ -133,6 +133,18 @@ static void TestCapabilities() {
   CHECK(combat.Add("combat"));
   CHECK(!combat.CoversCap([] { Capability c; c.kind = CapKind::Crystal; return c; }()));
   CHECK(!crystal.CoversCap([] { Capability c; c.kind = CapKind::Combat; return c; }()));
+
+  // The read-only game reads (inventory/server/chat/screen) are their own
+  // grant, separate from world and combat: a script that asks for the world
+  // does not thereby get the inventory, and vice versa.
+  CHECK(IsGrantableKind(CapKind::GameReads));
+  CHECK(CapKindFromName("gamereads") == CapKind::GameReads);
+  CHECK(std::string(CapKindName(CapKind::GameReads)) == "gamereads");
+  CapabilitySet reads;
+  CHECK(reads.Add("gamereads"));
+  CHECK(reads.CoversCap([] { Capability c; c.kind = CapKind::GameReads; return c; }()));
+  CHECK(!a.CoversCap([] { Capability c; c.kind = CapKind::GameReads; return c; }()));
+  CHECK(!reads.CoversCap([] { Capability c; c.kind = CapKind::World; return c; }()));
 }
 
 static const char* kManifestJson =

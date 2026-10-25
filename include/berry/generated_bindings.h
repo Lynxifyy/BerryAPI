@@ -479,11 +479,46 @@ inline const BindingSpec* BindingSpecs() {
       {"replaymod.server_paused", CapKind::World, 0, "ReplayMod"},
       {"replaymod.server_seek", CapKind::World, 1, "ReplayMod"},
       {"replaymod.status", CapKind::World, 0, "ReplayMod"},
+      {"inventory.slot_count", CapKind::GameReads, 0, "Inventory"},
+      {"inventory.slot", CapKind::GameReads, 1, "Inventory"},
+      {"inventory.items", CapKind::GameReads, 0, "Inventory"},
+      {"inventory.item_count", CapKind::GameReads, 0, "Inventory"},
+      {"inventory.selected_slot", CapKind::GameReads, 0, "Inventory"},
+      {"inventory.count_of", CapKind::GameReads, 1, "Inventory"},
+      {"inventory.has", CapKind::GameReads, 2, "Inventory"},
+      {"inventory.available", CapKind::GameReads, 0, "Inventory"},
+      {"server.info", CapKind::GameReads, 0, "Server"},
+      {"server.connected", CapKind::GameReads, 0, "Server"},
+      {"server.host", CapKind::GameReads, 0, "Server"},
+      {"server.port", CapKind::GameReads, 0, "Server"},
+      {"server.version", CapKind::GameReads, 0, "Server"},
+      {"server.protocol", CapKind::GameReads, 0, "Server"},
+      {"server.player_count", CapKind::GameReads, 0, "Server"},
+      {"server.max_players", CapKind::GameReads, 0, "Server"},
+      {"server.motd", CapKind::GameReads, 0, "Server"},
+      {"server.gamemode", CapKind::GameReads, 0, "Server"},
+      {"server.dimension", CapKind::GameReads, 0, "Server"},
+      {"server.latency_ms", CapKind::GameReads, 0, "Server"},
+      {"chat.messages", CapKind::GameReads, 0, "Chat"},
+      {"chat.count", CapKind::GameReads, 0, "Chat"},
+      {"chat.text", CapKind::GameReads, 1, "Chat"},
+      {"chat.sender", CapKind::GameReads, 1, "Chat"},
+      {"chat.is_system", CapKind::GameReads, 1, "Chat"},
+      {"chat.last", CapKind::GameReads, 0, "Chat"},
+      {"chat.available", CapKind::GameReads, 0, "Chat"},
+      {"screen.state", CapKind::GameReads, 0, "Screen"},
+      {"screen.open", CapKind::GameReads, 0, "Screen"},
+      {"screen.name", CapKind::GameReads, 0, "Screen"},
+      {"screen.title", CapKind::GameReads, 0, "Screen"},
+      {"screen.width", CapKind::GameReads, 0, "Screen"},
+      {"screen.height", CapKind::GameReads, 0, "Screen"},
+      {"screen.keyboard_open", CapKind::GameReads, 0, "Screen"},
+      {"screen.available", CapKind::GameReads, 0, "Screen"},
   };
   return kSpecs;
 }
 
-inline size_t BindingSpecCount() { return 458; }
+inline size_t BindingSpecCount() { return 493; }
 
 /// Returns the spec for `name`, or nullptr when it is not part of
 /// the generated API surface.
@@ -1022,6 +1057,49 @@ inline const char* const kReplayModNames[] = {
     "replaymod.server_seek",
     "replaymod.status",
 };
+inline const char* const kInventoryNames[] = {
+    "inventory.slot_count",
+    "inventory.slot",
+    "inventory.items",
+    "inventory.item_count",
+    "inventory.selected_slot",
+    "inventory.count_of",
+    "inventory.has",
+    "inventory.available",
+};
+inline const char* const kServerNames[] = {
+    "server.info",
+    "server.connected",
+    "server.host",
+    "server.port",
+    "server.version",
+    "server.protocol",
+    "server.player_count",
+    "server.max_players",
+    "server.motd",
+    "server.gamemode",
+    "server.dimension",
+    "server.latency_ms",
+};
+inline const char* const kChatNames[] = {
+    "chat.messages",
+    "chat.count",
+    "chat.text",
+    "chat.sender",
+    "chat.is_system",
+    "chat.last",
+    "chat.available",
+};
+inline const char* const kScreenNames[] = {
+    "screen.state",
+    "screen.open",
+    "screen.name",
+    "screen.title",
+    "screen.width",
+    "screen.height",
+    "screen.keyboard_open",
+    "screen.available",
+};
 
 inline const ModuleBindings* ModuleBindingTable() {
   static const ModuleBindings kModules[] = {
@@ -1056,11 +1134,15 @@ inline const ModuleBindings* ModuleBindingTable() {
       {"Crystal", kCrystalNames, 19},
       {"Voice", kVoiceNames, 22},
       {"ReplayMod", kReplayModNames, 40},
+      {"Inventory", kInventoryNames, 8},
+      {"Server", kServerNames, 12},
+      {"Chat", kChatNames, 7},
+      {"Screen", kScreenNames, 8},
   };
   return kModules;
 }
 
-inline size_t ModuleBindingCount() { return 31; }
+inline size_t ModuleBindingCount() { return 35; }
 
 // Event channel declared in the IDL. A declared channel is
 // bridged from the engine bus by the script bus; a script may

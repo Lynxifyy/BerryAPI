@@ -115,6 +115,7 @@ bool BerryClient::Attach(Engine& engine, const ClientConfig& cfg) {
   audio_ = std::make_unique<AudioService>();
   packets_ = std::make_unique<PacketLog>();
   intents_ = std::make_unique<IntentValidator>();
+  reads_ = std::make_unique<GameReads>();
   wsPool_ = std::make_unique<WsClientPool>();
   replayCamera_ = std::make_unique<ReplayCamera>();
   crystal_ = std::make_unique<CrystalOptimizer>();
@@ -269,6 +270,7 @@ void BerryClient::BuildServices() {
   s.voice = voice_.get();
   s.discovery = discovery_.get();
   s.sync = syncChannel_.get();
+  s.reads = reads_.get();
   services_ = s;
   api_ = std::make_unique<ScriptApi>(services_);
 }

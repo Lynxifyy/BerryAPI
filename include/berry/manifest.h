@@ -49,6 +49,7 @@ enum class CapKind : u32 {
   Packets,   // read-only packet metadata inspection (headers, never payloads)
   Voice,     // proximity voice chat: microphone capture and LAN playback
   Crystal,   // client-side crystal-placement advisor (read-only, policy-gated)
+  GameReads, // read-only client reads: inventory, server, chat, screen
 };
 
 const char* CapKindName(CapKind k);

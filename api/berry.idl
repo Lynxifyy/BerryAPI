@@ -940,3 +940,88 @@ module ReplayMod {
   doc "A one-line status: capture state, sections, bytes, whether a replay is loaded, and whether a client is connected."
   fn status() -> string
 }
+
+module Inventory {
+  capability gamereads
+  doc "Read-only view of the LOCAL player's own inventory. Every value is state the client already holds for its own player, so nothing here reveals another player: there is deliberately no \"read another player's inventory\". The walk is bounded (`kMaxSlots`, 256) and every stack is normalized on the way out — a slot with no usable item id or a non-positive count reads as empty, damage is clamped into the item's own range, and an oversized string is refused at the seam rather than truncated mid-item, so a script never sees a half-item that looks real. Reads fail closed (an empty inventory, a zero count) when no source is bound."
+  doc "How many slots the inventory reports, capped at 256."
+  fn slot_count() -> number
+  doc "The stack in `slot` as {empty, id, name, count, damage, max_damage}. An out-of-range or unreadable slot reads as empty."
+  fn slot(index: number) -> Table
+  doc "Every non-empty stack, in slot order, as a table keyed \"0\",\"1\",…, each a stack table."
+  fn items() -> Table
+  doc "How many non-empty stacks the inventory holds."
+  fn item_count() -> number
+  doc "The selected hotbar slot, or -1 when unknown."
+  fn selected_slot() -> number
+  doc "The total count of `id` across the inventory, 0 when none. An empty or oversized id is refused (0)."
+  fn count_of(id: string) -> number
+  doc "Whether the inventory holds at least `min_count` of `id` (`min_count` <= 0 means \"any\"). False for a bad id or no source."
+  fn has(id: string, min_count: number) -> bool
+  doc "True while a source is bound (the inventory can be read)."
+  fn available() -> bool
+}
+
+module Server {
+  capability gamereads
+  doc "Read-only view of the server this client is already connected to. Everything here is what the client already knows: the address it dialled, the protocol it negotiated, and the counts the tab list already shows. There is no player-list read here (the tab list is a separate, already-visible surface) and nothing is sent. `connected` is false when there is no session, and every read then reports a disconnected state."
+  doc "The session as one table: {connected, host, port, version, protocol, player_count, max_players, motd, gamemode, dimension, latency_ms}."
+  fn info() -> Table
+  doc "True while a session is connected."
+  fn connected() -> bool
+  fn host() -> string
+  fn port() -> number
+  fn version() -> string
+  doc "The negotiated protocol number, 0 when unknown."
+  fn protocol() -> number
+  doc "The players the tab list already shows."
+  fn player_count() -> number
+  fn max_players() -> number
+  fn motd() -> string
+  doc "The local player's own gamemode name."
+  fn gamemode() -> string
+  doc "The local player's own dimension name."
+  fn dimension() -> string
+  doc "Round-trip time to the server in milliseconds, 0 when unknown."
+  fn latency_ms() -> number
+}
+
+module Chat {
+  capability gamereads
+  doc "Read-only view of the chat the client was already sent. It is a copy of the recent history, oldest first, bounded (`kMaxChat`, 128 lines) and normalized (a control-bearing sender reads as empty, an over-long line is truncated). This is the local client's own chat log: nothing here sends a message, and nothing reveals a channel the client is not already in. Reads fail closed (no lines) when no source is bound."
+  doc "The recent chat, oldest first, as a table keyed \"0\",\"1\",…, each {sender, text, at_ms, system}. Capped at 128 lines."
+  fn messages() -> Table
+  doc "How many lines the history holds, capped at 128."
+  fn count() -> number
+  doc "The text of line `index` (0 = oldest), or an empty string when out of range."
+  fn text(index: number) -> string
+  doc "The sender of line `index`, or an empty string for a system line or an out-of-range index."
+  fn sender(index: number) -> string
+  doc "Whether line `index` is a system line. False when out of range."
+  fn is_system(index: number) -> bool
+  doc "The most recent line's text, or an empty string when the history is empty."
+  fn last() -> string
+  doc "True while a source is bound (the chat can be read)."
+  fn available() -> bool
+}
+
+module Screen {
+  capability gamereads
+  doc "Read-only view of the screen the client is currently drawing. It reports which menu is up, its title and its size, and whether a keyboard is open — all of which the client is already rendering. It is deliberately a description, not a control surface: nothing here opens, closes or clicks a screen, and nothing here reads a widget's contents. `open` is false when the client is in the world with no menu up, and every read then reports a closed state."
+  doc "The screen as one table: {open, name, title, width, height, keyboard_open}."
+  fn state() -> Table
+  doc "True while a menu is open."
+  fn open() -> bool
+  doc "The open screen's name (\"chat\", \"inventory\", \"pause\", …), or an empty string when none."
+  fn name() -> string
+  doc "The open screen's title, or an empty string."
+  fn title() -> string
+  doc "The open screen's width in pixels, 0 when closed."
+  fn width() -> number
+  doc "The open screen's height in pixels, 0 when closed."
+  fn height() -> number
+  doc "True while a text keyboard is open."
+  fn keyboard_open() -> bool
+  doc "True while a source is bound (the screen can be read)."
+  fn available() -> bool
+}

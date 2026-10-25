@@ -185,6 +185,33 @@ make lib             # builds build/libBerryAPI.so
   the tracked speaker set and every tunable are bounded and validated; a speaker
   ages out of the activity list (and its decode state with it) after `hold_ms`,
   and `Reset()` keeps config and seams.
+- `TouchService` (`touch.h`, `core/modules/touch.cpp`) is the client-side
+  touch/gesture/on-screen-button service, not a strict module. It owns no clock:
+  the engine feeds raw pointers (`OnPointerDown/Move/Up`) and the `ScriptApi`
+  frame hook calls `Update`/`Draw`. It recognises tap, double tap, long press,
+  drag, swipe (with a direction), pinch and rotate, each gated by a per-gesture
+  enable mask, and publishes a recognised gesture on the `touchGesture` bus
+  channel. On-screen buttons are labelled rectangles that report press/release
+  and toggle; a button press is event-driven (handled on the down/up edge, not
+  left to the next frame) and a press that began on a button never also drives a
+  gesture. A button's optional intent is validated against the session policy in
+  `Update`, so a script can grey out what a server forbids. The pointer table is
+  a fixed array (`kMaxPointers`), every threshold is validated and a bad value is
+  refused, and a non-finite feed is dropped. It carries the `input` capability.
+- `GameReads` (`gamereads.h`, `core/script/gamereads.cpp`) is the read-only game
+  reads service behind `inventory.*`/`server.*`/`chat.*`/`screen.*`, not a strict
+  module. It reports only state the client already holds for its own player — the
+  local inventory, the server it is already connected to, the chat it was already
+  sent, the screen it is already drawing — so there is deliberately no
+  "read another player's inventory" and no player-list read. Four source seams
+  (`InventorySource`/`ServerInfoSource`/`ChatSource`/`ScreenSource`) are bound by
+  the embedder; an absent source reads as empty rather than as fabricated data,
+  and `revision()` bumps on every seam swap. Every walk is bounded (`kMaxSlots`
+  256, `kMaxChat` 128) and every value is normalized on the way out: a stack with
+  no usable id or a non-positive count reads as empty, damage is clamped into the
+  item's own range, a count sum is capped rather than wrapped, and an
+  over-long/control-bearing string is refused at the seam rather than truncated
+  mid-item. It has its own `gamereads` capability, separate from `world`.
 - `SecureVoiceTransport` (`voice_secure_transport.h`) is the authenticated,
   encrypted LAN transport behind the same `VoiceTransport` seam: an Ed25519
   identity handshake gates the session, the pairwise key is X25519 + HKDF, the

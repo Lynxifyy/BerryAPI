@@ -74,6 +74,7 @@ CORE_SRC := \
   core/script/script_bus.cpp \
   core/script/url.cpp \
   core/script/api_bindings.cpp \
+  core/script/gamereads.cpp \
   core/script/intent.cpp \
   core/script/package.cpp \
   core/script/scriptmod.cpp \
@@ -253,6 +254,7 @@ TEST_SRC := \
   tests/test_replay_camera.cpp \
   tests/test_radial.cpp \
   tests/test_touch.cpp \
+  tests/test_gamereads.cpp \
   tests/test_crystal.cpp \
   tests/test_voice.cpp \
   tests/test_voice_crypto.cpp \

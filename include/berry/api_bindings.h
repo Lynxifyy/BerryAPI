@@ -44,6 +44,7 @@
 #include "berry/lan_discovery.h"
 #include "berry/event.h"
 #include "berry/fs.h"
+#include "berry/gamereads.h"
 #include "berry/hud.h"
 #include "berry/input.h"
 #include "berry/intent.h"
@@ -230,6 +231,11 @@ class BERRY_API ScriptApi {
     /// configured=false. The channel verifies every inbound loadout, so the
     /// stats it exposes are counts of what it accepted and refused.
     CosmeticSyncChannel* sync = nullptr;
+    /// Read-only game reads: the local player's own inventory, the server it is
+    /// connected to, the chat it was sent and the screen it is drawing. Null
+    /// makes the `inventory.*`/`server.*`/`chat.*`/`screen.*` bindings fail
+    /// closed (empty reads), which is the same shape an unbound seam produces.
+    GameReads* reads = nullptr;
   };
 
   ScriptApi();

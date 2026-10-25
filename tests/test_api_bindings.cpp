@@ -2829,6 +2829,156 @@ static void TestTouchFailsClosedWithoutService() {
   CHECK(out.AsString() == "right");
 }
 
+static void TestGameReadsBindings() {
+  struct Inv : InventorySource {
+    size_t SlotCount() const override { return 2; }
+    bool GetSlot(size_t i, ItemStack* out) const override {
+      if (i == 0) {
+        out->empty = false;
+        out->id = "minecraft:stone";
+        out->count = 10;
+        return true;
+      }
+      return false;   // slot 1 unreadable
+    }
+    i32 SelectedSlot() const override { return 0; }
+  } inv;
+  struct Srv : ServerInfoSource {
+    ServerInfo Info() const override {
+      ServerInfo i;
+      i.connected = true;
+      i.host = "play.example.com";
+      i.port = 19132;
+      i.playerCount = 3;
+      i.maxPlayers = 10;
+      return i;
+    }
+  } srv;
+  struct Ch : ChatSource {
+    std::vector<ChatMessage> Recent(size_t) const override {
+      ChatMessage m;
+      m.sender = "Steve";
+      m.text = "hi";
+      return {m};
+    }
+  } ch;
+  struct Sc : ScreenSource {
+    ScreenState Current() const override {
+      ScreenState s;
+      s.open = true;
+      s.name = "inventory";
+      s.width = 1280;
+      return s;
+    }
+  } sc;
+
+  GameReads reads;
+  reads.SetInventorySource(&inv);
+  reads.SetServerSource(&srv);
+  reads.SetChatSource(&ch);
+  reads.SetScreenSource(&sc);
+
+  ScriptApi::Services services;
+  services.reads = &reads;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"gamereads"};
+
+  // Inventory.
+  CHECK(Call(bindings, "inventory.slot_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 2);
+  CHECK(Call(bindings, "inventory.slot", {ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  const ScriptValue* id = out.Field("id");
+  CHECK(id && id->AsString() == "minecraft:stone");
+  const ScriptValue* count = out.Field("count");
+  CHECK(count && count->AsNumber() == 10);
+  // An unreadable slot and a bad index both read as empty.
+  CHECK(Call(bindings, "inventory.slot", {ScriptValue::Num(1)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Field("empty") && out.Field("empty")->Truthy());
+  CHECK(Call(bindings, "inventory.slot", {ScriptValue::Num(-1)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Field("empty") && out.Field("empty")->Truthy());
+  CHECK(Call(bindings, "inventory.item_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  CHECK(Call(bindings, "inventory.count_of", {ScriptValue::Str("minecraft:stone")}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 10);
+  CHECK(Call(bindings, "inventory.has",
+             {ScriptValue::Str("minecraft:stone"), ScriptValue::Num(10)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "inventory.has",
+             {ScriptValue::Str("minecraft:stone"), ScriptValue::Num(11)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "inventory.selected_slot", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "inventory.available", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  // Server.
+  CHECK(Call(bindings, "server.info", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(out.Field("host") && out.Field("host")->AsString() == "play.example.com");
+  CHECK(Call(bindings, "server.connected", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "server.port", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 19132);
+  CHECK(Call(bindings, "server.player_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 3);
+
+  // Chat.
+  CHECK(Call(bindings, "chat.count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  CHECK(Call(bindings, "chat.text", {ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "hi");
+  CHECK(Call(bindings, "chat.sender", {ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "Steve");
+  CHECK(Call(bindings, "chat.last", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "hi");
+  CHECK(Call(bindings, "chat.text", {ScriptValue::Num(-1)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString().empty());
+
+  // Screen.
+  CHECK(Call(bindings, "screen.open", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "screen.name", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "inventory");
+  CHECK(Call(bindings, "screen.width", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1280);
+
+  // The capability gate: without the gamereads grant the call is denied.
+  ScriptHost host("reads-test", Grant({"world"}), nullptr);
+  host.SetBindings(&bindings);
+  CHECK(host.CallBinding("inventory.slot_count", {}, &out) == ScriptStatus::CapabilityDenied);
+  CHECK(host.CallBinding("chat.last", {}, &out) == ScriptStatus::CapabilityDenied);
+}
+
+static void TestGameReadsFailClosedWithoutService() {
+  ScriptApi::Services services;   // no reads service
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"gamereads"};
+  // Every read is inert and reports the empty shape.
+  CHECK(Call(bindings, "inventory.slot_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "inventory.items", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(Call(bindings, "inventory.available", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "server.info", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(Call(bindings, "server.connected", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "chat.last", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString().empty());
+  CHECK(Call(bindings, "screen.open", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+}
+
 static void TestCrystalBindings() {
   std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
   WorldHandle* world = worldMod->Service<WorldHandle>();
@@ -3305,6 +3455,8 @@ int main() {
   TestRadialFailsClosedWithoutService();
   TestTouchBindings();
   TestTouchFailsClosedWithoutService();
+  TestGameReadsBindings();
+  TestGameReadsFailClosedWithoutService();
   TestFrameHookDrawsRadialMenu();
   TestCrystalBindings();
   TestCrystalFailsClosedWithoutService();

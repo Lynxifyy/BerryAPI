@@ -41,6 +41,7 @@
 #include "berry/crystal.h"
 #include "berry/event.h"
 #include "berry/fs.h"
+#include "berry/gamereads.h"
 #include "berry/hud.h"
 #include "berry/input.h"
 #include "berry/intent.h"
@@ -355,6 +356,9 @@ class BERRY_API BerryClient {
   AudioService& audio() { return *audio_; }
   PacketLog& packets() { return *packets_; }
   IntentValidator& intents() { return *intents_; }
+  /// Read-only game reads (inventory, server, chat, screen). The embedder
+  /// binds the four sources; a source left unbound makes its reads fail closed.
+  GameReads& reads() { return *reads_; }
   CosmeticPackLoader& packs() { return *packs_; }
   /// The cosmetic asset loader (mesh/texture store), or null when no asset
   /// directory is configured. For diagnostics and tests.
@@ -485,6 +489,7 @@ class BERRY_API BerryClient {
   std::unique_ptr<AudioService> audio_;
   std::unique_ptr<PacketLog> packets_;
   std::unique_ptr<IntentValidator> intents_;
+  std::unique_ptr<GameReads> reads_;
   std::unique_ptr<WsClientPool> wsPool_;
   std::unique_ptr<ReplayCamera> replayCamera_;
   std::unique_ptr<CrystalOptimizer> crystal_;

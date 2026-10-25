@@ -701,3 +701,66 @@ Capability: `world`.
 | `replaymod.server_paused() -> bool` | `world` | - |
 | `replaymod.server_seek(tick: number) -> bool` | `world` | Restarts the stream for the connected client at the nearest keyframe at or before `tick`. False when no client is connected. |
 | `replaymod.status() -> string` | `world` | A one-line status: capture state, sections, bytes, whether a replay is loaded, and whether a client is connected. |
+
+## Inventory
+
+Capability: `gamereads`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `inventory.slot_count() -> number` | `gamereads` | How many slots the inventory reports, capped at 256. |
+| `inventory.slot(index: number) -> Table` | `gamereads` | The stack in `slot` as {empty, id, name, count, damage, max_damage}. An out-of-range or unreadable slot reads as empty. |
+| `inventory.items() -> Table` | `gamereads` | Every non-empty stack, in slot order, as a table keyed \"0\",\"1\",…, each a stack table. |
+| `inventory.item_count() -> number` | `gamereads` | How many non-empty stacks the inventory holds. |
+| `inventory.selected_slot() -> number` | `gamereads` | The selected hotbar slot, or -1 when unknown. |
+| `inventory.count_of(id: string) -> number` | `gamereads` | The total count of `id` across the inventory, 0 when none. An empty or oversized id is refused (0). |
+| `inventory.has(id: string, min_count: number) -> bool` | `gamereads` | Whether the inventory holds at least `min_count` of `id` (`min_count` <= 0 means \"any\"). False for a bad id or no source. |
+| `inventory.available() -> bool` | `gamereads` | True while a source is bound (the inventory can be read). |
+
+## Server
+
+Capability: `gamereads`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `server.info() -> Table` | `gamereads` | The session as one table: {connected, host, port, version, protocol, player_count, max_players, motd, gamemode, dimension, latency_ms}. |
+| `server.connected() -> bool` | `gamereads` | True while a session is connected. |
+| `server.host() -> string` | `gamereads` | - |
+| `server.port() -> number` | `gamereads` | - |
+| `server.version() -> string` | `gamereads` | - |
+| `server.protocol() -> number` | `gamereads` | The negotiated protocol number, 0 when unknown. |
+| `server.player_count() -> number` | `gamereads` | The players the tab list already shows. |
+| `server.max_players() -> number` | `gamereads` | - |
+| `server.motd() -> string` | `gamereads` | - |
+| `server.gamemode() -> string` | `gamereads` | The local player's own gamemode name. |
+| `server.dimension() -> string` | `gamereads` | The local player's own dimension name. |
+| `server.latency_ms() -> number` | `gamereads` | Round-trip time to the server in milliseconds, 0 when unknown. |
+
+## Chat
+
+Capability: `gamereads`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `chat.messages() -> Table` | `gamereads` | The recent chat, oldest first, as a table keyed \"0\",\"1\",…, each {sender, text, at_ms, system}. Capped at 128 lines. |
+| `chat.count() -> number` | `gamereads` | How many lines the history holds, capped at 128. |
+| `chat.text(index: number) -> string` | `gamereads` | The text of line `index` (0 = oldest), or an empty string when out of range. |
+| `chat.sender(index: number) -> string` | `gamereads` | The sender of line `index`, or an empty string for a system line or an out-of-range index. |
+| `chat.is_system(index: number) -> bool` | `gamereads` | Whether line `index` is a system line. False when out of range. |
+| `chat.last() -> string` | `gamereads` | The most recent line's text, or an empty string when the history is empty. |
+| `chat.available() -> bool` | `gamereads` | True while a source is bound (the chat can be read). |
+
+## Screen
+
+Capability: `gamereads`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `screen.state() -> Table` | `gamereads` | The screen as one table: {open, name, title, width, height, keyboard_open}. |
+| `screen.open() -> bool` | `gamereads` | True while a menu is open. |
+| `screen.name() -> string` | `gamereads` | The open screen's name (\"chat\", \"inventory\", \"pause\", …), or an empty string when none. |
+| `screen.title() -> string` | `gamereads` | The open screen's title, or an empty string. |
+| `screen.width() -> number` | `gamereads` | The open screen's width in pixels, 0 when closed. |
+| `screen.height() -> number` | `gamereads` | The open screen's height in pixels, 0 when closed. |
+| `screen.keyboard_open() -> bool` | `gamereads` | True while a text keyboard is open. |
+| `screen.available() -> bool` | `gamereads` | True while a source is bound (the screen can be read). |
