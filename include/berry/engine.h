@@ -79,6 +79,13 @@ struct EngineConfig {
   /// the cosmetic channel).
   std::string voiceGroup = "239.66.0.2";
   u16 voicePort = 47824;
+  /// Presence-backend media plane for voice. When `voiceRelayHost` is set the
+  /// voice transport is a UDP relay transport instead of the LAN multicast
+  /// transport, so two clients on different networks hear each other.
+  std::string voiceRelayHost;    // numeric IPv4; empty = LAN multicast
+  u16 voiceRelayPort = 47825;
+  std::string voiceRoom;         // relay room name
+  std::string voiceRoomSecret;   // raw room secret (>= 16 bytes)
   /// The interface the LAN channels join and send on ("" = system route).
   std::string lanIface;
   /// Root directory for the sandboxed `fs.*` store. Empty keeps it in-memory.

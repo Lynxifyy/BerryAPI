@@ -134,6 +134,10 @@ bool Engine::Bootstrap(const BerryConfigC& cfg) {
   }
   if (cfg.voice_group) internal.voiceGroup = cfg.voice_group;
   if (cfg.voice_port != 0) internal.voicePort = cfg.voice_port;
+  if (cfg.voice_relay_host) internal.voiceRelayHost = cfg.voice_relay_host;
+  if (cfg.voice_relay_port != 0) internal.voiceRelayPort = cfg.voice_relay_port;
+  if (cfg.voice_room) internal.voiceRoom = cfg.voice_room;
+  if (cfg.voice_room_secret) internal.voiceRoomSecret = cfg.voice_room_secret;
   if (cfg.lan_iface) internal.lanIface = cfg.lan_iface;
   if (cfg.script_data_directory) {
     internal.scriptDataDirectory = cfg.script_data_directory;
@@ -210,6 +214,10 @@ bool Engine::Attach() {
     ccfg.voiceTrust = cfg_.voiceTrust;
     ccfg.voiceGroup = cfg_.voiceGroup;
     ccfg.voicePort = cfg_.voicePort;
+    ccfg.voiceRelayHost = cfg_.voiceRelayHost;
+    ccfg.voiceRelayPort = cfg_.voiceRelayPort;
+    ccfg.voiceRoom = cfg_.voiceRoom;
+    ccfg.voiceRoomSecret = cfg_.voiceRoomSecret;
     ccfg.lanIface = cfg_.lanIface;
     ccfg.scriptDataDirectory = cfg_.scriptDataDirectory;
     client_ = std::make_unique<BerryClient>();

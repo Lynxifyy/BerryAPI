@@ -417,6 +417,34 @@ void BerryClient::BuildLan(const ClientConfig& cfg) {
     if (!voiceId.valid() || !cfg.voiceTrust.Valid()) {
       Log::Warn("BerryClient: voice needs a signing identity and a trust "
                 "anchor; voice disabled (no plaintext fallback)");
+    } else if (!cfg.voiceRelayHost.empty()) {
+      // Relay media plane: reaches a peer on another network through the
+      // presence backend. The room secret keys the relay registration; the
+      // identity/anchor still authenticate and encrypt every frame end to end,
+      // so the relay stays blind. Fail closed: a relay that will not open
+      // disables voice rather than falling back to the LAN group.
+      voiceRelay_ = std::make_unique<VoiceRelayTransport>();
+      RelayVoiceConfig rcfg;
+      rcfg.relayHost = cfg.voiceRelayHost;
+      rcfg.relayPort = cfg.voiceRelayPort;
+      rcfg.room = cfg.voiceRoom.empty() ? "default" : cfg.voiceRoom;
+      rcfg.roomSecret = cfg.voiceRoomSecret;
+      if (!voiceRelay_->Open(rcfg, voiceId, cfg.voiceTrust)) {
+        Log::Warn("BerryClient: voice relay transport failed to open "
+                  "(room secret too short or bad relay?); voice disabled");
+        voiceRelay_.reset();
+      } else {
+        voice_->SetTransport(voiceRelay_.get());
+        if (!cfg.voiceSelfId.empty()) {
+          if (!voice_->Start(cfg.voiceSelfId)) {
+            Log::Warn("BerryClient: voice session refused id '%s'",
+                      cfg.voiceSelfId.c_str());
+          }
+        }
+        Log::Info("BerryClient: relay voice on port %u via %s:%u (self '%s')",
+                  (unsigned)voiceRelay_->localPort(), cfg.voiceRelayHost.c_str(),
+                  (unsigned)cfg.voiceRelayPort, cfg.voiceSelfId.c_str());
+      }
     } else {
       secureVoice_ = std::make_unique<SecureVoiceTransport>();
       SecureVoiceConfig vcfg;
@@ -746,6 +774,7 @@ void BerryClient::Detach() {
     voice_->SetTransport(nullptr);
   }
   secureVoice_.reset();
+  voiceRelay_.reset();
   voiceTransport_.reset();
   discovery_.reset();
   if (syncChannel_) syncChannel_->SetTransport(nullptr);

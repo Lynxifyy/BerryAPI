@@ -18,6 +18,10 @@
 #include "berry/cosmetic_relay_transport.h"
 #include "berry/cosmetic_sync.h"
 #include "berry/engine.h"
+#include "berry/manifest.h"
+#include "berry/voice_crypto.h"
+#include "berry/voice_relay.h"
+#include "berry/voice_relay_transport.h"
 #include "berry/lan_discovery.h"
 #include "berry/lan_transport.h"
 #include "berry/script.h"
@@ -68,6 +72,13 @@ std::string MakeTempDir(const char* tag) {
   std::snprintf(tmpl, sizeof tmpl, "/tmp/berry-client-%s-XXXXXX", tag);
   const char* d = mkdtemp(tmpl);
   return d ? std::string(d) : std::string();
+}
+
+/// A deterministic 32-byte seed for a voice identity (as the relay test uses).
+std::string Seed(u8 base) {
+  std::string s(32, '\0');
+  for (size_t i = 0; i < s.size(); ++i) s[i] = (char)(u8)(base + i * 11);
+  return s;
 }
 
 void WriteFileRaw(const std::string& path, const std::string& data) {
@@ -484,6 +495,88 @@ int main() {
       std::string rm = "rm -rf '" + root + "'";
       if (system(rm.c_str()) != 0) { /* best-effort cleanup */ }
     }
+  }
+
+  //--- voice selects the relay media plane from config (F2) ---
+  {
+    // A real relay stands in for the hosted forwarder. The client registers its
+    // room and, when a relay host is configured, must build the relay transport
+    // instead of the LAN multicast one.
+    VoiceRelay relay;
+    const std::string roomSecret(32, 'k');
+    CHECK(relay.AddRoom("room-1", roomSecret));
+    VoiceRelayConfig rcfg;
+    rcfg.port = 0;
+    rcfg.bindAddr = "127.0.0.1";
+    CHECK(relay.Open(rcfg));
+    const u16 relayPort = relay.localPort();
+    CHECK(relayPort > 0);
+
+    // Two Ed25519 identities: self (raw seed as hex, since the C ABI carries a
+    // C string and a raw 32-byte seed can hold a NUL) and one trusted peer, so
+    // the anchor is valid and voice is admitted.
+    const VoiceIdentity self = VoiceIdentity::FromSeed(Seed(1));
+    const VoiceIdentity peer = VoiceIdentity::FromSeed(Seed(2));
+
+    Engine& eng = Engine::Instance();
+    BerryConfigC cfg{};
+    cfg.size = sizeof(cfg);
+    cfg.abi_version = BERRY_ABI_VERSION;
+    cfg.auto_attach_modules = 1;
+    cfg.enable_render = 1;
+    cfg.enable_client = 1;
+    cfg.enable_voice = 1;
+    cfg.voice_self_id = "me";
+    const std::string seedHex = crypto::ToHexLower(Seed(1));
+    cfg.voice_identity_seed = seedHex.c_str();
+    const std::string peerKey = peer.publicKeyHex();
+    cfg.voice_peer_keys = peerKey.c_str();
+    cfg.voice_relay_host = "127.0.0.1";
+    cfg.voice_relay_port = relayPort;
+    cfg.voice_room = "room-1";
+    cfg.voice_room_secret = roomSecret.c_str();
+    CHECK(eng.Bootstrap(cfg));
+    CHECK(eng.Attach());
+    BerryClient* client = eng.Client();
+    CHECK(client != nullptr);
+    // The relay transport is the active one; the LAN transport was not built.
+    CHECK(client->voiceRelayTransport() != nullptr);
+    CHECK(client->secureVoiceTransport() == nullptr);
+    CHECK(client->voiceTransport() == client->voiceRelayTransport());
+    CHECK(client->voiceRelayTransport()->open());
+    // The client is talking: the voice session started with the configured id.
+    CHECK(client->voice().running());
+    eng.Detach();
+    // Detach tears the relay down; the next block proves the LAN path is still
+    // selectable when no relay host is set.
+    CHECK(client->voiceRelayTransport() == nullptr);
+
+    //--- without a relay host the LAN secure transport is selected ---
+    Engine& eng2 = Engine::Instance();
+    BerryConfigC lan{};
+    lan.size = sizeof(lan);
+    lan.abi_version = BERRY_ABI_VERSION;
+    lan.auto_attach_modules = 1;
+    lan.enable_render = 1;
+    lan.enable_client = 1;
+    lan.enable_voice = 1;
+    lan.voice_self_id = "me";
+    lan.voice_identity_seed = seedHex.c_str();
+    lan.voice_peer_keys = peerKey.c_str();
+    lan.voice_group = kGroup;
+    lan.voice_port = kPort;
+    lan.lan_iface = "127.0.0.1";
+    CHECK(eng2.Bootstrap(lan));
+    CHECK(eng2.Attach());
+    BerryClient* lanClient = eng2.Client();
+    CHECK(lanClient != nullptr);
+    CHECK(lanClient->voiceRelayTransport() == nullptr);
+    CHECK(lanClient->secureVoiceTransport() != nullptr);
+    CHECK(lanClient->voiceTransport() == lanClient->secureVoiceTransport());
+    eng2.Detach();
+
+    relay.Close();
+    (void)self;
   }
 
   if (g_fail == 0) printf("test_client_lan: ALL OK\n");

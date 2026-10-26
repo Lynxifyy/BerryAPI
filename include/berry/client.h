@@ -68,6 +68,7 @@
 #include "berry/url.h"
 #include "berry/voice.h"
 #include "berry/voice_crypto.h"
+#include "berry/voice_relay_transport.h"
 #include "berry/voice_secure_transport.h"
 #include "berry/voice_transport.h"
 #include "berry/ws_client.h"
@@ -159,6 +160,17 @@ struct BERRY_API ClientConfig {
   /// channel so the two never mix.
   std::string voiceGroup = "239.66.0.2";
   u16 voicePort = 47824;
+  /// Presence-backend media plane for voice. When `voiceRelayHost` is set, the
+  /// voice transport is the UDP relay transport instead of the LAN multicast
+  /// one, so two clients on different networks hear each other through one
+  /// relay. The room is keyed by `voiceRoomSecret`, which a room token
+  /// (RoomTokenClient) delivers over HTTPS. The relay carries only the
+  /// end-to-end sealed frame, so it learns nothing and holds no key. Empty keeps
+  /// the LAN multicast transport.
+  std::string voiceRelayHost;    // numeric IPv4; empty = LAN multicast
+  u16 voiceRelayPort = 47825;
+  std::string voiceRoom;         // relay room name
+  std::string voiceRoomSecret;   // raw room secret (>= 16 bytes)
   /// Enable OTA signature-pack loading from `sigpackDirectory`. Packs are
   /// verified against `sigpackTrust` (Ed25519) BEFORE they are parsed, so an
   /// unsigned, tampered, expired or replayed pack is refused. Off by default;
@@ -414,12 +426,22 @@ class BERRY_API BerryClient {
   /// discovery could not bind. Reads only: discovery names peers, and a loadout
   /// from one is still verified by the sync channel before it is applied.
   LanDiscovery* discovery() { return discovery_.get(); }
-  /// The LAN voice transport, or null when voice is disabled. In production this
-  /// is the authenticated, encrypted `SecureVoiceTransport`.
-  VoiceTransport* voiceTransport() { return voiceTransport_.get(); }
+  /// The active voice transport, or null when voice is disabled. In production
+  /// this is the authenticated, encrypted transport: the relay transport when a
+  /// relay host is configured, otherwise the LAN `SecureVoiceTransport`. The
+  /// plaintext `LanVoiceTransport` is never built in production.
+  VoiceTransport* voiceTransport() {
+    if (voiceRelay_) return voiceRelay_.get();
+    if (secureVoice_) return secureVoice_.get();
+    return voiceTransport_.get();
+  }
   /// The secure voice transport specifically, or null when it is not the active
   /// transport. For diagnostics (peer count) and tests.
   SecureVoiceTransport* secureVoiceTransport() { return secureVoice_.get(); }
+  /// The relay voice transport, or null when the LAN multicast path (or no
+  /// voice) is active. In production this is the presence backend's media
+  /// plane, reached when the config sets `voiceRelayHost`.
+  VoiceRelayTransport* voiceRelayTransport() { return voiceRelay_.get(); }
 
   /// The signature-pack loader, or null when packs are disabled. Owns the
   /// filesystem seam and the anti-rollback sequence floor.
@@ -580,6 +602,7 @@ class BERRY_API BerryClient {
   // cleared. In production this is the authenticated, encrypted transport; the
   // plaintext `LanVoiceTransport` remains available for a dev/diagnostic build.
   std::unique_ptr<SecureVoiceTransport> secureVoice_;
+  std::unique_ptr<VoiceRelayTransport> voiceRelay_;
   std::unique_ptr<LanVoiceTransport> voiceTransport_;
   // The OTA signature-pack loader, its filesystem seam and the layout registry
   // it registers into. Built only when packs are enabled.

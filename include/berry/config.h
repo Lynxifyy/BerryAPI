@@ -98,6 +98,16 @@ typedef struct BerryConfigC {
   const char* voice_group;
   // The voice port, or 0 for the default.
   unsigned short voice_port;
+  // Presence-backend media plane for voice. When voice_relay_host is set, the
+  // voice transport is a UDP relay transport instead of the LAN multicast one,
+  // so two phones on different networks hear each other through one relay. The
+  // room is keyed by voice_room_secret, which a room token (RoomTokenClient)
+  // delivers over HTTPS. The relay moves only the end-to-end sealed frame, so
+  // it never sees plaintext and holds no key. NULL/empty keeps LAN multicast.
+  const char* voice_relay_host;    // numeric IPv4; NULL/empty = LAN multicast
+  unsigned short voice_relay_port;  // 0 = the default (47825)
+  const char* voice_room;           // relay room name; NULL = "default"
+  const char* voice_room_secret;    // raw room secret (>= 16 bytes)
   // The interface the LAN channels join and send on, or NULL for the system
   // multicast route. A host test passes "127.0.0.1" to stay on loopback.
   const char* lan_iface;

@@ -19,7 +19,10 @@
 // v6: BerryConfigC grew the script trust anchor (script_anchor_key), so a
 //     signed manifest can be verified through the C ABI rather than only in a
 //     test that constructs ClientConfig directly.
-#define BERRY_ABI_VERSION 6
+// v7: BerryConfigC grew the voice-relay fields (voice_relay_host,
+//     voice_relay_port, voice_room, voice_room_secret), so a client can select
+//     the relay media plane through the C ABI, not only the LAN multicast one.
+#define BERRY_ABI_VERSION 7
 
 // Legacy internal SDK ABI identifier (kept for compatibility).
 #define BERRY_SDK_ABI 1
