@@ -2,7 +2,9 @@
 // See include/berry/packet_capture.h for the model.
 #include "berry/packet_capture.h"
 
+#include "berry/event.h"
 #include "berry/logger.h"
+#include "berry/replay_capture.h"
 
 #include <cstring>
 #include <utility>
@@ -230,6 +232,33 @@ size_t PacketCaptureHub::Dispatch(PacketDir dir, u32 id,
 u64 PacketCaptureHub::dispatched() const {
   std::lock_guard<std::mutex> lk(mutex_);
   return dispatched_;
+}
+
+//----------------------------------------------------------------------------
+// The production observers.
+//----------------------------------------------------------------------------
+
+void PacketLogObserver::OnPacket(PacketDir dir, u32 id, PacketClass /*cls*/,
+                                 const std::string& payload, u64 /*tick*/) {
+  if (!log_) return;
+  // Resolve the name from the hub's table so the log carries it without a
+  // second look-up; a null table (or an unknown id) yields an empty name, which
+  // is the log's own "unknown" marker. The payload is measured, never stored —
+  // the log is metadata only by construction.
+  const char* name = table_ ? table_->Lookup(id).name : nullptr;
+  if (log_->Record(dir, id, (u32)payload.size(), NowMs(),
+                   name ? std::string(name) : std::string())) {
+    ++recorded_;
+  }
+}
+
+void ReplayPacketObserver::OnPacket(PacketDir dir, u32 id, PacketClass cls,
+                                    const std::string& payload, u64 tick) {
+  if (!capture_) return;
+  if (capture_->CapturePacket(dir, id, payload, tick,
+                              ReplayKindForClass(cls))) {
+    ++stored_;
+  }
 }
 
 //----------------------------------------------------------------------------

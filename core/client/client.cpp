@@ -161,6 +161,13 @@ bool BerryClient::Attach(Engine& engine, const ClientConfig& cfg) {
   // from another build or a live session cannot feed the game's parsers.
   InstallReplayGuards(cfg);
 
+  // The packet-capture path: after the replay guards, so the recorder the
+  // observer feeds already carries the build fingerprint and the guards, and
+  // before the script, so a capture that a script starts this frame already has
+  // its hook live. A recording then carries the packets the client actually
+  // received, not only the entity state the seam reports.
+  BuildPacketCapture(cfg);
+
   // Cosmetic asset data and model packs load, and the player-model hook is
   // installed, before the script: a script that equips a pack asset this frame
   // needs the asset's geometry handle and the pack's catalog entry to already
@@ -473,6 +480,65 @@ void BerryClient::InstallReplayGuards(const ClientConfig& cfg) {
   replay.SetLiveSessionProbe(cfg.liveSessionActive);
 }
 
+void BerryClient::BuildPacketCapture(const ClientConfig& cfg) {
+  // The hub and both observers are always built, so the metadata log is fed and
+  // a script can inspect capture state even when no hook is installed. The hook
+  // itself needs a resolved target and a decode ABI; without either it would
+  // capture nothing, so it is simply not installed (fail closed).
+  packetCaptureHub_ = std::make_unique<PacketCaptureHub>();
+  packetLogObserver_ = std::make_unique<PacketLogObserver>(packets_.get());
+  // Resolve names through the hub's own table so the log carries them.
+  packetLogObserver_->SetTable(&packetCaptureHub_->table());
+  // The replay payload recorder points at the engine's capture — the same
+  // instance the World module's tick feeds and the review/server read.
+  replayPacketObserver_ =
+      std::make_unique<ReplayPacketObserver>(&engine_->Replay().capture());
+  // The metadata log is registered first so a script's `packets.recent` sees a
+  // packet in the same dispatch that stores it into a replay.
+  packetCaptureHub_->AddObserver(packetLogObserver_.get());
+  packetCaptureHub_->AddObserver(replayPacketObserver_.get());
+
+  if (!cfg.packetReceiveTarget) {
+    Log::Info("BerryClient: packet capture hub ready (no receive target; "
+              "capture disabled)");
+    return;
+  }
+  if (!cfg.packetCaptureAbi.decode) {
+    Log::Warn("BerryClient: packet receive target set but no decode ABI; "
+              "packet capture disabled");
+    return;
+  }
+
+  IHook* backend = HookManager::Instance().Backend();
+  packetReceiveHook_ = std::make_unique<PacketReceiveHook>();
+  if (!packetReceiveHook_->Install(cfg.packetReceiveTarget,
+                                   cfg.packetCaptureAbi, backend,
+                                   packetCaptureHub_.get(),
+                                   PacketDir::Inbound)) {
+    Log::Warn("BerryClient: packet receive hook refused; capture disabled");
+    packetReceiveHook_.reset();
+  } else {
+    Log::Info("BerryClient: packet receive hook installed");
+  }
+
+  // The send path is opt-in: a recording needs what the client received, and
+  // the player's own input is already captured as `PlayerInput`. Installing it
+  // only on request keeps the hook count (and the risk) to what a recording
+  // needs.
+  if (cfg.captureOutboundPackets) {
+    packetSendHook_ = std::make_unique<PacketReceiveHook>();
+    if (!packetSendHook_->Install(cfg.packetReceiveTarget,
+                                  cfg.packetCaptureAbi, backend,
+                                  packetCaptureHub_.get(),
+                                  PacketDir::Outbound)) {
+      Log::Warn("BerryClient: packet send hook refused");
+      packetSendHook_.reset();
+    } else {
+      Log::Info("BerryClient: packet send hook installed");
+    }
+  }
+}
+
 void BerryClient::BuildCosmetics(const ClientConfig& cfg) {
   // Cosmetic asset data loads first: a pack names geometry/texture handles, so
   // the handles must exist before the pack's assets are registered (otherwise a
@@ -631,6 +697,18 @@ void BerryClient::Detach() {
   api_.reset();
   bindings_.Clear();
   services_ = ScriptApi::Services{};
+  // Uninstall the packet hooks before the hub and the observers they dispatch
+  // into are released: the detour dereferences `hub_`, so a live hook over a
+  // freed hub would be a use-after-free on the network worker. Uninstall first
+  // (which clears the ABI and the hub pointer), then drop the observers, then
+  // the hub — the reverse of construction.
+  if (packetSendHook_) packetSendHook_->Uninstall();
+  packetSendHook_.reset();
+  if (packetReceiveHook_) packetReceiveHook_->Uninstall();
+  packetReceiveHook_.reset();
+  packetCaptureHub_.reset();
+  replayPacketObserver_.reset();
+  packetLogObserver_.reset();
   // Unbind the cosmetic seams before the owned seam objects are destroyed, so
   // the service never holds a pointer to a destroyed seam. (Its destructor does
   // not touch them, but the explicit clear keeps the ownership honest.)

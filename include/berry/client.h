@@ -51,6 +51,7 @@
 #include "berry/pack.h"
 #include "berry/package.h"
 #include "berry/packet.h"
+#include "berry/packet_capture.h"
 #include "berry/perf.h"
 #include "berry/pvp.h"
 #include "berry/radial.h"
@@ -214,6 +215,24 @@ struct BERRY_API ClientConfig {
   /// true, so a recorded session's packets can never be injected into a live
   /// one. Empty means "never live"; the embedder installs a real probe.
   std::function<bool()> liveSessionActive;
+
+  /// The game's packet-receive function, resolved by the embedder (a signature
+  /// scan against the target build). When non-null and `packetCaptureAbi`
+  /// carries a `decode`, the client installs the receive hook, so a recording
+  /// contains the packets the client actually received — chunk and block
+  /// packets included, not only the entity state the seam reports. Null (the
+  /// default) leaves the packet path unhooked, which is the correct
+  /// fail-closed default for a build whose layout is unknown.
+  void* packetReceiveTarget = nullptr;
+  /// The per-build accessors that turn the game's opaque packet object into
+  /// (id, payload). Without `decode` the hook refuses to install, so a wrong
+  /// layout captures nothing rather than storing a wrong packet.
+  PacketReceiveAbi packetCaptureAbi;
+  /// Install the outbound (send) hook as well as the receive one. Off by
+  /// default: a recording needs what the client received, and the send path is
+  /// the player's own input (already captured as `PlayerInput`). Turn it on to
+  /// record both directions.
+  bool captureOutboundPackets = false;
 };
 
 //----------------------------------------------------------------------------
@@ -355,6 +374,22 @@ class BERRY_API BerryClient {
   ScriptFileStore& files() { return *files_; }
   AudioService& audio() { return *audio_; }
   PacketLog& packets() { return *packets_; }
+  /// The packet-capture hub: the fan-out the receive hook dispatches into. The
+  /// two production observers (the metadata log and the replay payload
+  /// recorder) are registered on it when capture is enabled. Always present.
+  PacketCaptureHub& packetCapture() { return *packetCaptureHub_; }
+  /// The metadata observer, or null when the client did not build one. Always
+  /// built alongside the hub, so non-null in practice.
+  PacketLogObserver* packetLogObserver() { return packetLogObserver_.get(); }
+  /// The replay-payload observer, or null when the client did not build one.
+  ReplayPacketObserver* replayPacketObserver() {
+    return replayPacketObserver_.get();
+  }
+  /// The installed receive hook, or null when no packet target was configured
+  /// (or the hook refused). For diagnostics and tests.
+  PacketReceiveHook* packetReceiveHook() { return packetReceiveHook_.get(); }
+  /// The installed send hook, or null when `captureOutboundPackets` is off.
+  PacketReceiveHook* packetSendHook() { return packetSendHook_.get(); }
   IntentValidator& intents() { return *intents_; }
   /// Read-only game reads (inventory, server, chat, screen). The embedder
   /// binds the four sources; a source left unbound makes its reads fail closed.
@@ -454,6 +489,14 @@ class BERRY_API BerryClient {
   /// reach a live one.
   void InstallReplayGuards(const ClientConfig& cfg);
 
+  /// Builds the packet-capture path: the hub, the two production observers (the
+  /// metadata log and the replay payload recorder) and — when the config
+  /// resolved a receive target and a decode ABI — the receive hook, so a
+  /// recording contains the packets the client actually received. The send hook
+  /// is installed only when `captureOutboundPackets` is set. The hub and the
+  /// observers are always built, so capture state is inspectable with no hook.
+  void BuildPacketCapture(const ClientConfig& cfg);
+
   /// Authors the built-in animation clips into the animator, so a built-in cape
   /// flaps and a built-in aura spins without a script or a pack. A clip is added
   /// only when its name is free, so a creator's clip of the same name wins.
@@ -488,6 +531,16 @@ class BERRY_API BerryClient {
   std::unique_ptr<ScriptFileStore> files_;
   std::unique_ptr<AudioService> audio_;
   std::unique_ptr<PacketLog> packets_;
+  // The packet-capture path: the hub the receive hook fans out into, the two
+  // production observers (metadata log + replay payload recorder), and the
+  // installed hook(s). Built in `BuildPacketCapture`; the hub and observers are
+  // always present so a script can inspect capture state even with no hook
+  // installed, and the hooks exist only when the embedder resolved a target.
+  std::unique_ptr<PacketCaptureHub> packetCaptureHub_;
+  std::unique_ptr<PacketLogObserver> packetLogObserver_;
+  std::unique_ptr<ReplayPacketObserver> replayPacketObserver_;
+  std::unique_ptr<PacketReceiveHook> packetReceiveHook_;
+  std::unique_ptr<PacketReceiveHook> packetSendHook_;
   std::unique_ptr<IntentValidator> intents_;
   std::unique_ptr<GameReads> reads_;
   std::unique_ptr<WsClientPool> wsPool_;

@@ -41,6 +41,11 @@
 
 namespace Berry {
 
+/// The payload recorder the receive path feeds. Forward-declared because this
+/// header is included by the network path and must not pull in the replay
+/// container (and the world/game headers it needs) just to name it.
+class ReplayCapture;
+
 /// A coarse class for a protocol id, enough to route a captured packet.
 enum class PacketClass : u8 {
   Other = 0,
@@ -143,6 +148,70 @@ class BERRY_API PacketCaptureHub {
   std::vector<PacketObserver*> observers_;
   PacketIdTable table_;
   u64 dispatched_ = 0;
+};
+
+//----------------------------------------------------------------------------
+// The two production observers.
+//
+// The hub's doc comment names them: the metadata-only log and the payload
+// recorder. Both are `PacketObserver`s, so the receive path fans one dispatch
+// out to each without the hook knowing what they are.
+//----------------------------------------------------------------------------
+
+/// Records a packet's *metadata* into a `PacketLog` (id, direction, size, name)
+/// and never its bytes. `PacketLog::Record` takes a length, so the payload is
+/// measured and dropped here — the log's whole point is that it does not retain
+/// other players' data.
+class BERRY_API PacketLogObserver final : public PacketObserver {
+ public:
+  explicit PacketLogObserver(PacketLog* log = nullptr) : log_(log) {}
+
+  /// Rebinds the target log (e.g. the client's, built after this observer).
+  void SetLog(PacketLog* log) { log_ = log; }
+  PacketLog* log() const { return log_; }
+
+  /// The classification table used to resolve the record's name. The hub owns
+  /// one; pointing at `hub.table()` makes the log carry real names. Null (the
+  /// default) records an empty name, which is a valid "unknown" row.
+  void SetTable(const PacketIdTable* table) { table_ = table; }
+  const PacketIdTable* table() const { return table_; }
+
+  /// How many packets this observer has recorded (a log that refused one, e.g.
+  /// an over-cap length, is not counted).
+  u64 recorded() const { return recorded_; }
+
+  void OnPacket(PacketDir dir, u32 id, PacketClass cls,
+                const std::string& payload, u64 tick) override;
+
+ private:
+  PacketLog* log_ = nullptr;
+  const PacketIdTable* table_ = nullptr;
+  u64 recorded_ = 0;
+};
+
+/// Records a packet's *payload* into a `ReplayCapture`, classified so a chunk
+/// or block packet is stored under `ReplayRecordKind::Chunk`. This is what makes
+/// a recording contain chunk and block packets rather than only entity state.
+class BERRY_API ReplayPacketObserver final : public PacketObserver {
+ public:
+  explicit ReplayPacketObserver(ReplayCapture* capture = nullptr)
+      : capture_(capture) {}
+
+  /// Rebinds the target capture (e.g. the engine's, built after this observer).
+  void SetCapture(ReplayCapture* capture) { capture_ = capture; }
+  ReplayCapture* capture() const { return capture_; }
+
+  /// How many packets this observer has stored. A capture that refused one
+  /// (not recording, packets disabled, over the size cap) is not counted, so a
+  /// nonzero value proves a packet actually landed in a replay.
+  u64 stored() const { return stored_; }
+
+  void OnPacket(PacketDir dir, u32 id, PacketClass cls,
+                const std::string& payload, u64 tick) override;
+
+ private:
+  ReplayCapture* capture_ = nullptr;
+  u64 stored_ = 0;
 };
 
 //----------------------------------------------------------------------------
