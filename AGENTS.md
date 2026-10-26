@@ -24,6 +24,8 @@ make test            # host unit tests (math, modules, net, script, hud, governo
 make test-sanitize   # the same suites under ASan + UBSan
 make idl             # regenerate bindings/types/docs from api/berry.idl
 make lib             # builds build/libBerryAPI.so
+make check-mbedtls   # part of `make test`: pins the vendored mbedTLS release
+make check-mbedtls-upstream  # network: advises when a newer 3.6 patch exists
 ```
 
 - Host build: `g++ -std=c++17 -Wall -Wextra -O2 -g -Iinclude`, POSIX sockets,
@@ -48,6 +50,16 @@ make lib             # builds build/libBerryAPI.so
   certificate for another name all fail. There is deliberately **no**
   "skip verify" / "insecure" mode. When the CA store cannot be loaded, `Connect`
   refuses rather than trusting anything.
+- The vendored release is pinned and checked. `make check-mbedtls` (part of
+  `make test`) asserts the version agrees in all three places it is written
+  (`tools/check-mbedtls.py`, `build_info.h`, `PROVENANCE.md`), that the config is
+  the trimmed client-only one, and that every vendored unit is either compiled
+  or a documented empty-under-this-config exclusion. `make
+  check-mbedtls-upstream` additionally asks GitHub for the newest 3.6 patch.
+  Re-vendoring is a three-part change: headers + `library/{*.c,*.h}`, a config
+  regenerated with upstream's `scripts/config.py` and the same trim list, and
+  the compiled set in `tools/sources.mk` — bump the three version strings
+  together and `make check-mbedtls` proves it.
 - Every wait (connect, handshake, each read) is clamped to one absolute
   `Deadline` for the whole operation, so a peer that dribbles bytes cannot
   extend a request past its timeout. `Deadline::After`/`expired`/`remainingMs`
