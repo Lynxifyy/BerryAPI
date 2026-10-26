@@ -110,6 +110,16 @@ class RefVm final : public IScriptVm {
     return funcIndex_.find(name) != funcIndex_.end();
   }
 
+  /// Every declared function name, sorted. The reference VM's function table is
+  /// flat (no namespaces), so this is simply the keys of the index.
+  std::vector<std::string> FunctionNames() const override {
+    std::vector<std::string> names;
+    names.reserve(funcIndex_.size());
+    for (const auto& kv : funcIndex_) names.push_back(kv.first);
+    std::sort(names.begin(), names.end());
+    return names;
+  }
+
   ScriptStatus Start(const std::string& name,
                      const std::vector<ScriptValue>& args,
                      ScriptError* err) override {

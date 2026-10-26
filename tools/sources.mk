@@ -94,6 +94,7 @@ CORE_SRC := \
   core/script/layout.cpp \
   core/script/sigpack.cpp \
   core/script/session_recorder.cpp \
+  core/script/scripttest.cpp \
   util/logger.cpp \
   util/mem.cpp
 
@@ -270,7 +271,8 @@ TEST_SRC := \
   tests/test_replay_review.cpp \
   tests/test_replay_server.cpp \
   tests/test_replay_service.cpp \
-  tests/test_script_bus.cpp
+  tests/test_script_bus.cpp \
+  tests/test_scripttest.cpp
 
 # Vendored Luau (MIT). See third_party/luau/PROVENANCE.md for the pinned
 # version and why these units and not the CLI. Compiled with -w because upstream

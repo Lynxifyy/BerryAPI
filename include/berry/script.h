@@ -286,6 +286,14 @@ class BERRY_API IScriptVm {
   virtual bool loaded() const = 0;
   virtual bool HasFunction(const std::string& name) const = 0;
 
+  /// The exported function names this chunk returns, in a stable order. A VM
+  /// that cannot enumerate returns an empty list, which a caller must read as
+  /// "not supported" rather than "no functions". Used by the script test
+  /// runner's discovery; a function VALUE cannot cross the ScriptValue
+  /// boundary, so enumeration is the only way a host can learn what a chunk
+  /// exports.
+  virtual std::vector<std::string> FunctionNames() const { return {}; }
+
   /// Begins a call to `name`. Returns NoFunction when absent.
   virtual ScriptStatus Start(const std::string& name,
                              const std::vector<ScriptValue>& args,

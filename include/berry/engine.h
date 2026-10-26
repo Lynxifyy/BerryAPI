@@ -45,6 +45,12 @@ struct EngineConfig {
   bool devMode = false;
   /// The directory the client loads a script from, or empty for none.
   std::string scriptDirectory;
+  /// The Ed25519 public key (64 hex chars) a script manifest's signature is
+  /// verified against. Empty means "no anchor", and since the loader requires a
+  /// signature outside dev mode, an empty anchor then refuses every manifest —
+  /// which is the correct fail-closed default. Production sets this to the
+  /// publisher's key.
+  std::string scriptAnchorKey;
   /// The local player's runtime entity id (0 = unknown).
   u64 localPlayerId = 0;
   /// LAN cosmetic-sync channel (opt-in). Off by default.

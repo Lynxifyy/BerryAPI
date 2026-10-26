@@ -144,7 +144,7 @@ check-samples: samples/sample_hitmarker.o
 	@echo "== samples compile OK =="
 	@rm -f samples/sample_hitmarker.o
 
-test: idl-check check-signer check-sigpack-signer check-sources $(TEST_BINS) build/$(SHARED_NAME) check-samples
+test: idl-check check-signer check-sigpack-signer check-sources check-run $(TEST_BINS) build/$(SHARED_NAME) check-samples
 	@for b in $(TEST_BINS); do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
@@ -262,6 +262,43 @@ build/berry-relay: $(RELAY_OBJ) $(CORE_OBJ)
 .PHONY: berry-relay
 berry-relay: build/berry-relay
 	@echo "== built build/berry-relay =="
+
+# The developer CLI (tools/berry-run.cpp): `test`, `run` and `replay` modes over
+# the portable core. It links the shipping (client-only) mbedTLS objects, so it
+# is a plain host binary with no game and no Android. Run `make berry-run` then
+# `./build/berry-run --help`.
+RUN_OBJ := build/tools/berry-run.o
+build/tools/berry-run.o: tools/berry-run.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Itools -c $< -o $@
+
+build/berry-run: $(RUN_OBJ) $(CORE_OBJ)
+	$(CXX) $(LDFLAGS) $(RUN_OBJ) $(CORE_OBJ) -ldl -o $@
+
+.PHONY: berry-run
+berry-run: build/berry-run
+	@echo "== built build/berry-run =="
+
+# End-to-end check for the developer CLI. It drives the real binary through
+# every mode and asserts the exit code, so the argument parsing, the verified
+# loader path, the test runner and the bounded replay reader are all exercised
+# as a user would exercise them. A refusal (wrong anchor, tampered manifest,
+# malformed replay) must exit non-zero, which is what makes the fail-closed
+# claims in docs/RUN.md testable.
+.PHONY: check-run
+check-run: build/berry-run
+	@tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	./build/berry-run version >/dev/null || { echo "check-run: version failed"; exit 1; }; \
+	./build/berry-run --help >/dev/null || { echo "check-run: --help failed"; exit 1; }; \
+	printf 'return { test_ok = function() test.eq(1, 1) end,\n test_bad = function() test.eq(1, 2) end }\n' > "$$tmp/spec.luau"; \
+	./build/berry-run test "$$tmp/spec.luau" >/dev/null 2>&1 && { echo "check-run: a failing suite exited 0"; exit 1; }; \
+	./build/berry-run test "$$tmp/spec.luau" --filter test_ok >/dev/null 2>&1 || { echo "check-run: a passing filter exited non-zero"; exit 1; }; \
+	./build/berry-run replay tests/fixtures/berry-run/sample.replay >/dev/null 2>&1 || { echo "check-run: replay read failed"; exit 1; }; \
+	./build/berry-run replay tests/fixtures/berry-run/sample.replay --expect-build 1 >/dev/null 2>&1 && { echo "check-run: a wrong fingerprint was accepted"; exit 1; }; \
+	head -c 64 /dev/urandom > "$$tmp/bad.replay"; \
+	./build/berry-run replay "$$tmp/bad.replay" >/dev/null 2>&1 && { echo "check-run: a garbage replay was accepted"; exit 1; }; \
+	echo "== berry-run CLI OK =="
 
 # IDL codegen: one description generates the C++ binding table, the TS/Luau
 # type definitions and the API docs. `idl-check` fails when they drift.

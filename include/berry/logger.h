@@ -23,11 +23,19 @@ class BERRY_API Log {
   static std::string LastMessage();
   static void Capture(bool enabled);
 
+  /// Suppresses the log's own output (stderr / logcat) while still recording the
+  /// last message for `LastMessage()`. A host that presents the log itself — the
+  /// `berry-run` CLI, which prints a test's failure from the test result rather
+  /// than from a duplicated engine line — turns this on so the two do not both
+  /// print. Default off; a device build never sets it.
+  static void SetSilent(bool silent);
+
  private:
   static void VFormat(LogLevel level, const char* fmt, va_list args);
   static std::mutex mutex_;
   static std::string last_message_;
   static bool capture_;
+  static bool silent_;
   static LogLevel level_;
 };
 

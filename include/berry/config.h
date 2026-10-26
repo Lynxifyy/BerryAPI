@@ -42,6 +42,12 @@ typedef struct BerryConfigC {
   // The directory the client loads a script from, or NULL for none. The string
   // is borrowed for the duration of the call and copied by the client.
   const char* script_directory;
+  // The Ed25519 public key (64 hex chars) a script manifest's signature is
+  // verified against, or NULL for no anchor. Without an anchor, and outside
+  // dev mode, every manifest is refused (the loader requires a signature), so
+  // this is what makes production script loading possible. Borrowed for the
+  // call; copied by the client.
+  const char* script_anchor_key;
   // The local player's runtime entity id, for player/world reads and the voice
   // proximity check. 0 means unknown (those reads fail closed).
   uint64_t local_player_id;

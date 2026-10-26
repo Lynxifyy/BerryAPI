@@ -16,7 +16,10 @@
 // v5: BerryConfigC grew the voice-security fields (voice_identity_seed,
 //     voice_peer_keys, voice_room_key, voice_group, voice_port), so voice is
 //     authenticated and encrypted rather than plaintext.
-#define BERRY_ABI_VERSION 5
+// v6: BerryConfigC grew the script trust anchor (script_anchor_key), so a
+//     signed manifest can be verified through the C ABI rather than only in a
+//     test that constructs ClientConfig directly.
+#define BERRY_ABI_VERSION 6
 
 // Legacy internal SDK ABI identifier (kept for compatibility).
 #define BERRY_SDK_ABI 1

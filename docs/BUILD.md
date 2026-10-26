@@ -86,10 +86,16 @@ Test binaries:
 | `test_sigscan` | signature parse/match, build-hash gate, fail-closed rules |
 | `test_thread` | ThreadModel role routing + assertions |
 | `test_fuzz` | deterministic fuzzers: WS `ParseWsFrame` + `SigScanner` |
+| `test_scripttest` | the script test framework: discovery, assertions, outcome classification, fixtures, both VMs |
 
 Add a new suite by adding it to `TEST_SRC` in `tools/sources.mk` and to the
 `test:` loop; `test-sanitize` picks it up automatically (it derives from
 `$(TEST_SRC)`).
+
+`make test` also runs `check-run`, which drives the `berry-run` developer CLI
+(see `docs/RUN.md`) end to end: every mode plus a refusal case per mode. The CLI
+is thin argument parsing over the units the suites above cover, so this is a
+smoke test of the wiring, not a second copy of the unit tests.
 
 `dlopen_test` ensures the `.so` auto-attaches on load, that Inject/Detach are
 idempotent, and re-inject works.

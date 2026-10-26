@@ -89,6 +89,7 @@ bool Engine::Bootstrap(const BerryConfigC& cfg) {
   internal.enableClient = cfg.enable_client != 0;
   internal.devMode = cfg.dev_mode != 0;
   if (cfg.script_directory) internal.scriptDirectory = cfg.script_directory;
+  if (cfg.script_anchor_key) internal.scriptAnchorKey = cfg.script_anchor_key;
   internal.localPlayerId = cfg.local_player_id;
   internal.enableCosmeticSync = cfg.enable_cosmetic_sync != 0;
   if (cfg.sync_verify_key) internal.syncVerifyKey = cfg.sync_verify_key;
@@ -180,6 +181,12 @@ bool Engine::Attach() {
     ccfg.scriptDirectory = cfg_.scriptDirectory;
     ccfg.requireSignature = !cfg_.devMode;
     ccfg.requireSourceHash = !cfg_.devMode;
+    // The trust anchor a manifest signature is verified against. An empty key
+    // leaves the anchor invalid, which (with requireSignature on) refuses every
+    // manifest: the fail-closed default for a build not provisioned with a key.
+    if (!cfg_.scriptAnchorKey.empty()) {
+      ccfg.anchor = TrustAnchor::Ed25519Key(cfg_.scriptAnchorKey);
+    }
     ccfg.localPlayer.raw = cfg_.localPlayerId;
     // The LAN channels are opt-in. The verify key is hex, parsed into the key
     // struct the channel takes; an empty/blank key leaves the channel
