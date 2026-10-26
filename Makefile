@@ -144,7 +144,7 @@ check-samples: samples/sample_hitmarker.o
 	@echo "== samples compile OK =="
 	@rm -f samples/sample_hitmarker.o
 
-test: idl-check check-signer check-sigpack-signer check-sources check-run $(TEST_BINS) build/$(SHARED_NAME) check-samples
+test: idl-check check-signer check-sigpack-signer check-sources check-android-sources check-run $(TEST_BINS) build/$(SHARED_NAME) check-samples
 	@for b in $(TEST_BINS); do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
@@ -336,6 +336,23 @@ check-sources:
 	done; \
 	[ $$missing -eq 0 ] || exit 1; \
 	echo "== source manifest complete =="
+
+# The Android build reads the same tools/sources.mk as the host build, so the
+# two cannot drift; this target proves it, and proves the device-only units and
+# the new subsystems are actually in the list. It needs no NDK (it uses
+# build-android.sh --sources-only), so it runs as part of `make test`. A full
+# `tools/build-android.sh <NDK>` is what produces the .so; that needs an NDK and
+# is left to the release job.
+.PHONY: check-android-sources
+check-android-sources:
+	@python3 tools/check-android-sources.py
+
+# Convenience: build the on-device .so when an NDK is present. Not part of
+# `make test` (it needs the NDK and a cross toolchain); `make check-android`
+# builds it and reports the artefact.
+.PHONY: check-android
+check-android:
+	@bash tools/build-android.sh && ls -l build-android/*/libBerryAPI.so
 
 clean:
 	rm -rf build core/events/*.o core/hooks/*.o core/modules/*.o core/lifecycle/*.o \

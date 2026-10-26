@@ -53,7 +53,8 @@ source via CMake, then links `libBerryAPI.so`:
 BERRY_ABI=armeabi-v7a ./tools/build-android.sh "$NDK"
 ```
 
-Output: `build-android/<ABI>/libBerryAPI.so`.
+Output: `build-android/<ABI>/libBerryAPI.so` (a stripped AArch64/ARMv7 ELF that
+exports only `BERRY_*` and `Berry::*`, per `tools/berry.exports.map`).
 
 Key defines on Android:
 
@@ -64,6 +65,15 @@ Key defines on Android:
 `render_backend.cpp` compiles its GLES overlay path only under
 `BERRY_PLATFORM_ANDROID && !BERRY_RENDER_BACKEND_NULL`; otherwise it is a null
 stub. `backend_dobby.cpp` is inert unless `BERRY_HOOK_ENGINE_DOBBY` is set.
+
+`--sources-only` prints the exact unit set the build would compile and exits
+without touching the NDK. `make check-android-sources` (part of `make test`) uses
+it to assert, on a plain host, that the Android build and `tools/sources.mk`
+agree: every portable `core/`+`util/` unit is in the list, the device-only Dobby
+glue is present, and the subsystems a device needs — mbedTLS, lz4, ed25519, the
+replay container, the client host and the secure voice path — are all there. A
+full `make check-android` (with an NDK on `PATH` or `$ANDROID_NDK_HOME`) builds
+the `.so` and reports it.
 
 ## Vendored deps
 

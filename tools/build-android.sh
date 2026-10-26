@@ -19,6 +19,75 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ---------------------------------------------------------------------------
+# Source list.
+#
+# The list lives in tools/sources.mk, shared with the host Makefile, so the two
+# builds cannot drift apart. CORE_SRC holds every portable unit (script runtime
+# and client modules included); ANDROID_EXTRA_SRC adds the device-only Dobby
+# glue. This is parsed *before* the NDK is located so `--sources-only` can
+# validate the list on a host with no NDK (see `make check-android-sources`).
+# ---------------------------------------------------------------------------
+read_sources() {
+  # Prints the entries of a "NAME := \ ..." continuation list, one per line.
+  awk -v want="$1" '
+    $0 ~ "^" want "[ \t]*:?=" { sub(/^[^=]*=[ \t]*/, ""); started = 1 }
+    started {
+      line = $0
+      cont = (line ~ /\\$/)
+      sub(/\\[ \t]*$/, "", line)
+      gsub(/^[ \t]+|[ \t]+$/, "", line)
+      if (line != "") print line
+      if (!cont) exit
+    }
+  ' "$ROOT/tools/sources.mk"
+}
+
+mapfile -t SRCS < <(read_sources CORE_SRC)
+mapfile -t ANDROID_SRCS < <(read_sources ANDROID_EXTRA_SRC)
+mapfile -t C_SRCS < <(read_sources ED25519_SRC)
+mapfile -t LZ4_SRCS < <(read_sources LZ4_SRC)
+mapfile -t MBEDTLS_SRCS < <(read_sources MBEDTLS_SRC)
+# LUAU_SRC is a variable reference in sources.mk, so read the three concrete
+# lists it is built from; the awk reader above does not expand Make variables.
+mapfile -t LUAU_SRCS < <(read_sources LUAU_AST_SRC; read_sources LUAU_COMPILER_SRC; read_sources LUAU_VM_SRC)
+SRCS+=(${ANDROID_SRCS[@]+"${ANDROID_SRCS[@]}"})
+
+if [[ ${#SRCS[@]} -eq 0 ]]; then
+  echo "build-android: no sources read from tools/sources.mk" >&2
+  exit 2
+fi
+if [[ ${#LUAU_SRCS[@]} -eq 0 ]]; then
+  echo "build-android: LUAU_SRC empty in tools/sources.mk" >&2
+  exit 2
+fi
+if [[ ${#MBEDTLS_SRCS[@]} -eq 0 || ${#LZ4_SRCS[@]} -eq 0 ]]; then
+  echo "build-android: MBEDTLS_SRC/LZ4_SRC empty in tools/sources.mk" >&2
+  exit 2
+fi
+
+# --sources-only: print the exact set the build would compile, one unit per
+# line as "<category> <path>", and exit. It needs no NDK, so a plain host can
+# assert that the Android build and tools/sources.mk agree (make
+# check-android-sources). A path that is listed but missing is a hard error, so
+# a renamed file cannot silently drop out of the on-device build.
+if [[ "${1:-}" == "--sources-only" ]]; then
+  missing=0
+  emit() {  # emit <category> <path...>
+    local cat="$1"; shift
+    for p in "$@"; do
+      [[ -f "$ROOT/$p" ]] || { echo "MISSING $p" >&2; missing=1; }
+      echo "$cat $p"
+    done
+  }
+  emit CXX "${SRCS[@]}"
+  emit LUAU "${LUAU_SRCS[@]}"
+  emit CC "${C_SRCS[@]}"
+  emit LZ4 "${LZ4_SRCS[@]}"
+  emit TLS "${MBEDTLS_SRCS[@]}"
+  exit $missing
+fi
+
+# ---------------------------------------------------------------------------
 # Locate NDK
 # ---------------------------------------------------------------------------
 find_ndk() {
@@ -48,8 +117,10 @@ echo "build-android: NDK = $NDK"
 
 ABI="${BERRY_ABI:-arm64-v8a}"
 case "$ABI" in
-  arm64-v8a)  TOOL="aarch64-linux-android24-clang";  TRIPLE="aarch64-linux-android" ;;
-  armeabi-v7a) TOOL="armv7a-linux-androideabi24-clang"; TRIPLE="armv7a-linux-androideabi" ;;
+  arm64-v8a)  TOOL="aarch64-linux-android24-clang";  TRIPLE="aarch64-linux-android"
+              HOOK_ARCH_DEFINE="HOOK_MACHINE_ARCH_ARM64" ;;
+  armeabi-v7a) TOOL="armv7a-linux-androideabi24-clang"; TRIPLE="armv7a-linux-androideabi"
+              HOOK_ARCH_DEFINE="HOOK_MACHINE_ARCH_ARM" ;;
   *) echo "Unsupported BERRY_ABI=$ABI (use arm64-v8a|armeabi-v7a)" >&2; exit 2 ;;
 esac
 
@@ -135,59 +206,17 @@ if [[ "${BERRY_DOBBY:-1}" == "1" ]]; then
     echo "build-android: cmake required to build Dobby from source" >&2
     exit 2
   fi
-  COMMON_FLAGS+=("-DBERRY_HOOK_ENGINE_DOBBY=1" "-DHOOK_MACHINE_ARCH_ARM64"
+  COMMON_FLAGS+=("-DBERRY_HOOK_ENGINE_DOBBY=1" "-D$HOOK_ARCH_DEFINE"
                  "-I$ROOT/third_party/Dobby/include")
   LDFLAGS+=("-llog")
 fi
 
 # ---------------------------------------------------------------------------
 # Compile BerryAPI core.
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Source list.
 #
-# The list lives in tools/sources.mk, shared with the host Makefile, so the two
-# builds cannot drift apart. CORE_SRC holds every portable unit (script runtime
-# and client modules included); ANDROID_EXTRA_SRC adds the device-only Dobby
-# glue.
+# The source list was parsed at the top of this script (so `--sources-only` can
+# validate it without an NDK); here it is only reported.
 # ---------------------------------------------------------------------------
-read_sources() {
-  # Prints the entries of a "NAME := \ ..." continuation list, one per line.
-  awk -v want="$1" '
-    $0 ~ "^" want "[ \t]*:?=" { sub(/^[^=]*=[ \t]*/, ""); started = 1 }
-    started {
-      line = $0
-      cont = (line ~ /\\$/)
-      sub(/\\[ \t]*$/, "", line)
-      gsub(/^[ \t]+|[ \t]+$/, "", line)
-      if (line != "") print line
-      if (!cont) exit
-    }
-  ' "$ROOT/tools/sources.mk"
-}
-
-mapfile -t SRCS < <(read_sources CORE_SRC)
-mapfile -t ANDROID_SRCS < <(read_sources ANDROID_EXTRA_SRC)
-mapfile -t C_SRCS < <(read_sources ED25519_SRC)
-mapfile -t LZ4_SRCS < <(read_sources LZ4_SRC)
-mapfile -t MBEDTLS_SRCS < <(read_sources MBEDTLS_SRC)
-# LUAU_SRC is a variable reference in sources.mk, so read the three concrete
-# lists it is built from; the awk reader above does not expand Make variables.
-mapfile -t LUAU_SRCS < <(read_sources LUAU_AST_SRC; read_sources LUAU_COMPILER_SRC; read_sources LUAU_VM_SRC)
-SRCS+=(${ANDROID_SRCS[@]+"${ANDROID_SRCS[@]}"})
-
-if [[ ${#SRCS[@]} -eq 0 ]]; then
-  echo "build-android: no sources read from tools/sources.mk" >&2
-  exit 2
-fi
-if [[ ${#LUAU_SRCS[@]} -eq 0 ]]; then
-  echo "build-android: LUAU_SRC empty in tools/sources.mk" >&2
-  exit 2
-fi
-if [[ ${#MBEDTLS_SRCS[@]} -eq 0 || ${#LZ4_SRCS[@]} -eq 0 ]]; then
-  echo "build-android: MBEDTLS_SRC/LZ4_SRC empty in tools/sources.mk" >&2
-  exit 2
-fi
 echo "build-android: ${#SRCS[@]} C++ units, ${#C_SRCS[@]} Ed25519, ${#LZ4_SRCS[@]} LZ4, ${#MBEDTLS_SRCS[@]} mbedTLS and ${#LUAU_SRCS[@]} Luau units from tools/sources.mk"
 
 OBJS=()
