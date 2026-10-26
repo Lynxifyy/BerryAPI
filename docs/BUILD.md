@@ -82,6 +82,29 @@ the `.so` and reports it.
 - `third_party/ImGui` — application-level. The Render module does not hard-depend
   on ImGui; the seam/GLES path is ImGui-free by design.
 
+### mbedTLS
+
+mbedTLS is pinned to the latest 3.6 LTS patch (the release, its sha256 and why
+that line and patch were chosen are in `third_party/mbedtls/PROVENANCE.md`). It
+is a security dependency, so the pin is not allowed to drift silently:
+
+- `make check-mbedtls` (part of `make test`) asserts that the version agrees in
+  all three places it is written (the check script, `build_info.h` and
+  `PROVENANCE.md`), that the vendored config is the trimmed client-only one
+  (server role, DTLS, legacy ciphers and the PSK key exchanges are off) and that
+  every vendored unit is either compiled or a documented empty-under-this-config
+  exclusion. A half-applied upgrade, a config that leaked the server role, or a
+  point release whose new unit nobody added to `tools/sources.mk` all fail the
+  build.
+- `make check-mbedtls-upstream` additionally asks GitHub for the newest release
+  in the line and prints an advisory when the pin is behind it. It needs the
+  network, so it is not part of `make test`; run it when triaging a security
+  release. When it reports a newer patch, review that release's advisories,
+  re-vendor the tree (headers, `library/*.c` and `library/*.h`, keeping the
+  excluded set), regenerate `mbedtls_config.h` with upstream's own
+  `scripts/config.py` and the same trim list, and bump the three version
+  strings together.
+
 ## Testing
 
 Test binaries:

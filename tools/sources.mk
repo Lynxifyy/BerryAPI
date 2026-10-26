@@ -156,6 +156,7 @@ MBEDTLS_SRC := \
   third_party/mbedtls/library/hkdf.c \
   third_party/mbedtls/library/hmac_drbg.c \
   third_party/mbedtls/library/md.c \
+  third_party/mbedtls/library/mps_reader.c \
   third_party/mbedtls/library/oid.c \
   third_party/mbedtls/library/pem.c \
   third_party/mbedtls/library/pk.c \
@@ -176,6 +177,7 @@ MBEDTLS_SRC := \
   third_party/mbedtls/library/psa_crypto_hash.c \
   third_party/mbedtls/library/psa_crypto_mac.c \
   third_party/mbedtls/library/psa_crypto_pake.c \
+  third_party/mbedtls/library/psa_crypto_random.c \
   third_party/mbedtls/library/psa_crypto_rsa.c \
   third_party/mbedtls/library/psa_crypto_se.c \
   third_party/mbedtls/library/psa_crypto_slot_management.c \
@@ -187,6 +189,7 @@ MBEDTLS_SRC := \
   third_party/mbedtls/library/sha1.c \
   third_party/mbedtls/library/sha256.c \
   third_party/mbedtls/library/sha512.c \
+  third_party/mbedtls/library/ssl_cache.c \
   third_party/mbedtls/library/ssl_ciphersuites.c \
   third_party/mbedtls/library/ssl_client.c \
   third_party/mbedtls/library/ssl_debug_helpers_generated.c \

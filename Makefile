@@ -144,7 +144,7 @@ check-samples: samples/sample_hitmarker.o
 	@echo "== samples compile OK =="
 	@rm -f samples/sample_hitmarker.o
 
-test: idl-check check-signer check-sigpack-signer check-sources check-android-sources check-run $(TEST_BINS) build/$(SHARED_NAME) check-samples
+test: idl-check check-signer check-sigpack-signer check-sources check-android-sources check-mbedtls check-run $(TEST_BINS) build/$(SHARED_NAME) check-samples
 	@for b in $(TEST_BINS); do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
@@ -346,6 +346,18 @@ check-sources:
 .PHONY: check-android-sources
 check-android-sources:
 	@python3 tools/check-android-sources.py
+
+# Keeps the vendored mbedTLS honest: the version pin (script, build_info.h,
+# PROVENANCE.md), the trimmed client-only config, and the compiled-vs-excluded
+# unit set. `--upstream` additionally asks GitHub for the newest 3.6 release;
+# that needs the network, so it is not part of `make test`.
+.PHONY: check-mbedtls
+check-mbedtls:
+	@python3 tools/check-mbedtls.py
+
+.PHONY: check-mbedtls-upstream
+check-mbedtls-upstream:
+	@python3 tools/check-mbedtls.py --upstream
 
 # Convenience: build the on-device .so when an NDK is present. Not part of
 # `make test` (it needs the NDK and a cross toolchain); `make check-android`
