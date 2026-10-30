@@ -12,6 +12,7 @@
 #include "berry/async.h"
 #include "berry/generated_bindings.h"
 #include "berry/manifest.h"
+#include "berry/package.h"   // SemVer
 #include "berry/script.h"
 
 #include <cstdio>
@@ -112,12 +113,57 @@ static void TestAsyncBindingsAreSeparateSurface() {
   CHECK(std::string(AsyncBindings::HttpGet()) == "async.http_get");
 }
 
+static void TestScriptApiVersion() {
+  // The IDL's api_version is surfaced through the generated header and must be
+  // a parseable SemVer, because a manifest's requirement is compared against it
+  // with the SemVer total order.
+  const char* version = api::ScriptApiVersion();
+  CHECK(version != nullptr && *version);
+  SemVer v;
+  CHECK(SemVer::Parse(version, &v));
+  CHECK(v.prerelease.empty());   // a released build, not a pre-release
+}
+
+static void TestDeprecationTable() {
+  // Deprecation is declared in the IDL, so the table is the contract: a name is
+  // either live (null advice) or deprecated with non-empty migration advice.
+  const api::BindingSpec* specs = api::BindingSpecs();
+  size_t deprecated = 0;
+  for (size_t i = 0; i < api::BindingSpecCount(); ++i) {
+    const api::BindingSpec& s = specs[i];
+    if (s.deprecated == nullptr) {
+      CHECK(!api::IsBindingDeprecated(s.name));
+      continue;
+    }
+    ++deprecated;
+    CHECK(*s.deprecated != '\0');   // advice is mandatory
+    CHECK(api::IsBindingDeprecated(s.name));
+    // A deprecated binding is still a real, gated binding: deprecation must
+    // never be a way to slip past the capability gate.
+    CHECK(IsGrantableKind(s.capability));
+  }
+  // The surface pins at least the one alias the IDL marks deprecated, so a
+  // regression that silently drops the marker is caught.
+  CHECK(deprecated >= 1);
+  CHECK(api::IsBindingDeprecated("world.block_id_at"));
+  CHECK(api::FindBindingSpec("world.block_id_at") != nullptr);
+  CHECK(api::FindBindingSpec("world.block_id_at")->deprecated != nullptr);
+
+  // A live binding is not deprecated, and a name that does not exist is not
+  // "deprecated" either (it simply is not part of the surface).
+  CHECK(!api::IsBindingDeprecated("world.block_at"));
+  CHECK(!api::IsBindingDeprecated("does.not.exist"));
+  CHECK(!api::IsBindingDeprecated(""));
+}
+
 int main() {
   TestSpecTableWellFormed();
   TestLookupByName();
   TestModuleTablesAgree();
   TestCapabilityNamesResolve();
   TestAsyncBindingsAreSeparateSurface();
+  TestScriptApiVersion();
+  TestDeprecationTable();
   if (g_fail == 0) printf("test_idl: ALL OK\n");
   return g_fail;
 }

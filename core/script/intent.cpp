@@ -32,6 +32,8 @@ const IntentRow kIntents[] = {
     {IntentKind::Nametag, "nametag", IntentGroup::Hud, IntentClass::ClientSide},
     {IntentKind::Cosmetic, "cosmetic", IntentGroup::Cosmetic, IntentClass::ClientSide},
     {IntentKind::Sound, "sound", IntentGroup::Audio, IntentClass::ClientSide},
+    {IntentKind::CrystalAdvise, "crystal_advise", IntentGroup::Crystal,
+     IntentClass::ClientSide},
     // World writes: the client is not a second authority on the world.
     {IntentKind::PlaceBlock, "place_block", IntentGroup::World, IntentClass::WorldWrite},
     {IntentKind::BreakBlock, "break_block", IntentGroup::World, IntentClass::WorldWrite},
@@ -75,14 +77,18 @@ bool PatternMatches(const std::string& pattern, const std::string& host) {
   return pattern == host;
 }
 
-/// The profile returned when nothing matches. Open, because the safe default
-/// profile is always registered and refusing to run would be worse.
-ServerPolicyProfile OpenProfile() {
+/// The profile returned when nothing matches. Client-side intents are allowed,
+/// with one deliberate exception: the crystal-placement advisor is competitive
+/// assistance, so its group is denied unless a profile explicitly allows it.
+/// Refusing to run at all would be worse, so the fallback is not a blanket deny;
+/// but an unknown server must not silently enable a combat aid the operator
+/// never opted into.
+ServerPolicyProfile DefaultProfile() {
   ServerPolicyProfile p;
-  p.name = "open";
+  p.name = "default";
   p.serverMatch = "*";
-  p.disabledGroups = 0;
-  p.reason = "no profile matched";
+  p.disabledGroups = IntentGroupMask(IntentGroup::Crystal);
+  p.reason = "default: client-side intents allowed; crystal advisor opt-in";
   return p;
 }
 
@@ -122,6 +128,7 @@ const char* IntentGroupName(IntentGroup g) {
     case IntentGroup::Hud: return "hud";
     case IntentGroup::Audio: return "audio";
     case IntentGroup::Cosmetic: return "cosmetic";
+    case IntentGroup::Crystal: return "crystal";
     case IntentGroup::World: return "world";
   }
   return "unknown";
@@ -132,7 +139,8 @@ u32 IntentGroupMask(IntentGroup g) { return (u32)g; }
 std::string IntentGroupList(u32 mask) {
   static const IntentGroup kOrder[] = {
       IntentGroup::Camera, IntentGroup::Input, IntentGroup::Hud,
-      IntentGroup::Audio, IntentGroup::Cosmetic, IntentGroup::World};
+      IntentGroup::Audio, IntentGroup::Cosmetic, IntentGroup::Crystal,
+      IntentGroup::World};
   std::string out;
   for (IntentGroup g : kOrder) {
     if (mask & IntentGroupMask(g)) {
@@ -160,6 +168,7 @@ CapKind IntentGroupCapability(IntentGroup g) {
     case IntentGroup::Hud: return CapKind::Hud;
     case IntentGroup::Audio: return CapKind::Audio;
     case IntentGroup::Cosmetic: return CapKind::Cosmetic;
+    case IntentGroup::Crystal: return CapKind::Crystal;
     // A world write is refused by classification before the capability is
     // consulted, so the group's capability is the read-only world grant.
     case IntentGroup::World: return CapKind::World;
@@ -234,21 +243,19 @@ ServerPolicyProfile IntentPolicy::ForServer(const std::string& host) const {
       best = &p;
     }
   }
-  if (!best) return OpenProfile();
+  if (!best) return DefaultProfile();
   return *best;
 }
 
 std::vector<ServerPolicyProfile> IntentPolicy::BuiltinProfiles() {
   std::vector<ServerPolicyProfile> out;
 
-  // The default: everything client-side is allowed. World writes are denied by
-  // classification, not by the mask.
-  ServerPolicyProfile open;
-  open.name = "open";
-  open.serverMatch = "*";
-  open.disabledGroups = 0;
-  open.reason = "default: client-side intents allowed";
-  out.push_back(open);
+  // The default for any server with no more specific profile: client-side
+  // intents are allowed, but the crystal-placement advisor is opt-in. A
+  // competitive combat aid is exactly the kind of thing an operator should have
+  // to enable deliberately, so an unknown server denies the crystal group.
+  // World writes are denied by classification, not by the mask.
+  out.push_back(DefaultProfile());
 
   // The documented strict template: a server that bans client mods outright.
   // Nothing here is enabled by default; an operator copies it and narrows the
@@ -269,7 +276,7 @@ std::vector<ServerPolicyProfile> IntentPolicy::BuiltinProfiles() {
 // IntentValidator
 //----------------------------------------------------------------------------
 
-IntentValidator::IntentValidator() { profile_ = OpenProfile(); }
+IntentValidator::IntentValidator() { profile_ = DefaultProfile(); }
 
 IntentValidator::IntentValidator(const ServerPolicyProfile& profile)
     : profile_(profile) {}

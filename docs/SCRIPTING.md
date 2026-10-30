@@ -198,6 +198,56 @@ local res = await async.http_get("https://api.example.com/state", 2000)
 - A task that never becomes ready is bounded by its own timeout and faults the
   host rather than leaking a suspended invocation.
 
+## The script event bus (`Events.on`)
+
+`Events.once` is a one-shot await: it suspends the caller and resumes it with a
+single payload. `Events.on` is the push counterpart a long-lived mod wants — a
+named handler that runs every time a channel fires, for the life of the script:
+
+```
+function on_load()
+  events.on("combatConfirmed", "on_hit")   -- returns a subscription id
+end
+
+function on_hit(payload)
+  -- runs on the script worker each time a hit is confirmed
+end
+
+events.off(id)          -- remove one subscription
+events.off_all()        -- remove every subscription this script holds
+events.subscriptions()  -- how many this script holds
+events.channels()       -- every channel (declared + script-defined), comma-joined
+```
+
+The design is the threading split. Engine channels fire on the game-tick thread,
+the render thread and the transport threads, but script code may only run on the
+script worker. A `ScriptEventBus` listener therefore never calls into the
+script: it copies the payload into a bounded queue. `BerryClient` pumps that
+queue on the worker once per tick, after `on_tick`, and invokes the handler
+through `ScriptHost::RunHook` — the same path `on_tick` uses, so budgets,
+capability gating and error isolation apply unchanged.
+
+That split is also what makes re-entrancy impossible to get wrong:
+
+- A handler that calls `Events.emit` appends to the queue; the new event is
+  delivered on a later pump. A per-pump delivery cap bounds a handler that emits
+  its own channel, so it can never spin.
+- The queue is bounded (`kMaxQueued`). A full queue drops and *counts* what it
+  dropped (`ScriptEventBus::dropped()`), so a flood is observable rather than
+  fatal.
+- An event that arrives while the script is suspended is held, not run: the
+  async layer owns the host then, and delivery resumes once it is live again.
+- A handler that faults the host unloads it (error isolation), exactly like a
+  faulting `on_tick`; the remaining events stay queued for a reload.
+
+Subscriptions are validated and scoped: a channel must match the IDL's declared
+names or a script-defined name of the right shape, a handler must be a
+function-shaped identifier, and every subscription is owned by the calling
+script — `Events.off` refuses an id it does not own, so one script cannot cancel
+another's handler. Re-registering the same `(channel, handler)` pair is
+idempotent, so a hot reload that re-runs `on_load` does not accumulate duplicate
+deliveries.
+
 ## IDL codegen
 
 `api/berry.idl` is the single source of truth. `make idl` regenerates:
@@ -211,6 +261,25 @@ local res = await async.http_get("https://api.example.com/state", 2000)
 `make idl-check` (part of `make test`) runs the generator's self-test and fails
 the build when the generated files drift from the IDL, so the code and the docs
 cannot disagree.
+
+### API versioning and deprecation
+
+The IDL opens with an `api_version` declaration, and the generator emits it as
+`Berry::api::ScriptApiVersion()`. A manifest may declare the minimum script API
+it needs in its `api_version` field; the loader refuses a script that asks for a
+newer surface than the build implements (`LoadError::ApiVersionUnsupported`),
+before the signature check, so a script written for a later surface is rejected
+with a precise reason instead of faulting on a missing binding. The requirement
+is part of the signed payload, so it cannot be raised or lowered without
+invalidating the signature, and a manifest that never declared one keeps its
+pre-versioning payload byte-for-byte.
+
+A binding is retired in stages: mark it with a `deprecated "…"` line in the IDL
+(which flows into the C++ table, the TS/Luau definitions and `docs/API.md`), keep
+it working and gated, and remove it only at the next major script-API bump. The
+runtime warns once per script per binding from the capability gate — the single
+path every native call takes — and only for a call that passed the gate. See
+`docs/DEPRECATION.md` for the full policy and the change checklist.
 
 ### Binding the surface to services (`api_bindings.h`)
 
@@ -665,7 +734,7 @@ a static table (`ClassifyIntent`, pure — no per-call-site drift):
 
 * **ClientSide** — what normal player input could do or what stays on this
   screen: `zoom`, `freelook`, `fov`, `perspective`, `keybind`, `hud`, `nametag`,
-  `cosmetic`, `sound`. Allowed.
+  `cosmetic`, `sound`, `crystal_advise`. Allowed.
 * **WorldWrite** — anything that would mutate the world or the player's
   authoritative state: `place_block`, `break_block`, `attack`, `interact`,
   `move`, `set_time`, `set_weather`. Denied. The client is not a second
@@ -673,13 +742,20 @@ a static table (`ClassifyIntent`, pure — no per-call-site drift):
 * **Unknown** — an action the table does not name. Denied, so a typo or a future
   name fails closed.
 
-Intents are grouped (Camera, Input, Hud, Audio, Cosmetic, World). A
+Intents are grouped (Camera, Input, Hud, Audio, Cosmetic, Crystal, World). A
 `ServerPolicyProfile` matches a server address (`"*"`, an exact host, or a `*.`
 suffix wildcard) and disables whole groups. `IntentPolicy::ForServer` picks the
 most specific match — exact host beats a longer wildcard beats `"*"` — and
 `IntentValidator::SelectFor` installs it for the session, so the profile follows
 the server the client connects to. `BuiltinProfiles()` supplies an open default
 plus the documented strict template.
+
+The crystal-placement advisor is its own group (`Crystal`) and its own
+capability (`crystal`, distinct from `combat`), so a server that bans the
+advisor disables it without touching combat telemetry, and a script granted
+`combat` does not thereby gain the advisor. The `crystal.analyze` and
+`crystal.arm` bindings consult the group before any world read, and the tick
+hook re-checks it, so a profile change mid-session takes effect.
 
 The two layers are independent: classification says what may ever be done, the
 profile says what may be done *here*. A profile cannot re-enable a world write —

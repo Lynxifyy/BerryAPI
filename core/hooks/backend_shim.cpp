@@ -2,11 +2,14 @@
 #include "berry/mem.h"
 #include "berry/logger.h"
 #include "berry/types.h"
+#include "berry/x86_length.h"
 
 #include <dlfcn.h>
+#include <sys/mman.h>
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <vector>
 
 //----------------------------------------------------------------------------
 // Shim backend — a real hotpatch detour backend for x86-64.
@@ -23,28 +26,87 @@ using Berry::u8;
 using Berry::u32;
 using Berry::i32;
 using Berry::i64;
+using Berry::X86InsnInfo;
+using Berry::X86DecodeInsn;
 
 namespace {
 
 struct ShimTrampoline {
-  u8 patch[5];    // original 5 bytes
-  u8 jmp_back[5]; // jmp target+5
+  // The relocated prologue (up to 5 + 14 bytes) followed by a 5-byte jmp back
+  // to target+N. `original` keeps the pristine bytes for restoration — the
+  // relocated copy has its rel32 fields rebased and must never be written back
+  // over the target.
+  u8 bytes[32];
+  u8 original[32];
+  size_t len = 0;          // relocated instruction bytes
+  size_t patchLen = 0;     // bytes overwritten at the target (>= 5)
 };
 
 std::mutex g_shimMutex;
 std::map<void*, ShimTrampoline*> g_patches;
 
-void* g_shimTrampolineMem = nullptr;
-size_t g_shimTrampolineOffset = 0;
+// Trampoline pools. Each is an RWX mapping placed within +/-2 GiB of the target
+// functions it serves, because the patch and the jmp-back are 5-byte `jmp rel32`
+// instructions. A single pool mapped wherever the OS likes is out of rel32 range
+// on a PIE executable (the text and the anonymous mapping are tens of TiB
+// apart), so `EnsurePoolFor` searches for a free page near the target.
+struct ShimPool {
+  u8* mem = nullptr;
+  size_t offset = 0;
+};
+std::vector<ShimPool> g_pools;
 constexpr size_t kTrampolinePool = 4096;
+constexpr size_t kTrampolineStride = sizeof(ShimTrampoline);
 
-bool EnsurePool() {
-  if (g_shimTrampolineMem) return true;
-  // mmap with PROT_EXEC so the relocated jmp-back code is runnable.
-  g_shimTrampolineMem = mmap(nullptr, kTrampolinePool,
-                             PROT_READ | PROT_WRITE | PROT_EXEC,
-                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  return g_shimTrampolineMem != MAP_FAILED && g_shimTrampolineMem != nullptr;
+/// A pool with room for one more trampoline whose whole span is within rel32 of
+/// `target`. Returns null when no free page is found nearby (so the caller
+/// fails closed instead of writing an out-of-range jump).
+ShimPool* EnsurePoolFor(void* target) {
+  const uintptr_t t = reinterpret_cast<uintptr_t>(target);
+  for (ShimPool& pool : g_pools) {
+    if (pool.offset + kTrampolineStride > kTrampolinePool) continue;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(pool.mem);
+    const uintptr_t hi = base + pool.offset + kTrampolineStride + 5;
+    const i64 loRel = (i64)base - (i64)t;
+    const i64 hiRel = (i64)hi - (i64)t;
+    if (loRel >= INT32_MIN && hiRel <= INT32_MAX) return &pool;
+  }
+  // Search outward from the target's own page for a free page, and reserve it
+  // atomically with MAP_FIXED_NOREPLACE (so an existing mapping is never
+  // clobbered). The scan covers roughly +/-1.75 GiB, inside rel32.
+  const uintptr_t page = 0x1000;
+  const uintptr_t tPage = t & ~(uintptr_t)(page - 1);
+  for (uintptr_t delta = page; delta < 0x70000000ULL; delta += page) {
+    for (int dir = 0; dir < 2; ++dir) {
+      uintptr_t cand = dir == 0 ? tPage + delta : tPage - delta;
+      if (cand < page) continue;
+      void* p = mmap(reinterpret_cast<void*>(cand), kTrampolinePool,
+                     PROT_READ | PROT_WRITE | PROT_EXEC,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+      if (p == MAP_FAILED) continue;
+      g_pools.push_back(ShimPool{static_cast<u8*>(p), 0});
+      return &g_pools.back();
+    }
+  }
+  return nullptr;
+}
+
+/// How many whole instructions the detour must overwrite so at least 5 bytes are
+/// covered, plus the offsets of the rel32 fields inside that span that must be
+/// rebased when the span moves to a trampoline. Returns 0 when the prologue
+/// cannot be decoded or contains a rel8 branch (whose 127-byte reach cannot be
+/// re-created), so a `jmp rel32` is never written over a partial instruction.
+size_t DecodePrologue(const u8* target, std::vector<size_t>* relocs) {
+  size_t total = 0;
+  while (total < 5) {
+    const X86InsnInfo info = X86DecodeInsn(target + total, 16);
+    if (!info.ok()) return 0;
+    if (info.rel8Branch) return 0;   // cannot relocate a rel8 branch
+    if (info.relocSize == 4) relocs->push_back(total + info.relocOffset);
+    total += info.length;
+    if (total > 20) return 0;        // pathological; refuse rather than guess
+  }
+  return total;
 }
 
 void WriteRelJmp(void* at, void* dest) {
@@ -65,7 +127,9 @@ bool RelJmpInRange(void* at, void* dest) {
 extern "C" {
 
 BERRY_API bool BERRY_ShimCanPatch() {
-  return EnsurePool();
+  // The shim can always patch on x86-64; the per-target pool is allocated on
+  // demand in BERRY_ShimPatchInPlace.
+  return true;
 }
 
 BERRY_API BERRY_PatchedFn BERRY_ShimPatchInPlace(void* target, void* detour) {
@@ -73,33 +137,58 @@ BERRY_API BERRY_PatchedFn BERRY_ShimPatchInPlace(void* target, void* detour) {
   std::lock_guard<std::mutex> lk(g_shimMutex);
   if (g_patches.find(target) != g_patches.end()) return nullptr;
 
-  auto* tr = reinterpret_cast<ShimTrampoline*>(
-      static_cast<u8*>(g_shimTrampolineMem) + g_shimTrampolineOffset);
+  const u8* code = static_cast<const u8*>(target);
+  std::vector<size_t> relocs;
+  const size_t patchLen = DecodePrologue(code, &relocs);
+  if (patchLen < 5 || patchLen > sizeof(ShimTrampoline::bytes) - 5) return nullptr;
 
-  // 1. Copy original 5 bytes into trampoline.
-  memcpy(tr->patch, target, sizeof(tr->patch));
-  // 2. Emit jmp-back (target+5), verifying the jmp fits in rel32.
-  if (!RelJmpInRange(tr->jmp_back, static_cast<u8*>(target) + 5)) return nullptr;
-  if (g_shimTrampolineOffset + sizeof(ShimTrampoline) > kTrampolinePool) return nullptr;
-  WriteRelJmp(tr->jmp_back, static_cast<u8*>(target) + 5);
-  // 3. Patch the target: jmp detour.
-  size_t span = 5;
-  Berry::mem::WithWritable(target, span, [&]() {
+  // A trampoline pool within rel32 of the target, so both the patch and the
+  // jmp-back fit in a 5-byte relative jump.
+  ShimPool* pool = EnsurePoolFor(target);
+  if (!pool) return nullptr;
+  auto* tr = reinterpret_cast<ShimTrampoline*>(pool->mem + pool->offset);
+
+  // 1. Relocate the whole instructions the detour overwrites, rebasing every
+  //    rel32 field (RIP-relative operands, rel32 branches) to its new address.
+  memcpy(tr->bytes, code, patchLen);
+  memcpy(tr->original, code, patchLen);
+  for (size_t off : relocs) {
+    i32 disp = 0;
+    memcpy(&disp, code + off, 4);
+    // The field's value is relative to the end of the *original* instruction;
+    // recompute it against the trampoline's copy.
+    i64 origNext = reinterpret_cast<i64>(code + off + 4) + disp;
+    i64 newDisp = origNext - reinterpret_cast<i64>(tr->bytes + off + 4);
+    if (newDisp < INT32_MIN || newDisp > INT32_MAX) return nullptr;
+    i32 nd = static_cast<i32>(newDisp);
+    memcpy(tr->bytes + off, &nd, 4);
+  }
+  tr->len = patchLen;
+  tr->patchLen = patchLen;
+  // 2. Emit jmp-back (target+patchLen), verifying it fits in rel32.
+  u8* jmpBack = tr->bytes + patchLen;
+  if (!RelJmpInRange(jmpBack, static_cast<u8*>(target) + patchLen)) return nullptr;
+  WriteRelJmp(jmpBack, static_cast<u8*>(target) + patchLen);
+  // 3. Patch the target: jmp detour over the same whole instructions. Pad the
+  //    remaining bytes of the span with NOPs (0x90) so the code stream stays
+  //    valid if control somehow reaches them.
+  Berry::mem::WithWritable(target, patchLen, [&]() {
     WriteRelJmp(target, detour);
+    memset(static_cast<u8*>(target) + 5, 0x90, patchLen - 5);
   });
 
   g_patches[target] = tr;
-  g_shimTrampolineOffset += sizeof(ShimTrampoline);
-  return reinterpret_cast<BERRY_PatchedFn>(tr->patch);
+  pool->offset += kTrampolineStride;
+  return reinterpret_cast<BERRY_PatchedFn>(tr->bytes);
 }
 
 BERRY_API int BERRY_ShimUnpatch(void* target) {
   std::lock_guard<std::mutex> lk(g_shimMutex);
   auto it = g_patches.find(target);
   if (it == g_patches.end()) return -1;
-  // Restore the original 5 bytes.
-  Berry::mem::WithWritable(target, 5, [&]() {
-    memcpy(target, it->second->patch, 5);
+  // Restore the original whole-instruction bytes.
+  Berry::mem::WithWritable(target, it->second->patchLen, [&]() {
+    memcpy(target, it->second->original, it->second->patchLen);
   });
   g_patches.erase(it);
   return 0;
@@ -152,8 +241,9 @@ void HookManager::BackendEmulateShim() {
 }
 
 #ifdef BERRY_HOOK_HAVE_DOBBY
-// Implemented in backend_dobby.cpp — never defined on the host shim build.
-void HookManager::UseDobby();
+// UseDobby() is declared in hooks.h and defined in backend_dobby.cpp; it is
+// never defined on the host shim build. An out-of-line redeclaration here
+// would be a qualified declaration with no definition, which clang rejects.
 #endif
 
 void HookManager::Track(void* target, HookSymbol symbol) {

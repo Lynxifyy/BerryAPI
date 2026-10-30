@@ -2,8 +2,12 @@
 
 # BerryAPI script API
 
+Script API version: `1.0.0`.
+
 Generated from `api/berry.idl`. Each function lists the capability a
-script must be granted before it can call it.
+script must be granted before it can call it. A function marked
+deprecated still resolves; it is scheduled for removal in a future
+major script-API version (see `docs/DEPRECATION.md`).
 
 ## Combat
 
@@ -121,7 +125,7 @@ Capability: `world`.
 | `world.get_biome(x: number, y: number, z: number) -> string` | `world` | The biome name at a block coordinate, or \"\" when the seam has no answer. |
 | `world.get_light(x: number, y: number, z: number) -> number` | `world` | The light level (0..15) at a block coordinate, or -1 when the seam has no answer. |
 | `world.get_chunk_state(x: number, y: number, z: number) -> string` | `world` | The load state of the chunk containing a block coordinate: \"unloaded\", \"loaded\" or \"rendered\". |
-| `world.block_id_at(x: number, y: number, z: number) -> number` | `world` | The numeric block id at integer coordinates (0 = air). Alias of `block_at`, spelled to make the numeric return obvious. |
+| `world.block_id_at(x: number, y: number, z: number) -> number` | `world` | **Deprecated.** Use `world.block_at`, which returns the same numeric id. `block_id_at` is an alias kept only for scripts written against the first release and is scheduled for removal in script API 2.0.0. The numeric block id at integer coordinates (0 = air). Alias of `block_at`, spelled to make the numeric return obvious. |
 
 ## Entity
 
@@ -146,7 +150,7 @@ Capability: `fileio`.
 
 | Function | Capability | Description |
 | --- | --- | --- |
-| `fs.write(path: string, data: string) -> bool` | `fileio` | Sandboxed file store. A script gets its own directory and nothing else: a path is validated before use (no absolute path, no backslash, no drive letter, no control character, no empty segment, no \".\" or \"..\", a bounded length and depth), so a path cannot escape the sandbox however it is spelled. Writes are capped per file, in total and in count, so a write loop cannot exhaust memory. Every call fails closed (false / empty) rather than throwing. |
+| `fs.write(path: string, data: string) -> bool` | `fileio` | Sandboxed file store. A script gets its own directory and nothing else: a path is validated before use (no absolute path, no backslash, no drive letter, no control character, no empty segment, no \".\" or \"..\", a bounded length and depth), so a path cannot escape the sandbox however it is spelled. Writes are capped per file, in total and in count, so a write loop cannot exhaust memory. Every call fails closed (false / empty) rather than throwing. When the embedder configures a script data directory, the store persists to a per-script directory there: every path component is opened without following a symlink, a write lands in a temporary file that is renamed into place (so a reader never sees a partial write), and the existing files and bytes are counted against the quota when the directory is opened, so data survives a restart and a planted symlink or a traversal spelling is refused. |
 | `fs.read(path: string) -> string` | `fileio` | - |
 | `fs.append(path: string, data: string) -> bool` | `fileio` | - |
 | `fs.exists(path: string) -> bool` | `fileio` | - |
@@ -403,9 +407,18 @@ Capability: `cosmetic`.
 
 Capability: `events`.
 
+| Function | Capability | Description |
+| --- | --- | --- |
+| `events.on(channel: string, handler: string) -> number` | `events` | Registers `handler` (a function exported by the script) on `channel`. Returns a subscription id, or 0 when refused (empty/oversized channel or handler name, unknown channel, or the subscription cap is reached). The handler is called with the payload as its first argument; a channel with no payload delivers an empty string. Re-registering the same (channel, handler) pair returns the existing id rather than adding a duplicate. |
+| `events.off(id: number) -> bool` | `events` | Removes the subscription with `id`. Returns true when one was removed. |
+| `events.off_all() -> number` | `events` | Removes every subscription the calling script holds. Returns how many were removed. |
+| `events.subscriptions() -> number` | `events` | How many subscriptions the calling script holds. |
+| `events.emit(channel: string, payload: string) -> number` | `events` | Publishes `payload` on `channel` to every subscriber (this script included, unless it has no subscription). Returns how many handlers were dispatched. An empty or oversized channel is refused (returns 0). |
+| `events.channels() -> string` | `events` | The declared channels and every channel a script has subscribed to, comma-separated and sorted, so a script can discover what it can listen for. |
+
 Events (await with `Events.once`):
 
-- `hit(damage: number)` — Event channels scripts may await with Events.once. The world-diff channels are driven by the reactive world grid: entityEntered and entityLeft carry \"<id>:<type>\", entityUpdated fires when an entity's position, health or state changed between ticks, and blockChanged carries \"x,y,z,block\". A script never polls for these. The lifecycle channels (entityHurt, entityDeath, entitySpawn) are driven by the combat bus and the world diff and carry \"<id>:<detail>\" (entityHurt's detail is the damage, entitySpawn's is the type), so a script can filter by id without a parser.
+- `hit(damage: number)` — -
 - `kill(victim: string)` — -
 - `tick_count(count: number)` — -
 - `entityEntered(entity: string)` — -
@@ -427,7 +440,7 @@ Capability: `input`.
 
 | Function | Capability | Description |
 | --- | --- | --- |
-| `intent.allowed(name: string) -> bool` | `input` | Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share. |
+| `intent.allowed(name: string) -> bool` | `input` | Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound, crystal_advise) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share. |
 | `intent.classify(name: string) -> string` | `input` | - |
 | `intent.server() -> string` | `input` | - |
 | `intent.profile() -> string` | `input` | - |
@@ -549,31 +562,73 @@ Capability: `hud`.
 | `radial.state() -> Table` | `hud` | The current menu state as {open, hovered, selected, progress, items}. `hovered`/`selected` are -1 when none. |
 | `radial.sector_at(pointer_x: number, pointer_y: number, center_x: number, center_y: number, inner_radius: number, outer_radius: number, count: number) -> number` | `hud` | The sector under a pointer relative to a centre for `count` sectors, or -1 for the dead zone or outside the ring. Pure: it reads no state, so it pins the geometry. |
 
-## Crystal
+## Touch
 
-Capability: `combat`.
+Capability: `input`.
 
 | Function | Capability | Description |
 | --- | --- | --- |
-| `crystal.config() -> Table` | `combat` | The current tunables as {place_range, blast_radius, max_damage, min_targets, self_damage_weight, max_self_damage, levels, max_results}. |
-| `crystal.set_range(range: number) -> bool` | `combat` | Sets the placement range in blocks. Must be finite, positive and at most 16; a bad value is refused. |
-| `crystal.set_blast_radius(radius: number) -> bool` | `combat` | Sets the blast radius in blocks. Must be finite, positive and at most 32; a bad value is refused. |
-| `crystal.set_max_damage(damage: number) -> bool` | `combat` | Sets the damage at the epicentre before falloff. Must be finite and non-negative; a bad value is refused. |
-| `crystal.set_min_targets(n: number) -> bool` | `combat` | Sets the minimum number of targets a spot must hit to be recommended. Must be a non-negative integer; a bad value is refused. |
-| `crystal.set_self_damage_weight(weight: number) -> bool` | `combat` | Sets how heavily damage to the placer is weighted against damage to enemies. Must be finite and non-negative; a bad value is refused. |
-| `crystal.set_max_self_damage(damage: number) -> bool` | `combat` | Sets the most damage a recommended spot may deal to the placer. Must be finite and non-negative; a bad value is refused. |
-| `crystal.set_levels(levels: number) -> bool` | `combat` | Sets the number of block levels above and below the placer's feet to consider. Must be an integer in [0, 4]; a bad value is refused. |
-| `crystal.set_max_results(n: number) -> bool` | `combat` | Sets how many recommendations an analysis keeps. Must be an integer in [1, 4096]; a bad value is refused. |
-| `crystal.analyze(x: number, y: number, z: number) -> number` | `combat` | Ranks the candidate placements around a placer at (x, y, z) against the entities the world grid already read, and returns how many were recommended. Fails closed (returns 0) when the world or the advisor is unavailable. The ranking is available through `count` and `placement`. |
-| `crystal.count() -> number` | `combat` | How many recommendations the last analysis produced. |
-| `crystal.best() -> Table` | `combat` | The best recommendation as {ok, x, y, z, targets, total_damage, best_damage, self_damage, score}. `ok` is false when there is none. |
-| `crystal.placement(index: number) -> Table` | `combat` | The recommendation at `index` in the last ranking, same shape as `best`, or an empty table when out of range. |
-| `crystal.estimate(x: number, y: number, z: number, tx: number, ty: number, tz: number) -> number` | `combat` | The estimated damage a blast at (x, y, z) would deal to a target at (tx, ty, tz) under the current tunables. Pure: it reads no world state. |
-| `crystal.stats() -> Table` | `combat` | The advisor's counters as {analyses, candidates, placements, best_score}. |
-| `crystal.reset() -> nil` | `combat` | Forgets the last ranking and its counters. |
-| `crystal.arm() -> bool` | `combat` | Arms the advisor. While armed, the client's tick hook runs one advisory pass per game tick around the local player and fires `crystalAdvice` when the best spot changes. False when it is already armed. |
-| `crystal.disarm() -> nil` | `combat` | Disarms the advisor. A no-op when it is already disarmed. |
-| `crystal.armed() -> bool` | `combat` | True while the advisor runs its advisory pass on the game tick. |
+| `touch.pointer_down(id: number, x: number, y: number, now_ms: number) -> bool` | `input` | Records a finger going down at (x, y) with the engine's finger id. False when the pointer table (10 fingers) is full. |
+| `touch.pointer_move(id: number, x: number, y: number, now_ms: number) -> nil` | `input` | Records a finger moving. Ignored when the id is not down. |
+| `touch.pointer_up(id: number, x: number, y: number, now_ms: number) -> nil` | `input` | Records a finger lifting and resolves the single-finger gesture (tap, double tap or swipe) it completes. |
+| `touch.clear_pointers() -> nil` | `input` | Drops every pointer, e.g. on a focus loss or screen change. |
+| `touch.pointer_count() -> number` | `input` | How many fingers are down. |
+| `touch.pointers() -> Table` | `input` | The fingers currently down, oldest first, as a table keyed \"0\",\"1\",… of {id, x, y, start_x, start_y, down_ms}. |
+| `touch.update(now_ms: number) -> nil` | `input` | Advances the recogniser (long press, drag, pinch, rotate) and hit-tests the on-screen buttons against the primary finger for this frame. |
+| `touch.set_gesture_enabled(gesture: string, enabled: bool) -> bool` | `input` | Enables or disables one gesture (by name: tap, double_tap, long_press, drag, swipe, pinch, rotate). False for an unknown name. |
+| `touch.gesture_enabled(gesture: string) -> bool` | `input` | Whether a gesture is enabled. False for an unknown name. |
+| `touch.gesture_mask() -> number` | `input` | The enabled-gesture mask as a bit set (tap=1, double_tap=2, long_press=4, drag=8, swipe=16, pinch=32, rotate=64). |
+| `touch.last_gesture() -> Table` | `input` | The last recognised gesture as {kind, dir, x, y, dx, dy, magnitude, pointers, at_ms}. `kind` is \"none\" before any gesture. |
+| `touch.config() -> Table` | `input` | The recogniser thresholds as {tap_max_move, tap_max_ms, long_press_ms, double_tap_max_ms, swipe_min_dist, swipe_max_ms, pinch_min_scale}. |
+| `touch.set_tap_max_move(px: number) -> bool` | `input` | Sets the movement that still counts as a tap, in pixels. Must be finite and positive; a bad value is refused. |
+| `touch.set_tap_max_ms(ms: number) -> bool` | `input` | Sets the duration that still counts as a tap, in milliseconds. Must be finite and positive. |
+| `touch.set_long_press_ms(ms: number) -> bool` | `input` | Sets the hold time before a long press fires, in milliseconds. Must be finite and positive. |
+| `touch.set_double_tap_max_ms(ms: number) -> bool` | `input` | Sets the window for a second tap to become a double tap, in milliseconds. Must be finite and positive. |
+| `touch.set_swipe_min_dist(px: number) -> bool` | `input` | Sets the travel that makes a release a swipe, in pixels. Must be finite and positive. |
+| `touch.set_swipe_max_ms(ms: number) -> bool` | `input` | Sets the maximum duration of a swipe, in milliseconds. Must be finite and positive. |
+| `touch.set_pinch_min_scale(scale: number) -> bool` | `input` | Sets the separation change that fires a pinch, as a scale fraction. Must be finite, positive and at most 1. |
+| `touch.swipe_direction(dx: number, dy: number, min_dist: number) -> string` | `input` | The direction a swipe of (dx, dy) travels — up, down, left or right — or \"none\" when it is shorter than `min_dist`. Pure: it reads no state, so it pins the geometry. |
+| `touch.add_button(label: string, min_x: number, min_y: number, max_x: number, max_y: number) -> bool` | `input` | Adds an on-screen button covering (min_x, min_y)..(max_x, max_y). False when the label is empty, longer than 24 bytes or non-printable, the rectangle is not finite or not positive-area, or the button cap (24) is reached. |
+| `touch.remove_button(index: number) -> bool` | `input` | Removes the button at `index`. False when out of range. |
+| `touch.clear_buttons() -> nil` | `input` | Removes every button. |
+| `touch.button_count() -> number` | `input` | How many buttons exist. |
+| `touch.button_label(index: number) -> string` | `input` | The label at `index`, or an empty string when out of range. |
+| `touch.button_enabled(index: number) -> bool` | `input` | Whether the button at `index` is enabled; false when out of range. |
+| `touch.set_button_enabled(index: number, enabled: bool) -> bool` | `input` | Enables or disables the button at `index`. False when out of range. |
+| `touch.set_button_intent(index: number, intent: string) -> bool` | `input` | Sets the intent the button requests on press (an intent name such as \"zoom\"; empty clears it). False when out of range or the name is not a bounded identifier. |
+| `touch.button_intent(index: number) -> string` | `input` | The intent the button at `index` requests, or an empty string. |
+| `touch.button_state(index: number) -> Table` | `input` | A snapshot of the button at `index` as {label, enabled, held, toggled, allowed, presses, releases}. `allowed` is false when the button's intent is refused by this server's policy. |
+| `touch.state() -> Table` | `input` | The overall touch state as {pointers, buttons, gesture}. `gesture` is the last gesture table. |
+
+Events (await with `Events.once`):
+
+- `touchGesture(gesture: string)` — -
+
+## Crystal
+
+Capability: `crystal`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `crystal.config() -> Table` | `crystal` | The current tunables as {place_range, blast_radius, max_damage, min_targets, self_damage_weight, max_self_damage, levels, max_results}. |
+| `crystal.set_range(range: number) -> bool` | `crystal` | Sets the placement range in blocks. Must be finite, positive and at most 16; a bad value is refused. |
+| `crystal.set_blast_radius(radius: number) -> bool` | `crystal` | Sets the blast radius in blocks. Must be finite, positive and at most 32; a bad value is refused. |
+| `crystal.set_max_damage(damage: number) -> bool` | `crystal` | Sets the damage at the epicentre before falloff. Must be finite and non-negative; a bad value is refused. |
+| `crystal.set_min_targets(n: number) -> bool` | `crystal` | Sets the minimum number of targets a spot must hit to be recommended. Must be a non-negative integer; a bad value is refused. |
+| `crystal.set_self_damage_weight(weight: number) -> bool` | `crystal` | Sets how heavily damage to the placer is weighted against damage to enemies. Must be finite and non-negative; a bad value is refused. |
+| `crystal.set_max_self_damage(damage: number) -> bool` | `crystal` | Sets the most damage a recommended spot may deal to the placer. Must be finite and non-negative; a bad value is refused. |
+| `crystal.set_levels(levels: number) -> bool` | `crystal` | Sets the number of block levels above and below the placer's feet to consider. Must be an integer in [0, 4]; a bad value is refused. |
+| `crystal.set_max_results(n: number) -> bool` | `crystal` | Sets how many recommendations an analysis keeps. Must be an integer in [1, 4096]; a bad value is refused. |
+| `crystal.analyze(x: number, y: number, z: number) -> number` | `crystal` | Ranks the candidate placements around a placer at (x, y, z) against the entities the world grid already read, and returns how many were recommended. Fails closed (returns 0) when the world or the advisor is unavailable. The ranking is available through `count` and `placement`. |
+| `crystal.count() -> number` | `crystal` | How many recommendations the last analysis produced. |
+| `crystal.best() -> Table` | `crystal` | The best recommendation as {ok, x, y, z, targets, total_damage, best_damage, self_damage, score}. `ok` is false when there is none. |
+| `crystal.placement(index: number) -> Table` | `crystal` | The recommendation at `index` in the last ranking, same shape as `best`, or an empty table when out of range. |
+| `crystal.estimate(x: number, y: number, z: number, tx: number, ty: number, tz: number) -> number` | `crystal` | The estimated damage a blast at (x, y, z) would deal to a target at (tx, ty, tz) under the current tunables. Pure: it reads no world state. |
+| `crystal.stats() -> Table` | `crystal` | The advisor's counters as {analyses, candidates, placements, best_score}. |
+| `crystal.reset() -> nil` | `crystal` | Forgets the last ranking and its counters. |
+| `crystal.arm() -> bool` | `crystal` | Arms the advisor. While armed, the client's tick hook runs one advisory pass per game tick around the local player and fires `crystalAdvice` when the best spot changes. False when it is already armed. |
+| `crystal.disarm() -> nil` | `crystal` | Disarms the advisor. A no-op when it is already disarmed. |
+| `crystal.armed() -> bool` | `crystal` | True while the advisor runs its advisory pass on the game tick. |
 
 ## Voice
 
@@ -639,9 +694,10 @@ Capability: `world`.
 | `replaymod.review_speed() -> number` | `world` | The playback speed multiplier. Must be finite and in (0, 64]; a bad value is refused. |
 | `replaymod.set_review_speed(speed: number) -> bool` | `world` | - |
 | `replaymod.review_present() -> number` | `world` | Draws the review through the frame's renderer when active; returns how many entities it drew. A no-op (0) when inactive or no replay is loaded. |
-| `replaymod.server_start(host: string, port: number) -> bool` | `world` | Binds the loopback playback server to `host:port`. `host` must be a loopback address (\"127.0.0.1\", \"::1\" or \"localhost\"); anything else is refused. A port of 0 asks the OS for a free one, which `server_port` reports. Returns false (with a reason in `last_error`) when the host is not loopback, the socket cannot bind, or the server is already running. |
+| `replaymod.server_start(host: string, port: number) -> bool` | `world` | Binds the loopback playback server to `host:port`. `host` must be a loopback address (\"127.0.0.1\", \"::1\" or \"localhost\"); anything else is refused. A port of 0 asks the OS for a free one, which `server_port` reports. Returns false (with a reason in `last_error`) when the host is not loopback, the socket cannot bind, the loaded replay's protocol version does not match this build, or a live multiplayer session is active (playback never runs alongside a live session). |
 | `replaymod.server_stop() -> nil` | `world` | - |
 | `replaymod.server_running() -> bool` | `world` | - |
+| `replaymod.server_live_blocked() -> bool` | `world` | True when the live-session guard is holding playback back: a live multiplayer session is active, so the server is neither started nor streaming. |
 | `replaymod.server_port() -> number` | `world` | - |
 | `replaymod.server_client_connected() -> bool` | `world` | - |
 | `replaymod.server_packets_sent() -> number` | `world` | How many packets the server has sent since a client joined. |
@@ -649,3 +705,66 @@ Capability: `world`.
 | `replaymod.server_paused() -> bool` | `world` | - |
 | `replaymod.server_seek(tick: number) -> bool` | `world` | Restarts the stream for the connected client at the nearest keyframe at or before `tick`. False when no client is connected. |
 | `replaymod.status() -> string` | `world` | A one-line status: capture state, sections, bytes, whether a replay is loaded, and whether a client is connected. |
+
+## Inventory
+
+Capability: `gamereads`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `inventory.slot_count() -> number` | `gamereads` | How many slots the inventory reports, capped at 256. |
+| `inventory.slot(index: number) -> Table` | `gamereads` | The stack in `slot` as {empty, id, name, count, damage, max_damage}. An out-of-range or unreadable slot reads as empty. |
+| `inventory.items() -> Table` | `gamereads` | Every non-empty stack, in slot order, as a table keyed \"0\",\"1\",…, each a stack table. |
+| `inventory.item_count() -> number` | `gamereads` | How many non-empty stacks the inventory holds. |
+| `inventory.selected_slot() -> number` | `gamereads` | The selected hotbar slot, or -1 when unknown. |
+| `inventory.count_of(id: string) -> number` | `gamereads` | The total count of `id` across the inventory, 0 when none. An empty or oversized id is refused (0). |
+| `inventory.has(id: string, min_count: number) -> bool` | `gamereads` | Whether the inventory holds at least `min_count` of `id` (`min_count` <= 0 means \"any\"). False for a bad id or no source. |
+| `inventory.available() -> bool` | `gamereads` | True while a source is bound (the inventory can be read). |
+
+## Server
+
+Capability: `gamereads`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `server.info() -> Table` | `gamereads` | The session as one table: {connected, host, port, version, protocol, player_count, max_players, motd, gamemode, dimension, latency_ms}. |
+| `server.connected() -> bool` | `gamereads` | True while a session is connected. |
+| `server.host() -> string` | `gamereads` | - |
+| `server.port() -> number` | `gamereads` | - |
+| `server.version() -> string` | `gamereads` | - |
+| `server.protocol() -> number` | `gamereads` | The negotiated protocol number, 0 when unknown. |
+| `server.player_count() -> number` | `gamereads` | The players the tab list already shows. |
+| `server.max_players() -> number` | `gamereads` | - |
+| `server.motd() -> string` | `gamereads` | - |
+| `server.gamemode() -> string` | `gamereads` | The local player's own gamemode name. |
+| `server.dimension() -> string` | `gamereads` | The local player's own dimension name. |
+| `server.latency_ms() -> number` | `gamereads` | Round-trip time to the server in milliseconds, 0 when unknown. |
+
+## Chat
+
+Capability: `gamereads`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `chat.messages() -> Table` | `gamereads` | The recent chat, oldest first, as a table keyed \"0\",\"1\",…, each {sender, text, at_ms, system}. Capped at 128 lines. |
+| `chat.count() -> number` | `gamereads` | How many lines the history holds, capped at 128. |
+| `chat.text(index: number) -> string` | `gamereads` | The text of line `index` (0 = oldest), or an empty string when out of range. |
+| `chat.sender(index: number) -> string` | `gamereads` | The sender of line `index`, or an empty string for a system line or an out-of-range index. |
+| `chat.is_system(index: number) -> bool` | `gamereads` | Whether line `index` is a system line. False when out of range. |
+| `chat.last() -> string` | `gamereads` | The most recent line's text, or an empty string when the history is empty. |
+| `chat.available() -> bool` | `gamereads` | True while a source is bound (the chat can be read). |
+
+## Screen
+
+Capability: `gamereads`.
+
+| Function | Capability | Description |
+| --- | --- | --- |
+| `screen.state() -> Table` | `gamereads` | The screen as one table: {open, name, title, width, height, keyboard_open}. |
+| `screen.open() -> bool` | `gamereads` | True while a menu is open. |
+| `screen.name() -> string` | `gamereads` | The open screen's name (\"chat\", \"inventory\", \"pause\", …), or an empty string when none. |
+| `screen.title() -> string` | `gamereads` | The open screen's title, or an empty string. |
+| `screen.width() -> number` | `gamereads` | The open screen's width in pixels, 0 when closed. |
+| `screen.height() -> number` | `gamereads` | The open screen's height in pixels, 0 when closed. |
+| `screen.keyboard_open() -> bool` | `gamereads` | True while a text keyboard is open. |
+| `screen.available() -> bool` | `gamereads` | True while a source is bound (the screen can be read). |

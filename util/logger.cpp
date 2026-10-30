@@ -12,6 +12,7 @@ namespace Berry {
 std::mutex Log::mutex_;
 std::string Log::last_message_;
 bool Log::capture_ = false;
+bool Log::silent_ = false;
 LogLevel Log::level_ = LogLevel::Info;
 
 void Log::SetLevel(LogLevel level) { level_ = level; }
@@ -25,6 +26,11 @@ std::string Log::LastMessage() {
 void Log::Capture(bool enabled) {
   std::lock_guard<std::mutex> lk(mutex_);
   capture_ = enabled;
+}
+
+void Log::SetSilent(bool silent) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  silent_ = silent;
 }
 
 static const char* LevelName(LogLevel lv) {
@@ -56,9 +62,9 @@ void Log::VFormat(LogLevel level, const char* fmt, va_list args) {
     case LogLevel::Error: prio = ANDROID_LOG_ERROR; break;
     default: break;
   }
-  __android_log_print(prio, "Berry", "%s", buf);
+  if (!silent_) __android_log_print(prio, "Berry", "%s", buf);
 #else
-  fprintf(stderr, "[Berry][%s] %s\n", LevelName(level), buf);
+  if (!silent_) fprintf(stderr, "[Berry][%s] %s\n", LevelName(level), buf);
 #endif
   if (capture_) last_message_ = buf;
 }

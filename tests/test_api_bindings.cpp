@@ -16,6 +16,7 @@
 #include "berry/generated_bindings.h"
 #include "berry/hud.h"
 #include "berry/input.h"
+#include "berry/logger.h"
 #include "berry/perf.h"
 #include "berry/render.h"
 #include "berry/script.h"
@@ -2721,6 +2722,352 @@ static void TestFrameHookDrawsRadialMenu() {
   CHECK(seam.texts == 3);      // one label per item
 }
 
+static void TestTouchBindings() {
+  TouchService touch;
+  IntentValidator intents;
+
+  ScriptApi::Services services;
+  services.touch = &touch;
+  services.intents = &intents;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"input"};
+
+  // Feed a tap through the bindings.
+  CHECK(Call(bindings, "touch.pointer_down",
+             {ScriptValue::Num(1), ScriptValue::Num(100), ScriptValue::Num(100),
+              ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "touch.pointer_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  CHECK(Call(bindings, "touch.pointer_up",
+             {ScriptValue::Num(1), ScriptValue::Num(100), ScriptValue::Num(100),
+              ScriptValue::Num(40)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "touch.last_gesture", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  const ScriptValue* kind = out.Field("kind");
+  CHECK(kind && kind->AsString() == "tap");
+
+  // A non-finite / out-of-range id is refused, not truncated.
+  CHECK(Call(bindings, "touch.pointer_down",
+             {ScriptValue::Num(-1), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  // The pure helper answers without any feed.
+  CHECK(Call(bindings, "touch.swipe_direction",
+             {ScriptValue::Num(0), ScriptValue::Num(-80), ScriptValue::Num(48)},
+             caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "up");
+
+  // Gesture toggles.
+  CHECK(Call(bindings, "touch.set_gesture_enabled",
+             {ScriptValue::Str("tap"), ScriptValue::Bool(false)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "touch.gesture_enabled",
+             {ScriptValue::Str("tap")}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "touch.set_gesture_enabled",
+             {ScriptValue::Str("nope"), ScriptValue::Bool(true)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  // Button authoring + state.
+  CHECK(Call(bindings, "touch.add_button",
+             {ScriptValue::Str("Jump"), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(80), ScriptValue::Num(60)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "touch.button_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  CHECK(Call(bindings, "touch.button_label", {ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "Jump");
+  CHECK(Call(bindings, "touch.set_button_intent",
+             {ScriptValue::Num(0), ScriptValue::Str("zoom")}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "touch.button_state", {ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  const ScriptValue* label = out.Field("label");
+  CHECK(label && label->AsString() == "Jump");
+
+  // Config read-back + a refused setter.
+  CHECK(Call(bindings, "touch.config", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(Call(bindings, "touch.set_tap_max_move", {ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+
+  // The capability gate: without the input grant the call is denied.
+  ScriptHost host("touch-test", Grant({"hud"}), nullptr);
+  host.SetBindings(&bindings);
+  CHECK(host.CallBinding("touch.pointer_count", {}, &out) == ScriptStatus::CapabilityDenied);
+}
+
+static void TestTouchFailsClosedWithoutService() {
+  ScriptApi::Services services;   // no touch service
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"input"};
+  // Edits report false, reads are inert, and the pure helper still answers.
+  CHECK(Call(bindings, "touch.pointer_down",
+             {ScriptValue::Num(1), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "touch.pointer_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "touch.add_button",
+             {ScriptValue::Str("X"), ScriptValue::Num(0), ScriptValue::Num(0),
+              ScriptValue::Num(10), ScriptValue::Num(10)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "touch.last_gesture", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(Call(bindings, "touch.swipe_direction",
+             {ScriptValue::Num(80), ScriptValue::Num(0), ScriptValue::Num(48)},
+             caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "right");
+}
+
+static void TestGameReadsBindings() {
+  struct Inv : InventorySource {
+    size_t SlotCount() const override { return 2; }
+    bool GetSlot(size_t i, ItemStack* out) const override {
+      if (i == 0) {
+        out->empty = false;
+        out->id = "minecraft:stone";
+        out->count = 10;
+        return true;
+      }
+      return false;   // slot 1 unreadable
+    }
+    i32 SelectedSlot() const override { return 0; }
+  } inv;
+  struct Srv : ServerInfoSource {
+    ServerInfo Info() const override {
+      ServerInfo i;
+      i.connected = true;
+      i.host = "play.example.com";
+      i.port = 19132;
+      i.playerCount = 3;
+      i.maxPlayers = 10;
+      return i;
+    }
+  } srv;
+  struct Ch : ChatSource {
+    std::vector<ChatMessage> Recent(size_t) const override {
+      ChatMessage m;
+      m.sender = "Steve";
+      m.text = "hi";
+      return {m};
+    }
+  } ch;
+  struct Sc : ScreenSource {
+    ScreenState Current() const override {
+      ScreenState s;
+      s.open = true;
+      s.name = "inventory";
+      s.width = 1280;
+      return s;
+    }
+  } sc;
+
+  GameReads reads;
+  reads.SetInventorySource(&inv);
+  reads.SetServerSource(&srv);
+  reads.SetChatSource(&ch);
+  reads.SetScreenSource(&sc);
+
+  ScriptApi::Services services;
+  services.reads = &reads;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"gamereads"};
+
+  // Inventory.
+  CHECK(Call(bindings, "inventory.slot_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 2);
+  CHECK(Call(bindings, "inventory.slot", {ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  const ScriptValue* id = out.Field("id");
+  CHECK(id && id->AsString() == "minecraft:stone");
+  const ScriptValue* count = out.Field("count");
+  CHECK(count && count->AsNumber() == 10);
+  // An unreadable slot and a bad index both read as empty.
+  CHECK(Call(bindings, "inventory.slot", {ScriptValue::Num(1)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Field("empty") && out.Field("empty")->Truthy());
+  CHECK(Call(bindings, "inventory.slot", {ScriptValue::Num(-1)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Field("empty") && out.Field("empty")->Truthy());
+  CHECK(Call(bindings, "inventory.item_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  CHECK(Call(bindings, "inventory.count_of", {ScriptValue::Str("minecraft:stone")}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 10);
+  CHECK(Call(bindings, "inventory.has",
+             {ScriptValue::Str("minecraft:stone"), ScriptValue::Num(10)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "inventory.has",
+             {ScriptValue::Str("minecraft:stone"), ScriptValue::Num(11)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "inventory.selected_slot", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "inventory.available", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+
+  // Server.
+  CHECK(Call(bindings, "server.info", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(out.Field("host") && out.Field("host")->AsString() == "play.example.com");
+  CHECK(Call(bindings, "server.connected", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "server.port", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 19132);
+  CHECK(Call(bindings, "server.player_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 3);
+
+  // Chat.
+  CHECK(Call(bindings, "chat.count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1);
+  CHECK(Call(bindings, "chat.text", {ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "hi");
+  CHECK(Call(bindings, "chat.sender", {ScriptValue::Num(0)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "Steve");
+  CHECK(Call(bindings, "chat.last", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "hi");
+  CHECK(Call(bindings, "chat.text", {ScriptValue::Num(-1)}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString().empty());
+
+  // Screen.
+  CHECK(Call(bindings, "screen.open", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
+  CHECK(Call(bindings, "screen.name", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString() == "inventory");
+  CHECK(Call(bindings, "screen.width", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 1280);
+
+  // The capability gate: without the gamereads grant the call is denied.
+  ScriptHost host("reads-test", Grant({"world"}), nullptr);
+  host.SetBindings(&bindings);
+  CHECK(host.CallBinding("inventory.slot_count", {}, &out) == ScriptStatus::CapabilityDenied);
+  CHECK(host.CallBinding("chat.last", {}, &out) == ScriptStatus::CapabilityDenied);
+}
+
+static void TestGameReadsFailClosedWithoutService() {
+  ScriptApi::Services services;   // no reads service
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  const std::vector<std::string> caps = {"gamereads"};
+  // Every read is inert and reports the empty shape.
+  CHECK(Call(bindings, "inventory.slot_count", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 0);
+  CHECK(Call(bindings, "inventory.items", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(Call(bindings, "inventory.available", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "server.info", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.IsTable());
+  CHECK(Call(bindings, "server.connected", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+  CHECK(Call(bindings, "chat.last", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(out.AsString().empty());
+  CHECK(Call(bindings, "screen.open", {}, caps, &out) == ScriptStatus::Ok);
+  CHECK(!out.Truthy());
+}
+
+//----------------------------------------------------------------------------
+// Deprecation policy (Phase 17).
+//
+// A binding the IDL marks deprecated still resolves and still gates on its
+// capability; the runtime warns exactly once per script per binding. The gate
+// is the one path every native call takes, so the warning cannot be missed.
+//----------------------------------------------------------------------------
+
+static void TestDeprecatedBindingStillWorksAndWarns() {
+  std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
+  WorldHandle* world = worldMod->Service<WorldHandle>();
+  CHECK(world != nullptr);
+  auto shim = std::make_shared<Berry::Test::ShimLevel>();
+  shim->SetBlock(Vec3(1, 64, 1), 42);
+  world->SetSeam(shim);
+
+  ScriptApi::Services services;
+  services.world = world;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  // The deprecated alias is installed and callable: deprecation does not
+  // remove the binding.
+  CHECK(bindings.Has("world.block_id_at"));
+  CHECK(api::IsBindingDeprecated("world.block_id_at"));
+
+  ScriptHost host("dep-test", Grant({"world"}), nullptr);
+  host.SetBindings(&bindings);
+
+  ScriptValue out;
+  Log::Capture(true);
+  CHECK(host.CallBinding("world.block_id_at",
+                         {ScriptValue::Num(1), ScriptValue::Num(64),
+                          ScriptValue::Num(1)},
+                         &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() == 42);
+  const std::string first = Log::LastMessage();
+  CHECK(first.find("deprecated binding 'world.block_id_at'") != std::string::npos);
+
+  // A second call from the SAME script does not warn again (once per script).
+  Log::Capture(true);
+  Log::SetLevel(LogLevel::Warn);
+  // Reset the captured message by logging a sentinel through the same sink.
+  Log::Warn("sentinel");
+  CHECK(Log::LastMessage() == "sentinel");
+  CHECK(host.CallBinding("world.block_id_at",
+                         {ScriptValue::Num(1), ScriptValue::Num(64),
+                          ScriptValue::Num(1)},
+                         &out) == ScriptStatus::Ok);
+  CHECK(Log::LastMessage() == "sentinel");   // no new warning
+
+  // A fresh script warns again: the notice is per script, not global.
+  ScriptHost host2("dep-test-2", Grant({"world"}), nullptr);
+  host2.SetBindings(&bindings);
+  Log::Capture(true);
+  Log::Warn("sentinel2");
+  CHECK(host2.CallBinding("world.block_id_at",
+                          {ScriptValue::Num(1), ScriptValue::Num(64),
+                           ScriptValue::Num(1)},
+                          &out) == ScriptStatus::Ok);
+  CHECK(Log::LastMessage().find("deprecated binding") != std::string::npos);
+
+  // The non-deprecated spelling never warns.
+  Log::Capture(true);
+  Log::Warn("sentinel3");
+  CHECK(host.CallBinding("world.block_at",
+                         {ScriptValue::Num(1), ScriptValue::Num(64),
+                          ScriptValue::Num(1)},
+                         &out) == ScriptStatus::Ok);
+  CHECK(Log::LastMessage() == "sentinel3");
+
+  // A denied call never warns: the warning is emitted only after the
+  // capability gate lets the call through.
+  ScriptHost noCap("dep-test-3", Grant({}), nullptr);
+  noCap.SetBindings(&bindings);
+  Log::Capture(true);
+  Log::Warn("sentinel4");
+  CHECK(noCap.CallBinding("world.block_id_at",
+                          {ScriptValue::Num(1), ScriptValue::Num(64),
+                           ScriptValue::Num(1)},
+                          &out) == ScriptStatus::CapabilityDenied);
+  // The host logs its own denial; what matters is that no DEPRECATION warning
+  // was emitted, because the call never reached the binding.
+  CHECK(Log::LastMessage().find("deprecated binding") == std::string::npos);
+  Log::Capture(false);
+}
+
 static void TestCrystalBindings() {
   std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
   WorldHandle* world = worldMod->Service<WorldHandle>();
@@ -2755,22 +3102,22 @@ static void TestCrystalBindings() {
   ScriptValue out;
 
   //--- configuration reads and validated writes ---
-  CHECK(Call(bindings, "crystal.config", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.config", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(std::fabs(out.AsTable()->at("blast_radius").AsNumber() - 6.0) < 1e-6);
-  CHECK(Call(bindings, "crystal.set_blast_radius", {ScriptValue::Num(8)}, {"combat"}, &out) ==
+  CHECK(Call(bindings, "crystal.set_blast_radius", {ScriptValue::Num(8)}, {"crystal"}, &out) ==
         ScriptStatus::Ok);
   CHECK(out.Truthy());
   CHECK(std::fabs(crystal.config().blastRadius - 8.0f) < 1e-5f);
   // A bad value is refused and changes nothing.
-  CHECK(Call(bindings, "crystal.set_blast_radius", {ScriptValue::Num(-1)}, {"combat"}, &out) ==
+  CHECK(Call(bindings, "crystal.set_blast_radius", {ScriptValue::Num(-1)}, {"crystal"}, &out) ==
         ScriptStatus::Ok);
   CHECK(!out.Truthy());
   CHECK(std::fabs(crystal.config().blastRadius - 8.0f) < 1e-5f);
   // A fractional count cannot name targets.
-  CHECK(Call(bindings, "crystal.set_min_targets", {ScriptValue::Num(1.5)}, {"combat"}, &out) ==
+  CHECK(Call(bindings, "crystal.set_min_targets", {ScriptValue::Num(1.5)}, {"crystal"}, &out) ==
         ScriptStatus::Ok);
   CHECK(!out.Truthy());
-  CHECK(Call(bindings, "crystal.set_levels", {ScriptValue::Num(1)}, {"combat"}, &out) ==
+  CHECK(Call(bindings, "crystal.set_levels", {ScriptValue::Num(1)}, {"crystal"}, &out) ==
         ScriptStatus::Ok);
   CHECK(out.Truthy());
 
@@ -2778,34 +3125,34 @@ static void TestCrystalBindings() {
   CHECK(Call(bindings, "crystal.estimate",
              {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
               ScriptValue::Num(4), ScriptValue::Num(0), ScriptValue::Num(0)},
-             {"combat"}, &out) == ScriptStatus::Ok);
+             {"crystal"}, &out) == ScriptStatus::Ok);
   // 8-block radius, 12 max damage, at distance 4 -> 6.
   CHECK(std::fabs(out.AsNumber() - 6.0) < 1e-4);
 
   //--- a full analysis ---
   CHECK(Call(bindings, "crystal.analyze",
              {ScriptValue::Num(0.5), ScriptValue::Num(0), ScriptValue::Num(0.5)},
-             {"combat"}, &out) == ScriptStatus::Ok);
+             {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(out.AsNumber() > 0);
-  CHECK(Call(bindings, "crystal.count", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.count", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   const f64 count = out.AsNumber();
   CHECK(count > 0);
 
-  CHECK(Call(bindings, "crystal.best", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.best", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(out.AsTable()->at("ok").Truthy());
   CHECK(out.AsTable()->at("targets").AsNumber() >= 1);
   CHECK(out.AsTable()->at("best_damage").AsNumber() > 0);
 
   // Every index in range resolves; one out of range is an empty table, not an
   // error and not a fabricated placement.
-  CHECK(Call(bindings, "crystal.placement", {ScriptValue::Num(0)}, {"combat"}, &out) ==
+  CHECK(Call(bindings, "crystal.placement", {ScriptValue::Num(0)}, {"crystal"}, &out) ==
         ScriptStatus::Ok);
   CHECK(out.AsTable()->at("ok").Truthy());
-  CHECK(Call(bindings, "crystal.placement", {ScriptValue::Num(count + 100)}, {"combat"}, &out) ==
+  CHECK(Call(bindings, "crystal.placement", {ScriptValue::Num(count + 100)}, {"crystal"}, &out) ==
         ScriptStatus::Ok);
   CHECK(out.AsTable()->find("ok") == out.AsTable()->end());
 
-  CHECK(Call(bindings, "crystal.stats", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.stats", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(out.AsTable()->at("analyses").AsNumber() == 1);
   CHECK(out.AsTable()->at("candidates").AsNumber() > 0);
 
@@ -2815,8 +3162,8 @@ static void TestCrystalBindings() {
              {"world"}, &out) == ScriptStatus::CapabilityDenied);
 
   //--- reset ---
-  CHECK(Call(bindings, "crystal.reset", {}, {"combat"}, &out) == ScriptStatus::Ok);
-  CHECK(Call(bindings, "crystal.count", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.reset", {}, {"crystal"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.count", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(out.AsNumber() == 0);
 }
 
@@ -2830,25 +3177,25 @@ static void TestCrystalFailsClosedWithoutService() {
   // An analysis recommends nothing when no advisor is bound.
   CHECK(Call(bindings, "crystal.analyze",
              {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0)},
-             {"combat"}, &out) == ScriptStatus::Ok);
+             {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(out.AsNumber() == 0);
-  CHECK(Call(bindings, "crystal.count", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.count", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(out.AsNumber() == 0);
-  CHECK(Call(bindings, "crystal.best", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.best", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(!out.AsTable()->at("ok").Truthy());
   // Writes report false; reads report the inert default.
-  CHECK(Call(bindings, "crystal.set_range", {ScriptValue::Num(4)}, {"combat"}, &out) ==
+  CHECK(Call(bindings, "crystal.set_range", {ScriptValue::Num(4)}, {"crystal"}, &out) ==
         ScriptStatus::Ok);
   CHECK(!out.Truthy());
-  CHECK(Call(bindings, "crystal.arm", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.arm", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(!out.Truthy());
-  CHECK(Call(bindings, "crystal.armed", {}, {"combat"}, &out) == ScriptStatus::Ok);
+  CHECK(Call(bindings, "crystal.armed", {}, {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(!out.Truthy());
   // The pure estimate still answers with the default tunables.
   CHECK(Call(bindings, "crystal.estimate",
              {ScriptValue::Num(0), ScriptValue::Num(0), ScriptValue::Num(0),
               ScriptValue::Num(3), ScriptValue::Num(0), ScriptValue::Num(0)},
-             {"combat"}, &out) == ScriptStatus::Ok);
+             {"crystal"}, &out) == ScriptStatus::Ok);
   CHECK(std::fabs(out.AsNumber() - 6.0) < 1e-4);
 }
 
@@ -2914,6 +3261,72 @@ static void TestCrystalTickHook() {
   CHECK(crystal.stats().analyses == 2);
 
   EventBus::Instance().Off("crystalAdvice", id);
+}
+
+static void TestCrystalPolicyGate() {
+  std::shared_ptr<BerryModule> worldMod = CreateWorldModule();
+  WorldHandle* world = worldMod->Service<WorldHandle>();
+  auto shim = std::make_shared<Berry::Test::ShimLevel>();
+  EntityId self{1, 1};
+  EntitySnapshot me;
+  me.id = self;
+  me.type = EntityType::Player;
+  me.position = Vec3(0.5f, 0, 0.5f);
+  me.alive = true;
+  shim->AddEntity(self, me);
+  EntityId enemy{7, 7};
+  EntitySnapshot foe;
+  foe.id = enemy;
+  foe.type = EntityType::Player;
+  foe.position = Vec3(2.5f, 0, 0.5f);
+  foe.alive = true;
+  shim->AddEntity(enemy, foe);
+  world->SetSeam(shim);
+
+  CrystalOptimizer crystal;
+  IntentValidator intents;
+  ScriptApi::Services services;
+  services.world = world;
+  services.crystal = &crystal;
+  services.intents = &intents;
+  services.localPlayer = self;
+  ScriptApi api(services);
+  ScriptBindings bindings;
+  api.InstallBindings(&bindings);
+
+  ScriptValue out;
+  // Opt in explicitly: the default profile denies the crystal group, so the
+  // test first installs a profile that enables it.
+  ServerPolicyProfile open;
+  open.name = "open";
+  open.serverMatch = "*";
+  intents.SetProfile(open);
+  CHECK(Call(bindings, "crystal.analyze",
+             {ScriptValue::Num(0.5), ScriptValue::Num(0), ScriptValue::Num(0.5)},
+             {"crystal"}, &out) == ScriptStatus::Ok);
+  CHECK(out.AsNumber() > 0);
+  CHECK(crystal.stats().analyses == 1);
+
+  // A server that disables the crystal group refuses the analysis: the call
+  // errors and never reaches the world.
+  ServerPolicyProfile p;
+  p.name = "no-crystal";
+  p.serverMatch = "*";
+  p.disabledGroups = IntentGroupMask(IntentGroup::Crystal);
+  intents.SetProfile(p);
+  CHECK(Call(bindings, "crystal.analyze",
+             {ScriptValue::Num(0.5), ScriptValue::Num(0), ScriptValue::Num(0.5)},
+             {"crystal"}, &out) == ScriptStatus::Error);
+  CHECK(crystal.stats().analyses == 1);   // unchanged: the gate ran first
+  // Arming is refused too.
+  CHECK(Call(bindings, "crystal.arm", {}, {"crystal"}, &out) == ScriptStatus::Error);
+  CHECK(!crystal.armed());
+
+  // Re-enabling the group allows it again.
+  open.name = "open-again";
+  intents.SetProfile(open);
+  CHECK(Call(bindings, "crystal.arm", {}, {"crystal"}, &out) == ScriptStatus::Ok);
+  CHECK(out.Truthy());
 }
 
 static void TestVoiceBindings() {
@@ -3129,10 +3542,16 @@ int main() {
   TestFrameHookPresentsUi();
   TestRadialBindings();
   TestRadialFailsClosedWithoutService();
+  TestTouchBindings();
+  TestTouchFailsClosedWithoutService();
+  TestGameReadsBindings();
+  TestGameReadsFailClosedWithoutService();
+  TestDeprecatedBindingStillWorksAndWarns();
   TestFrameHookDrawsRadialMenu();
   TestCrystalBindings();
   TestCrystalFailsClosedWithoutService();
   TestCrystalTickHook();
+  TestCrystalPolicyGate();
   TestVoiceBindings();
   TestVoiceFailsClosedWithoutService();
   TestFrameHookPumpsVoice();

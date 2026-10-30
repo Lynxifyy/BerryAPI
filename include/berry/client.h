@@ -34,10 +34,14 @@
 #include "berry/audio.h"
 #include "berry/combat_state.h"
 #include "berry/cosmetic.h"
+#include "berry/cosmetic_assets.h"
+#include "berry/cosmetic_device.h"
 #include "berry/cosmetic_sync.h"
+#include "berry/cosmetic_relay_transport.h"
 #include "berry/crystal.h"
 #include "berry/event.h"
 #include "berry/fs.h"
+#include "berry/gamereads.h"
 #include "berry/hud.h"
 #include "berry/input.h"
 #include "berry/intent.h"
@@ -47,9 +51,11 @@
 #include "berry/pack.h"
 #include "berry/package.h"
 #include "berry/packet.h"
+#include "berry/packet_capture.h"
 #include "berry/perf.h"
 #include "berry/pvp.h"
 #include "berry/radial.h"
+#include "berry/touch.h"
 #include "berry/render.h"
 #include "berry/render_backend.h"
 #include "berry/replay_camera.h"
@@ -57,9 +63,13 @@
 #include "berry/scriptmod.h"
 #include "berry/services.h"
 #include "berry/shader.h"
+#include "berry/sigpack.h"
 #include "berry/ui.h"
 #include "berry/url.h"
 #include "berry/voice.h"
+#include "berry/voice_crypto.h"
+#include "berry/voice_relay_transport.h"
+#include "berry/voice_secure_transport.h"
 #include "berry/voice_transport.h"
 #include "berry/ws_client.h"
 
@@ -118,13 +128,123 @@ struct BERRY_API ClientConfig {
   /// disables publishing.
   std::string syncSignSecret;
   bool syncUseHmac = false;
+  /// Presence-backend media plane. When `syncRelayHost` is set, the sync
+  /// transport is a UDP relay transport (`CosmeticRelayTransport`) instead of
+  /// the LAN multicast transport, so two clients on different networks reach
+  /// each other through one relay. The room is keyed by `syncRoomSecret`, which
+  /// is what a room token (RoomTokenClient) delivers over HTTPS. Empty
+  /// `syncRelayHost` keeps the LAN multicast transport.
+  std::string syncRelayHost;    // numeric IPv4; empty = LAN multicast
+  u16 syncRelayPort = 47826;
+  std::string syncRoom;         // relay room name
+  std::string syncRoomSecret;   // raw room secret (>= 16 bytes)
   /// Enable LAN proximity voice. Off by default (microphone capture is
-  /// privacy-sensitive); when on, the client binds `LanVoiceTransport` to the
-  /// voice service and starts a session only if `voiceSelfId` is set.
+  /// privacy-sensitive); when on, the client binds an *authenticated and
+  /// encrypted* voice transport (`SecureVoiceTransport`) to the voice service
+  /// and starts a session only if `voiceSelfId` is set. The transport requires a
+  /// signing identity and a trust anchor (`voiceIdentitySeed` + `voiceTrust`);
+  /// without them it refuses to open, so voice never falls back to plaintext.
   bool enableVoice = false;
   /// This client's voice session id. Empty leaves the session stopped (the
   /// transport is bound but nothing is sent or admitted).
   std::string voiceSelfId;
+  /// The 32-byte Ed25519 seed (raw, or 64-char hex) that identifies this client
+  /// on the voice channel. It authenticates the handshake; it never encrypts
+  /// audio. Empty disables the secure transport.
+  std::string voiceIdentitySeed;
+  /// What a peer's voice announce is verified against (Ed25519 peer keys, or a
+  /// backend-issued room key). The default accepts nothing, so voice stays off
+  /// until it is set.
+  VoiceTrustAnchor voiceTrust;
+  /// The voice multicast group and port. A different group from the cosmetic
+  /// channel so the two never mix.
+  std::string voiceGroup = "239.66.0.2";
+  u16 voicePort = 47824;
+  /// Presence-backend media plane for voice. When `voiceRelayHost` is set, the
+  /// voice transport is the UDP relay transport instead of the LAN multicast
+  /// one, so two clients on different networks hear each other through one
+  /// relay. The room is keyed by `voiceRoomSecret`, which a room token
+  /// (RoomTokenClient) delivers over HTTPS. The relay carries only the
+  /// end-to-end sealed frame, so it learns nothing and holds no key. Empty keeps
+  /// the LAN multicast transport.
+  std::string voiceRelayHost;    // numeric IPv4; empty = LAN multicast
+  u16 voiceRelayPort = 47825;
+  std::string voiceRoom;         // relay room name
+  std::string voiceRoomSecret;   // raw room secret (>= 16 bytes)
+  /// Enable OTA signature-pack loading from `sigpackDirectory`. Packs are
+  /// verified against `sigpackTrust` (Ed25519) BEFORE they are parsed, so an
+  /// unsigned, tampered, expired or replayed pack is refused. Off by default;
+  /// when on, `sigpackTrust` must carry a key or every pack is refused.
+  bool enableSigPacks = false;
+  /// The directory `*.sigpack.json` files are read from. Empty disables the
+  /// load even when `enableSigPacks` is set.
+  std::string sigpackDirectory;
+  /// The Ed25519 anchor packs are verified against, plus the anti-rollback
+  /// floor and the wall clock used for the signed expiry check.
+  SigPackTrust sigpackTrust;
+  /// The active build fingerprint packs must name to apply. Empty refuses
+  /// every pack (fail closed), matching the signature-table gate.
+  std::string sigpackBuild;
+  /// The highest pack sequence applied by a previous run, so a restart cannot
+  /// be rolled back onto an older pack. Persisted by the embedder.
+  u64 sigpackSequenceFloor = 0;
+  /// Root directory for the sandboxed `fs.*` store. When set, the client binds
+  /// the store to a per-script subdirectory (named from the loaded manifest) so
+  /// data survives a restart; when empty the store stays in-memory and a script
+  /// gets no persistence. The store refuses symlinks on every path component and
+  /// writes through a temp file plus rename, so a persistence attempt cannot
+  /// escape the directory or observe a partial write.
+  std::string scriptDataDirectory;
+  /// Root directory for cosmetic model packs (`*.pack.json`). When set, the
+  /// client loads every pack at attach and on `cosmetic.reload_packs`, so a
+  /// creator's assets appear without a new build. Empty disables pack loading
+  /// (the built-ins still register).
+  std::string cosmeticPackDirectory;
+  /// Root directory for cosmetic asset data (`*.mesh.json` / `*.tex.json`).
+  /// When set, the client loads every mesh and texture at attach, so a pack's
+  /// `geometry`/`texture` handles resolve to real data. Empty leaves the asset
+  /// store empty (a pack asset then draws nothing).
+  std::string cosmeticAssetDirectory;
+  /// The game's player-render function, resolved by the embedder (a signature
+  /// scan against the target build). When non-null, the client installs the
+  /// player-model hook and fills the per-build bone reader, so cosmetics attach
+  /// to the rendered rig. Null (the default) leaves the skeleton seam without a
+  /// reader, which resolves nothing — the correct fail-closed default for a
+  /// build whose layout is unknown.
+  void* playerModelRenderTarget = nullptr;
+  /// The per-build bone reader the hook refreshes. The embedder fills it from
+  /// the resolved player-model layout. An empty reader keeps the cosmetic
+  /// skeleton seam fail-closed even when `playerModelRenderTarget` is set.
+  PlayerModelBoneReader playerModelBones;
+  /// The network protocol version this client's build speaks, so the loopback
+  /// replay server refuses a replay recorded against another protocol (its
+  /// packet ids and layouts would feed this build's parsers wrong bytes). 0
+  /// leaves the check off, which is right for a host with no build.
+  u32 protocolVersion = 0;
+  /// A probe the embedder supplies that reports whether a LIVE multiplayer
+  /// session is currently active (the player is connected to a real server).
+  /// The replay server refuses to start and stops streaming while it returns
+  /// true, so a recorded session's packets can never be injected into a live
+  /// one. Empty means "never live"; the embedder installs a real probe.
+  std::function<bool()> liveSessionActive;
+
+  /// The game's packet-receive function, resolved by the embedder (a signature
+  /// scan against the target build). When non-null and `packetCaptureAbi`
+  /// carries a `decode`, the client installs the receive hook, so a recording
+  /// contains the packets the client actually received — chunk and block
+  /// packets included, not only the entity state the seam reports. Null (the
+  /// default) leaves the packet path unhooked, which is the correct
+  /// fail-closed default for a build whose layout is unknown.
+  void* packetReceiveTarget = nullptr;
+  /// The per-build accessors that turn the game's opaque packet object into
+  /// (id, payload). Without `decode` the hook refuses to install, so a wrong
+  /// layout captures nothing rather than storing a wrong packet.
+  PacketReceiveAbi packetCaptureAbi;
+  /// Install the outbound (send) hook as well as the receive one. Off by
+  /// default: a recording needs what the client received, and the send path is
+  /// the player's own input (already captured as `PlayerInput`). Turn it on to
+  /// record both directions.
+  bool captureOutboundPackets = false;
 };
 
 //----------------------------------------------------------------------------
@@ -158,6 +278,34 @@ class BERRY_API WorldVelocitySource final : public LocalVelocitySource {
  private:
   WorldHandle* world_ = nullptr;
   EntityId local_;
+};
+
+//----------------------------------------------------------------------------
+// RendererCameraSource — the production CosmeticCameraSource.
+//----------------------------------------------------------------------------
+
+/// Reports the frame camera from the Renderer (the same camera the overlay
+/// projects with), so a device cosmetic render seam draws real geometry through
+/// the frame's own projection. Returns false when no renderer is bound or its
+/// camera is invalid, so a consumer treats the frame as unprojectable rather
+/// than using a stale one.
+class BERRY_API RendererCameraSource final : public CosmeticCameraSource {
+ public:
+  RendererCameraSource() = default;
+  explicit RendererCameraSource(Renderer* r) : renderer_(r) {}
+
+  void SetRenderer(Renderer* r) { renderer_ = r; }
+
+  bool Camera(CameraState* out) const override {
+    if (!renderer_) return false;
+    const CameraState cam = renderer_->camera();
+    if (!cam.valid) return false;
+    if (out) *out = cam;
+    return true;
+  }
+
+ private:
+  Renderer* renderer_ = nullptr;
 };
 
 //----------------------------------------------------------------------------
@@ -222,6 +370,7 @@ class BERRY_API BerryClient {
   Hud& hud() { return *hud_; }
   PvpOverlay& pvp() { return *pvp_; }
   RadialMenu& radial() { return *radial_; }
+  TouchService& touch() { return *touch_; }
   Animator& animator() { return *animator_; }
   CombatStateTracker& combatState() { return *combatState_; }
   CosmeticService& cosmetics() { return *cosmetics_; }
@@ -237,19 +386,73 @@ class BERRY_API BerryClient {
   ScriptFileStore& files() { return *files_; }
   AudioService& audio() { return *audio_; }
   PacketLog& packets() { return *packets_; }
+  /// The packet-capture hub: the fan-out the receive hook dispatches into. The
+  /// two production observers (the metadata log and the replay payload
+  /// recorder) are registered on it when capture is enabled. Always present.
+  PacketCaptureHub& packetCapture() { return *packetCaptureHub_; }
+  /// The metadata observer, or null when the client did not build one. Always
+  /// built alongside the hub, so non-null in practice.
+  PacketLogObserver* packetLogObserver() { return packetLogObserver_.get(); }
+  /// The replay-payload observer, or null when the client did not build one.
+  ReplayPacketObserver* replayPacketObserver() {
+    return replayPacketObserver_.get();
+  }
+  /// The installed receive hook, or null when no packet target was configured
+  /// (or the hook refused). For diagnostics and tests.
+  PacketReceiveHook* packetReceiveHook() { return packetReceiveHook_.get(); }
+  /// The installed send hook, or null when `captureOutboundPackets` is off.
+  PacketReceiveHook* packetSendHook() { return packetSendHook_.get(); }
   IntentValidator& intents() { return *intents_; }
+  /// Read-only game reads (inventory, server, chat, screen). The embedder
+  /// binds the four sources; a source left unbound makes its reads fail closed.
+  GameReads& reads() { return *reads_; }
   CosmeticPackLoader& packs() { return *packs_; }
+  /// The cosmetic asset loader (mesh/texture store), or null when no asset
+  /// directory is configured. For diagnostics and tests.
+  CosmeticAssetLoader* cosmeticAssets() { return cosmeticAssets_.get(); }
+  /// The cosmetic asset store: the process-wide mesh/texture catalog the render
+  /// seam resolves a draw item's handles against.
+  static CosmeticAssetStore& assets() { return CosmeticAssetStore::Instance(); }
   AsyncRuntime& async() { return *async_; }
 
   /// The LAN cosmetic-sync channel, or null when sync is disabled. Owns the
   /// multicast transport when enabled.
   CosmeticSyncChannel* cosmeticSync() { return syncChannel_.get(); }
+  /// The cosmetic-sync relay transport, or null when the LAN multicast path (or
+  /// no sync) is active. In production this is the presence backend's media
+  /// plane.
+  CosmeticRelayTransport* syncRelay() { return syncRelay_.get(); }
   /// The mDNS discovery the sync channel uses, or null when sync is disabled or
   /// discovery could not bind. Reads only: discovery names peers, and a loadout
   /// from one is still verified by the sync channel before it is applied.
   LanDiscovery* discovery() { return discovery_.get(); }
-  /// The LAN voice transport, or null when voice is disabled.
-  LanVoiceTransport* voiceTransport() { return voiceTransport_.get(); }
+  /// The active voice transport, or null when voice is disabled. In production
+  /// this is the authenticated, encrypted transport: the relay transport when a
+  /// relay host is configured, otherwise the LAN `SecureVoiceTransport`. The
+  /// plaintext `LanVoiceTransport` is never built in production.
+  VoiceTransport* voiceTransport() {
+    if (voiceRelay_) return voiceRelay_.get();
+    if (secureVoice_) return secureVoice_.get();
+    return voiceTransport_.get();
+  }
+  /// The secure voice transport specifically, or null when it is not the active
+  /// transport. For diagnostics (peer count) and tests.
+  SecureVoiceTransport* secureVoiceTransport() { return secureVoice_.get(); }
+  /// The relay voice transport, or null when the LAN multicast path (or no
+  /// voice) is active. In production this is the presence backend's media
+  /// plane, reached when the config sets `voiceRelayHost`.
+  VoiceRelayTransport* voiceRelayTransport() { return voiceRelay_.get(); }
+
+  /// The signature-pack loader, or null when packs are disabled. Owns the
+  /// filesystem seam and the anti-rollback sequence floor.
+  SignaturePackLoader* sigPacks() { return sigPackLoader_.get(); }
+  /// The layout registry packs register into, or null when packs are disabled.
+  LayoutRegistry* sigPackLayouts() { return sigPackLayouts_.get(); }
+  /// The aggregate of the last pack load (all zero when packs are disabled).
+  const SigPackLoadReport& sigPackReport() const { return sigPackReport_; }
+  /// The highest pack sequence applied so far, so an embedder can persist it and
+  /// refuse a rollback across a restart. 0 when packs are disabled.
+  u64 sigPackSequenceFloor() const;
 
   /// Broadcasts the local cosmetic loadout on the sync channel. False when
   /// sync is disabled, no signing secret/self id is configured, or the send
@@ -282,6 +485,45 @@ class BERRY_API BerryClient {
   /// that enables neither.
   void BuildLan(const ClientConfig& cfg);
 
+  /// Builds the signature-pack loader and applies every verified pack. A no-op
+  /// when packs are disabled. Runs before the script loads, so a pack's
+  /// signatures/layouts are in the registries by the time a script asks.
+  void LoadSigPacks(const ClientConfig& cfg);
+
+  /// Binds the sandboxed `fs.*` store to the script's own directory under
+  /// `cfg.scriptDataDirectory`, so data survives a restart. A no-op (the store
+  /// stays in-memory) when no directory is configured or no script loaded. The
+  /// per-script directory name is derived from the loaded manifest, so two
+  /// scripts never share a sandbox.
+  void BindScriptData(const ClientConfig& cfg);
+
+  /// Loads cosmetic model packs from `cfg.cosmeticPackDirectory` and cosmetic
+  /// asset data from `cfg.cosmeticAssetDirectory`, and installs the player-model
+  /// hook (with `cfg.playerModelBones`) on `cfg.playerModelRenderTarget`. A no-op
+  /// for each half the config leaves empty; each fails closed on its own.
+  void BuildCosmetics(const ClientConfig& cfg);
+
+  /// Installs the replay guards from the config: the capture's build fingerprint
+  /// (so a recording carries the protocol version it was made against) and the
+  /// loopback server's protocol-version check + live-session probe. A replay
+  /// recorded against another protocol is then refused on load, and playback is
+  /// refused while a live session is active, so a recorded packet can never
+  /// reach a live one.
+  void InstallReplayGuards(const ClientConfig& cfg);
+
+  /// Builds the packet-capture path: the hub, the two production observers (the
+  /// metadata log and the replay payload recorder) and — when the config
+  /// resolved a receive target and a decode ABI — the receive hook, so a
+  /// recording contains the packets the client actually received. The send hook
+  /// is installed only when `captureOutboundPackets` is set. The hub and the
+  /// observers are always built, so capture state is inspectable with no hook.
+  void BuildPacketCapture(const ClientConfig& cfg);
+
+  /// Authors the built-in animation clips into the animator, so a built-in cape
+  /// flaps and a built-in aura spins without a script or a pack. A clip is added
+  /// only when its name is free, so a creator's clip of the same name wins.
+  void RegisterBuiltinClips();
+
   /// Drains the sync transport and applies every verified loadout to the
   /// cosmetic service. Runs on the frame thread, before the overlays draw, so
   /// a loadout received this frame renders this frame.
@@ -297,6 +539,7 @@ class BERRY_API BerryClient {
   std::unique_ptr<UiLayer> ui_;
   std::unique_ptr<PvpOverlay> pvp_;
   std::unique_ptr<RadialMenu> radial_;
+  std::unique_ptr<TouchService> touch_;
   std::unique_ptr<Animator> animator_;
   std::unique_ptr<CombatStateTracker> combatState_;
   std::unique_ptr<CosmeticService> cosmetics_;
@@ -310,7 +553,18 @@ class BERRY_API BerryClient {
   std::unique_ptr<ScriptFileStore> files_;
   std::unique_ptr<AudioService> audio_;
   std::unique_ptr<PacketLog> packets_;
+  // The packet-capture path: the hub the receive hook fans out into, the two
+  // production observers (metadata log + replay payload recorder), and the
+  // installed hook(s). Built in `BuildPacketCapture`; the hub and observers are
+  // always present so a script can inspect capture state even with no hook
+  // installed, and the hooks exist only when the embedder resolved a target.
+  std::unique_ptr<PacketCaptureHub> packetCaptureHub_;
+  std::unique_ptr<PacketLogObserver> packetLogObserver_;
+  std::unique_ptr<ReplayPacketObserver> replayPacketObserver_;
+  std::unique_ptr<PacketReceiveHook> packetReceiveHook_;
+  std::unique_ptr<PacketReceiveHook> packetSendHook_;
   std::unique_ptr<IntentValidator> intents_;
+  std::unique_ptr<GameReads> reads_;
   std::unique_ptr<WsClientPool> wsPool_;
   std::unique_ptr<ReplayCamera> replayCamera_;
   std::unique_ptr<CrystalOptimizer> crystal_;
@@ -321,6 +575,10 @@ class BERRY_API BerryClient {
   // message into a rendered remote loadout. The transport is destroyed after
   // the channel, so the channel's borrowed transport pointer is never dangling.
   std::unique_ptr<LanCosmeticTransport> syncTransport_;
+  /// The relay transport, when the config selects the presence backend instead
+  /// of the LAN multicast path. Exactly one of `syncTransport_`/`syncRelay_` is
+  /// built; `syncChannel_` borrows whichever it is.
+  std::unique_ptr<CosmeticRelayTransport> syncRelay_;
   std::unique_ptr<CosmeticSyncChannel> syncChannel_;
   // mDNS discovery for the sync channel: publishes this client so peers can find
   // it and browses for theirs. Built only when sync is enabled; polled on the
@@ -341,8 +599,17 @@ class BERRY_API BerryClient {
   std::string lastPublishedLoadout_;
   // The LAN voice transport. Built only when the config enables voice; the
   // service borrows it, so it is torn down after the service's transport is
-  // cleared.
+  // cleared. In production this is the authenticated, encrypted transport; the
+  // plaintext `LanVoiceTransport` remains available for a dev/diagnostic build.
+  std::unique_ptr<SecureVoiceTransport> secureVoice_;
+  std::unique_ptr<VoiceRelayTransport> voiceRelay_;
   std::unique_ptr<LanVoiceTransport> voiceTransport_;
+  // The OTA signature-pack loader, its filesystem seam and the layout registry
+  // it registers into. Built only when packs are enabled.
+  std::unique_ptr<RealScriptFileSystem> sigPackFs_;
+  std::unique_ptr<SignaturePackLoader> sigPackLoader_;
+  std::unique_ptr<LayoutRegistry> sigPackLayouts_;
+  SigPackLoadReport sigPackReport_;
   // The on-device overlay backend and the seam that funnels the Renderer's
   // frame batch into it. Owned here so the render path has a production owner
   // (the Renderer only ever had a test-installed seam). `null` backend on the
@@ -350,6 +617,22 @@ class BERRY_API BerryClient {
   // the correct headless behaviour.
   std::unique_ptr<IRenderBackend> renderBackend_;
   std::unique_ptr<RenderSeam> renderSeam_;
+
+  // The on-device cosmetic render path: the mesh backend (GLES on device, null
+  // headless), the render seam that binds resolved items to it, the player-model
+  // hook that refreshes bones, the skeleton source that answers them, and the
+  // asset loader/store for real geometry. Built at attach; each fails closed
+  // (draws nothing / resolves nothing) when its platform half is unavailable.
+  std::unique_ptr<ICosmeticMeshBackend> cosmeticMeshBackend_;
+  std::unique_ptr<DeviceCosmeticRenderSeam> cosmeticRenderSeam_;
+  std::unique_ptr<PlayerModelHook> playerModelHook_;
+  std::unique_ptr<PlayerModelSkeletonSource> playerModelSkeleton_;
+  std::unique_ptr<CosmeticAssetLoader> cosmeticAssets_;
+  std::unique_ptr<RendererCameraSource> cosmeticCamera_;
+  // The per-asset custom-animation seam: adapts the Animator's named clips so a
+  // cosmetic's own `animation` moves it. Borrowed by the cosmetic service, so it
+  // is torn down after the service's animation source is cleared.
+  std::unique_ptr<AnimatorAnimationSource> animationSource_;
 
   // The VM-facing binding table: the IDL bindings plus the async bindings.
   ScriptBindings bindings_;

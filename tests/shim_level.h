@@ -281,4 +281,25 @@ class ShimVelocity final : public LocalVelocitySource {
   }
 };
 
+/// A scriptable cosmetic-animation source. `pose` is returned for any clip the
+/// test enables; a disabled clip (or a null animator) fails closed, so the
+/// asset is placed rigidly. `sampledTime` records the last time asked for, so a
+/// test can assert the animation clock reaches the seam scaled by speed.
+class ShimAnimation final : public CosmeticAnimationSource {
+ public:
+  CosmeticAnimPose pose;
+  bool enabled = true;
+  mutable f32 lastTime = 0.0f;
+  mutable std::string lastClip;
+  bool Sample(const std::string& clip, Bone bone, f32 timeSeconds,
+              CosmeticAnimPose* out) const override {
+    (void)bone;
+    lastClip = clip;
+    lastTime = timeSeconds;
+    if (!enabled || !pose.valid) return false;
+    if (out) *out = pose;
+    return true;
+  }
+};
+
 }  // namespace Berry::Test

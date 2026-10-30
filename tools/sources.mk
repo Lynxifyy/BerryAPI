@@ -15,14 +15,17 @@ CORE_SRC := \
   core/events/event.cpp \
   core/hooks/sigscan.cpp \
   core/hooks/backend_shim.cpp \
+  core/hooks/x86_length.cpp \
   core/modules/module.cpp \
   core/modules/combat.cpp \
   core/modules/combat_state.cpp \
   core/modules/animator.cpp \
   core/modules/replay_camera.cpp \
   core/modules/radial.cpp \
+  core/modules/touch.cpp \
   core/modules/crystal.cpp \
   core/modules/voice.cpp \
+  core/modules/voice_crypto.cpp \
   core/modules/render.cpp \
   core/modules/render_backend.cpp \
   core/modules/pipeline.cpp \
@@ -34,6 +37,9 @@ CORE_SRC := \
   core/modules/input.cpp \
   core/modules/pvp.cpp \
   core/modules/cosmetic.cpp \
+  core/modules/cosmetic_assets.cpp \
+  core/modules/cosmetic_device.cpp \
+  core/modules/cosmetic_gles.cpp \
   core/modules/shader.cpp \
   core/modules/governor.cpp \
   core/lifecycle/engine.cpp \
@@ -45,6 +51,14 @@ CORE_SRC := \
   core/net/lan_transport.cpp \
   core/net/lan_discovery.cpp \
   core/net/voice_transport.cpp \
+  core/net/voice_secure_transport.cpp \
+  core/net/room_relay.cpp \
+  core/net/voice_relay.cpp \
+  core/net/cosmetic_relay.cpp \
+  core/net/cosmetic_relay_transport.cpp \
+  core/net/voice_relay_transport.cpp \
+  core/net/room_token.cpp \
+  core/net/multicast_lock.cpp \
   core/script/crypto.cpp \
   core/script/ed25519.cpp \
   core/script/manifest.cpp \
@@ -57,14 +71,17 @@ CORE_SRC := \
   core/script/loader.cpp \
   core/script/pack.cpp \
   core/script/async.cpp \
+  core/script/script_bus.cpp \
   core/script/url.cpp \
   core/script/api_bindings.cpp \
+  core/script/gamereads.cpp \
   core/script/intent.cpp \
   core/script/package.cpp \
   core/script/scriptmod.cpp \
   core/script/fs.cpp \
   core/script/audio.cpp \
   core/script/packet.cpp \
+  core/script/packet_capture.cpp \
   core/script/record.cpp \
   core/replay/replay_format.cpp \
   core/replay/replay_capture.cpp \
@@ -77,6 +94,7 @@ CORE_SRC := \
   core/script/layout.cpp \
   core/script/sigpack.cpp \
   core/script/session_recorder.cpp \
+  core/script/scripttest.cpp \
   util/logger.cpp \
   util/mem.cpp
 
@@ -138,6 +156,7 @@ MBEDTLS_SRC := \
   third_party/mbedtls/library/hkdf.c \
   third_party/mbedtls/library/hmac_drbg.c \
   third_party/mbedtls/library/md.c \
+  third_party/mbedtls/library/mps_reader.c \
   third_party/mbedtls/library/oid.c \
   third_party/mbedtls/library/pem.c \
   third_party/mbedtls/library/pk.c \
@@ -158,6 +177,7 @@ MBEDTLS_SRC := \
   third_party/mbedtls/library/psa_crypto_hash.c \
   third_party/mbedtls/library/psa_crypto_mac.c \
   third_party/mbedtls/library/psa_crypto_pake.c \
+  third_party/mbedtls/library/psa_crypto_random.c \
   third_party/mbedtls/library/psa_crypto_rsa.c \
   third_party/mbedtls/library/psa_crypto_se.c \
   third_party/mbedtls/library/psa_crypto_slot_management.c \
@@ -169,6 +189,7 @@ MBEDTLS_SRC := \
   third_party/mbedtls/library/sha1.c \
   third_party/mbedtls/library/sha256.c \
   third_party/mbedtls/library/sha512.c \
+  third_party/mbedtls/library/ssl_cache.c \
   third_party/mbedtls/library/ssl_ciphersuites.c \
   third_party/mbedtls/library/ssl_client.c \
   third_party/mbedtls/library/ssl_debug_helpers_generated.c \
@@ -212,6 +233,8 @@ TEST_SRC := \
   tests/test_loader.cpp \
   tests/test_api_bindings.cpp \
   tests/test_cosmetic.cpp \
+  tests/test_cosmetic_assets.cpp \
+  tests/test_cosmetic_device.cpp \
   tests/test_client_lan.cpp \
   tests/test_pack.cpp \
   tests/test_intent.cpp \
@@ -225,6 +248,7 @@ TEST_SRC := \
   tests/test_fs.cpp \
   tests/test_audio.cpp \
   tests/test_packet.cpp \
+  tests/test_packet_capture.cpp \
   tests/test_profiler.cpp \
   tests/test_sigpack.cpp \
   tests/test_session_recorder.cpp \
@@ -233,14 +257,25 @@ TEST_SRC := \
   tests/test_animator.cpp \
   tests/test_replay_camera.cpp \
   tests/test_radial.cpp \
+  tests/test_touch.cpp \
+  tests/test_gamereads.cpp \
   tests/test_crystal.cpp \
   tests/test_voice.cpp \
+  tests/test_voice_crypto.cpp \
+  tests/test_voice_secure.cpp \
+  tests/test_voice_relay.cpp \
+  tests/test_cosmetic_relay.cpp \
+  tests/test_room_token.cpp \
+  tests/test_multicast_lock.cpp \
   tests/test_replay_format.cpp \
+  tests/test_replay_fuzz.cpp \
   tests/test_replay_capture.cpp \
   tests/test_replay_world.cpp \
   tests/test_replay_review.cpp \
   tests/test_replay_server.cpp \
-  tests/test_replay_service.cpp
+  tests/test_replay_service.cpp \
+  tests/test_script_bus.cpp \
+  tests/test_scripttest.cpp
 
 # Vendored Luau (MIT). See third_party/luau/PROVENANCE.md for the pinned
 # version and why these units and not the CLI. Compiled with -w because upstream

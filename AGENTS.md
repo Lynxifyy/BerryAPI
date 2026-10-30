@@ -24,6 +24,8 @@ make test            # host unit tests (math, modules, net, script, hud, governo
 make test-sanitize   # the same suites under ASan + UBSan
 make idl             # regenerate bindings/types/docs from api/berry.idl
 make lib             # builds build/libBerryAPI.so
+make check-mbedtls   # part of `make test`: pins the vendored mbedTLS release
+make check-mbedtls-upstream  # network: advises when a newer 3.6 patch exists
 ```
 
 - Host build: `g++ -std=c++17 -Wall -Wextra -O2 -g -Iinclude`, POSIX sockets,
@@ -48,6 +50,16 @@ make lib             # builds build/libBerryAPI.so
   certificate for another name all fail. There is deliberately **no**
   "skip verify" / "insecure" mode. When the CA store cannot be loaded, `Connect`
   refuses rather than trusting anything.
+- The vendored release is pinned and checked. `make check-mbedtls` (part of
+  `make test`) asserts the version agrees in all three places it is written
+  (`tools/check-mbedtls.py`, `build_info.h`, `PROVENANCE.md`), that the config is
+  the trimmed client-only one, and that every vendored unit is either compiled
+  or a documented empty-under-this-config exclusion. `make
+  check-mbedtls-upstream` additionally asks GitHub for the newest 3.6 patch.
+  Re-vendoring is a three-part change: headers + `library/{*.c,*.h}`, a config
+  regenerated with upstream's `scripts/config.py` and the same trim list, and
+  the compiled set in `tools/sources.mk` — bump the three version strings
+  together and `make check-mbedtls` proves it.
 - Every wait (connect, handshake, each read) is clamped to one absolute
   `Deadline` for the whole operation, so a peer that dribbles bytes cannot
   extend a request past its timeout. `Deadline::After`/`expired`/`remainingMs`
@@ -63,6 +75,19 @@ make lib             # builds build/libBerryAPI.so
 - `api/berry.idl` is the single source of truth for the script API; run
   `make idl` after editing it. `make idl-check` (part of `make test`) runs the
   generator self-test and fails when the generated files drift.
+- The IDL declares the **script API version** (`api_version`), surfaced as
+  `api::ScriptApiVersion()`. A manifest may require a minimum in its
+  `api_version` field; the loader refuses a newer requirement
+  (`LoadError::ApiVersionUnsupported`) before the signature check, and the
+  requirement is part of the signed payload so it cannot be changed without
+  invalidating the signature. A manifest with no requirement keeps its exact
+  pre-versioning payload, so old signatures still verify. See
+  `docs/DEPRECATION.md`.
+- Retire a binding in stages: mark it `deprecated "…"` in the IDL (flows into
+  the C++ table, TS/Luau types and `docs/API.md`), keep it working and gated,
+  and remove it only at the next major script-API bump. The runtime warns once
+  per script per binding from inside `ScriptBindings::Invoke` — the one path
+  every native call takes — and only after the capability gate passes.
 - Scripts are capability-gated per call and budgeted per invocation; a fault
   puts the host in `Faulted` and it refuses further calls until reload.
 - The capability gate fails closed. A binding's requirement defaults to
@@ -185,6 +210,65 @@ make lib             # builds build/libBerryAPI.so
   the tracked speaker set and every tunable are bounded and validated; a speaker
   ages out of the activity list (and its decode state with it) after `hold_ms`,
   and `Reset()` keeps config and seams.
+- `TouchService` (`touch.h`, `core/modules/touch.cpp`) is the client-side
+  touch/gesture/on-screen-button service, not a strict module. It owns no clock:
+  the engine feeds raw pointers (`OnPointerDown/Move/Up`) and the `ScriptApi`
+  frame hook calls `Update`/`Draw`. It recognises tap, double tap, long press,
+  drag, swipe (with a direction), pinch and rotate, each gated by a per-gesture
+  enable mask, and publishes a recognised gesture on the `touchGesture` bus
+  channel. On-screen buttons are labelled rectangles that report press/release
+  and toggle; a button press is event-driven (handled on the down/up edge, not
+  left to the next frame) and a press that began on a button never also drives a
+  gesture. A button's optional intent is validated against the session policy in
+  `Update`, so a script can grey out what a server forbids. The pointer table is
+  a fixed array (`kMaxPointers`), every threshold is validated and a bad value is
+  refused, and a non-finite feed is dropped. It carries the `input` capability.
+- `GameReads` (`gamereads.h`, `core/script/gamereads.cpp`) is the read-only game
+  reads service behind `inventory.*`/`server.*`/`chat.*`/`screen.*`, not a strict
+  module. It reports only state the client already holds for its own player — the
+  local inventory, the server it is already connected to, the chat it was already
+  sent, the screen it is already drawing — so there is deliberately no
+  "read another player's inventory" and no player-list read. Four source seams
+  (`InventorySource`/`ServerInfoSource`/`ChatSource`/`ScreenSource`) are bound by
+  the embedder; an absent source reads as empty rather than as fabricated data,
+  and `revision()` bumps on every seam swap. Every walk is bounded (`kMaxSlots`
+  256, `kMaxChat` 128) and every value is normalized on the way out: a stack with
+  no usable id or a non-positive count reads as empty, damage is clamped into the
+  item's own range, a count sum is capped rather than wrapped, and an
+  over-long/control-bearing string is refused at the seam rather than truncated
+  mid-item. It has its own `gamereads` capability, separate from `world`.
+- `SecureVoiceTransport` (`voice_secure_transport.h`) is the authenticated,
+  encrypted LAN transport behind the same `VoiceTransport` seam: an Ed25519
+  identity handshake gates the session, the pairwise key is X25519 + HKDF, the
+  frame is ChaCha20-Poly1305, and a replay window rejects a replayed counter. An
+  announce is the only unauthenticated input and is verified before it changes
+  any state, so a peer outside the anchor cannot listen or inject. Its framing
+  lives in `core/net/voice_wire.h` (`voicewire::`) so the transport and the relay
+  cannot drift.
+- `VoiceRelay` (`voice_relay.h`, `core/net/voice_relay.cpp`) is the hostable UDP
+  forwarder for two phones on *different* networks. It is deliberately blind: it
+  never holds a key and never decrypts, so it moves the end-to-end sealed frame
+  untouched and cannot forge audio. The control plane is a per-room secret —
+  `RoomTagHex` is the room lookup key and `RegisterAuthHex` authenticates a
+  registration (constant-time compare) — so an unregistered source is never
+  forwarded and the relay is not an open amplifier. `VoiceRelayTransport`
+  (`voice_relay_transport.h`) is the client: the same secure channel, wrapped in
+  the relay envelope (`relaywire::` in `voice_wire.h`), reaching one relay address
+  instead of a multicast group. TLS is only for the room token
+  (`RoomTokenClient` in `room_token.h`), which a presence backend serves over
+  verified HTTPS; the token is Ed25519-signed over deterministic canonical bytes
+  when a backend key is configured, so a compromised TLS terminator alone cannot
+  swap the relay or shorten the expiry.
+- The multicast transports (`LanVoiceTransport`, `SecureVoiceTransport`,
+  `LanCosmeticTransport`) each hold a `MulticastLock` (`core/net/multicast_lock.h`)
+  while their group is joined. Android's Wi-Fi power management drops multicast
+  to a joined group without one, so two phones never hear each other. It is a
+  device-only JNI seam (kept behind a pimpl so no caller needs `jni.h`) and is
+  best-effort: on the host `available()` is false and `Acquire` returns false
+  without failing the open.
+- Room tokens are `berry-room-token-v1`, domain-separated and length-prefixed so
+  no field can splice into another; `RoomTokenClient::VerifyDocument` is a pure
+  function (testable without a socket) and `Fetch` is the verified-HTTPS path.
 
 ## Conventions
 

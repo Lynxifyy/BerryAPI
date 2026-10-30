@@ -20,6 +20,15 @@ void *DobbyMessageMethodResolver(const char *class_name, const char *selector_na
   }                                                                                                                    \
   fn_ret_t fake_##name(fn_args_t)
 
+#define install_objc_hook_name_options(name, cls_name, sel_name, fn_ret_t, fn_args_t...)                                       \
+  static fn_ret_t fake_##name(fn_args_t);                                                                              \
+  static fn_ret_t (*orig_##name)(fn_args_t);                                                                           \
+  /* __attribute__((constructor)) */ static void install_hook_##name() {                                               \
+    DobbyHookMessageEx(cls_name, sel_name, (void *)fake_##name, (void **)&orig_##name);                              \
+    return;                                                                                                            \
+  }                                                                                                                    \
+  fn_ret_t fake_##name(fn_args_t)
+
 #ifdef __cplusplus
 }
 #endif

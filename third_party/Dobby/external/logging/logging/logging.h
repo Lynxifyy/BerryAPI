@@ -5,6 +5,10 @@
 #include <stdarg.h>
 #include <stdbool.h>
 
+#define LINE_DELIMITER "/================================/"
+#define LINE_DELIMITER_1 "/--------------------------------/"
+#define LINE_SEPARATOR "/==================/"
+
 #define LOG_TAG NULL
 
 typedef enum {
@@ -16,7 +20,6 @@ typedef enum {
 } LogLevel;
 
 #ifdef __cplusplus
-
 #if defined(USE_CXX_FILESTREAM)
 #include <fstream>
 #endif
@@ -145,6 +148,7 @@ extern "C" {
 #endif
 #endif
 
+
 void *logger_create(const char *tag, const char *file, LogLevel level, bool enable_time_tag, bool enable_syslog);
 void logger_set_options(void *logger, const char *tag, const char *file, LogLevel level, bool enable_time_tag,
                         bool enable_syslog);
@@ -206,3 +210,8 @@ void logger_log_impl(void *logger, LogLevel level, const char *fmt, ...);
 
 #define UNIMPLEMENTED() FATAL_LOG("%s\n", "unimplemented code!!!")
 #define UNREACHABLE() FATAL_LOG("%s\n", "unreachable code!!!")
+
+#define ALWAYS_LOG(fmt, ...)                                                                                           \
+  do {                                                                                                                 \
+    logger_log_impl(NULL, LOG_LEVEL_FATAL, fmt, ##__VA_ARGS__);                                                                          \
+  } while (0)

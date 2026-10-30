@@ -10,15 +10,26 @@
 # they drift from this description.
 #
 # Grammar (line oriented):
+#   api_version <semver>       the script API version this IDL describes
 #   module <Name> {            open a module; functions inherit its capability
 #   capability <cap>           default capability for the module's functions
 #   doc "..."                  documentation for the next declaration
+#   deprecated "..."           the next fn is deprecated; the text is the advice
 #   fn <name>(a: t, ...) -> t  a native binding
 #   event <name>(a: t, ...)    an event channel scripts may await
 #   struct <Name> { f: t ... } a value shape
 #
+# `api_version` is the version of the SCRIPT API SURFACE (the bindings below),
+# distinct from BERRY_ABI_VERSION (the C struct layout of the injector config)
+# and BERRY_VERSION_* (the library release). A script declares the minimum
+# script-API version it needs in its manifest's `api_version` field; the loader
+# refuses a script that needs a newer API than this build implements. See
+# docs/DEPRECATION.md for the deprecation lifecycle.
+#
 # Types: nil, bool, number, string, Actor, Vec3, Rgba, Widget, Task, HttpResult,
 #        Table (a structured value: a table/object of named fields)
+
+api_version 1.0.0
 
 module Combat {
   capability combat
@@ -178,6 +189,7 @@ module World {
   fn get_light(x: number, y: number, z: number) -> number
   doc "The load state of the chunk containing a block coordinate: \"unloaded\", \"loaded\" or \"rendered\"."
   fn get_chunk_state(x: number, y: number, z: number) -> string
+  deprecated "Use `world.block_at`, which returns the same numeric id. `block_id_at` is an alias kept only for scripts written against the first release and is scheduled for removal in script API 2.0.0."
   doc "The numeric block id at integer coordinates (0 = air). Alias of `block_at`, spelled to make the numeric return obvious."
   fn block_id_at(x: number, y: number, z: number) -> number
 }
@@ -202,7 +214,7 @@ module Entity {
 
 module Fs {
   capability fileio
-  doc "Sandboxed file store. A script gets its own directory and nothing else: a path is validated before use (no absolute path, no backslash, no drive letter, no control character, no empty segment, no \".\" or \"..\", a bounded length and depth), so a path cannot escape the sandbox however it is spelled. Writes are capped per file, in total and in count, so a write loop cannot exhaust memory. Every call fails closed (false / empty) rather than throwing."
+  doc "Sandboxed file store. A script gets its own directory and nothing else: a path is validated before use (no absolute path, no backslash, no drive letter, no control character, no empty segment, no \".\" or \"..\", a bounded length and depth), so a path cannot escape the sandbox however it is spelled. Writes are capped per file, in total and in count, so a write loop cannot exhaust memory. Every call fails closed (false / empty) rather than throwing. When the embedder configures a script data directory, the store persists to a per-script directory there: every path component is opened without following a symlink, a write lands in a temporary file that is renamed into place (so a reader never sees a partial write), and the existing files and bytes are counted against the quota when the directory is opened, so data survives a restart and a planted symlink or a traversal spelling is refused."
   fn write(path: string, data: string) -> bool
   fn read(path: string) -> string
   fn append(path: string, data: string) -> bool
@@ -505,7 +517,19 @@ module Animator {
 
 module Events {
   capability events
-  doc "Event channels scripts may await with Events.once. The world-diff channels are driven by the reactive world grid: entityEntered and entityLeft carry \"<id>:<type>\", entityUpdated fires when an entity's position, health or state changed between ticks, and blockChanged carries \"x,y,z,block\". A script never polls for these. The lifecycle channels (entityHurt, entityDeath, entitySpawn) are driven by the combat bus and the world diff and carry \"<id>:<detail>\" (entityHurt's detail is the damage, entitySpawn's is the type), so a script can filter by id without a parser."
+  doc "The script event bus. `Events.on` registers a persistent handler for a channel; the handler runs on the script worker every time the channel fires, until `Events.off`/`off_all` or the script unloads. `Events.emit` publishes a channel so every subscriber receives it. Channels are the declared event names below plus any name a script emits; a channel name is bounded and validated. Delivery is bounded and never re-entered: a handler that publishes its own channel is delivered on a later pump, an event that arrives while the script is suspended is held in a bounded queue (and dropped, counted, when the queue is full) rather than growing without limit, and a handler that faults the host stops further delivery until reload. This is the push counterpart to `Events.once`, which suspends the caller for a single event."
+  doc "Registers `handler` (a function exported by the script) on `channel`. Returns a subscription id, or 0 when refused (empty/oversized channel or handler name, unknown channel, or the subscription cap is reached). The handler is called with the payload as its first argument; a channel with no payload delivers an empty string. Re-registering the same (channel, handler) pair returns the existing id rather than adding a duplicate."
+  fn on(channel: string, handler: string) -> number
+  doc "Removes the subscription with `id`. Returns true when one was removed."
+  fn off(id: number) -> bool
+  doc "Removes every subscription the calling script holds. Returns how many were removed."
+  fn off_all() -> number
+  doc "How many subscriptions the calling script holds."
+  fn subscriptions() -> number
+  doc "Publishes `payload` on `channel` to every subscriber (this script included, unless it has no subscription). Returns how many handlers were dispatched. An empty or oversized channel is refused (returns 0)."
+  fn emit(channel: string, payload: string) -> number
+  doc "The declared channels and every channel a script has subscribed to, comma-separated and sorted, so a script can discover what it can listen for."
+  fn channels() -> string
   event hit(damage: number)
   event kill(victim: string)
   event tick_count(count: number)
@@ -530,7 +554,7 @@ module Events {
 
 module Intent {
   capability input
-  doc "Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share."
+  doc "Intent layer. A script does not mutate the world; it requests an intent and a policy layer validates it. Client-side intents (zoom, freelook, fov, perspective, keybind, hud, nametag, cosmetic, sound, crystal_advise) are what normal player input could do or what stays on this screen. World writes are denied. A server policy profile can disable whole groups on servers that ban client mods. This module is the read side: query what is allowed here. It carries the input grant, the capability the client-side intent groups share."
   fn allowed(name: string) -> bool
   fn classify(name: string) -> string
   fn server() -> string
@@ -697,8 +721,76 @@ module Radial {
   fn sector_at(pointer_x: number, pointer_y: number, center_x: number, center_y: number, inner_radius: number, outer_radius: number, count: number) -> number
 }
 
+module Touch {
+  capability input
+  doc "Client-side touch, gesture and on-screen button API. The game's input hook feeds raw multi-touch (down/move/up per finger); this layer turns that stream into the gestures a mobile mod acts on — tap, double tap, long press, drag, swipe, pinch and rotate — and owns the on-screen buttons a mobile mod needs (a labelled rectangle that reports press/release and can request a policy-gated intent). Everything here is local by construction: every value comes from the player's own finger on the player's own screen, so nothing is revealed that the client was not already shown. Recognition is deterministic and clock-driven, so the whole model is testable without a device. A gesture is published on the `touchGesture` channel with a \"kind,dir,x,y,magnitude,pointers\" payload, and a button's optional intent is validated against the server policy so a script can grey out what this server forbids."
+  doc "Records a finger going down at (x, y) with the engine's finger id. False when the pointer table (10 fingers) is full."
+  fn pointer_down(id: number, x: number, y: number, now_ms: number) -> bool
+  doc "Records a finger moving. Ignored when the id is not down."
+  fn pointer_move(id: number, x: number, y: number, now_ms: number) -> nil
+  doc "Records a finger lifting and resolves the single-finger gesture (tap, double tap or swipe) it completes."
+  fn pointer_up(id: number, x: number, y: number, now_ms: number) -> nil
+  doc "Drops every pointer, e.g. on a focus loss or screen change."
+  fn clear_pointers() -> nil
+  doc "How many fingers are down."
+  fn pointer_count() -> number
+  doc "The fingers currently down, oldest first, as a table keyed \"0\",\"1\",… of {id, x, y, start_x, start_y, down_ms}."
+  fn pointers() -> Table
+  doc "Advances the recogniser (long press, drag, pinch, rotate) and hit-tests the on-screen buttons against the primary finger for this frame."
+  fn update(now_ms: number) -> nil
+  doc "Enables or disables one gesture (by name: tap, double_tap, long_press, drag, swipe, pinch, rotate). False for an unknown name."
+  fn set_gesture_enabled(gesture: string, enabled: bool) -> bool
+  doc "Whether a gesture is enabled. False for an unknown name."
+  fn gesture_enabled(gesture: string) -> bool
+  doc "The enabled-gesture mask as a bit set (tap=1, double_tap=2, long_press=4, drag=8, swipe=16, pinch=32, rotate=64)."
+  fn gesture_mask() -> number
+  doc "The last recognised gesture as {kind, dir, x, y, dx, dy, magnitude, pointers, at_ms}. `kind` is \"none\" before any gesture."
+  fn last_gesture() -> Table
+  doc "The recogniser thresholds as {tap_max_move, tap_max_ms, long_press_ms, double_tap_max_ms, swipe_min_dist, swipe_max_ms, pinch_min_scale}."
+  fn config() -> Table
+  doc "Sets the movement that still counts as a tap, in pixels. Must be finite and positive; a bad value is refused."
+  fn set_tap_max_move(px: number) -> bool
+  doc "Sets the duration that still counts as a tap, in milliseconds. Must be finite and positive."
+  fn set_tap_max_ms(ms: number) -> bool
+  doc "Sets the hold time before a long press fires, in milliseconds. Must be finite and positive."
+  fn set_long_press_ms(ms: number) -> bool
+  doc "Sets the window for a second tap to become a double tap, in milliseconds. Must be finite and positive."
+  fn set_double_tap_max_ms(ms: number) -> bool
+  doc "Sets the travel that makes a release a swipe, in pixels. Must be finite and positive."
+  fn set_swipe_min_dist(px: number) -> bool
+  doc "Sets the maximum duration of a swipe, in milliseconds. Must be finite and positive."
+  fn set_swipe_max_ms(ms: number) -> bool
+  doc "Sets the separation change that fires a pinch, as a scale fraction. Must be finite, positive and at most 1."
+  fn set_pinch_min_scale(scale: number) -> bool
+  doc "The direction a swipe of (dx, dy) travels — up, down, left or right — or \"none\" when it is shorter than `min_dist`. Pure: it reads no state, so it pins the geometry."
+  fn swipe_direction(dx: number, dy: number, min_dist: number) -> string
+  doc "Adds an on-screen button covering (min_x, min_y)..(max_x, max_y). False when the label is empty, longer than 24 bytes or non-printable, the rectangle is not finite or not positive-area, or the button cap (24) is reached."
+  fn add_button(label: string, min_x: number, min_y: number, max_x: number, max_y: number) -> bool
+  doc "Removes the button at `index`. False when out of range."
+  fn remove_button(index: number) -> bool
+  doc "Removes every button."
+  fn clear_buttons() -> nil
+  doc "How many buttons exist."
+  fn button_count() -> number
+  doc "The label at `index`, or an empty string when out of range."
+  fn button_label(index: number) -> string
+  doc "Whether the button at `index` is enabled; false when out of range."
+  fn button_enabled(index: number) -> bool
+  doc "Enables or disables the button at `index`. False when out of range."
+  fn set_button_enabled(index: number, enabled: bool) -> bool
+  doc "Sets the intent the button requests on press (an intent name such as \"zoom\"; empty clears it). False when out of range or the name is not a bounded identifier."
+  fn set_button_intent(index: number, intent: string) -> bool
+  doc "The intent the button at `index` requests, or an empty string."
+  fn button_intent(index: number) -> string
+  doc "A snapshot of the button at `index` as {label, enabled, held, toggled, allowed, presses, releases}. `allowed` is false when the button's intent is refused by this server's policy."
+  fn button_state(index: number) -> Table
+  doc "The overall touch state as {pointers, buttons, gesture}. `gesture` is the last gesture table."
+  fn state() -> Table
+  event touchGesture(gesture: string)
+}
+
 module Crystal {
-  capability combat
+  capability crystal
   doc "Client-side crystal-placement advisor. It answers one question a crystal-PvP player asks every fight: where is the best place to drop a crystal from here? It reads the entities the world grid already delivered and the blocks the level seam already answers, ranks candidate spots by the damage they would deal, and reports the ranking to the script. It never places a block, never sends a packet and never writes to the game: a crystal blast is an explosion the player triggers, and this only measures where it would hurt most. The damage figure is an ESTIMATE, not the engine's number — a crystal's blast falls off linearly with distance, so the model is `maxDamage * clamp(1 - distance / blastRadius, 0, 1)` measured to each target's hitbox, and a script must not treat it as authoritative. The self-damage term uses the same falloff from the placer, so a spot that would blow the placer up ranks below one that will not. Candidate generation is bounded (place range, level count, total candidates) and every bad value is refused rather than clamped, so one call can never walk the world."
   doc "The current tunables as {place_range, blast_radius, max_damage, min_targets, self_damage_weight, max_self_damage, levels, max_results}."
   fn config() -> Table
@@ -842,10 +934,12 @@ module ReplayMod {
   fn set_review_speed(speed: number) -> bool
   doc "Draws the review through the frame's renderer when active; returns how many entities it drew. A no-op (0) when inactive or no replay is loaded."
   fn review_present() -> number
-  doc "Binds the loopback playback server to `host:port`. `host` must be a loopback address (\"127.0.0.1\", \"::1\" or \"localhost\"); anything else is refused. A port of 0 asks the OS for a free one, which `server_port` reports. Returns false (with a reason in `last_error`) when the host is not loopback, the socket cannot bind, or the server is already running."
+  doc "Binds the loopback playback server to `host:port`. `host` must be a loopback address (\"127.0.0.1\", \"::1\" or \"localhost\"); anything else is refused. A port of 0 asks the OS for a free one, which `server_port` reports. Returns false (with a reason in `last_error`) when the host is not loopback, the socket cannot bind, the loaded replay's protocol version does not match this build, or a live multiplayer session is active (playback never runs alongside a live session)."
   fn server_start(host: string, port: number) -> bool
   fn server_stop() -> nil
   fn server_running() -> bool
+  doc "True when the live-session guard is holding playback back: a live multiplayer session is active, so the server is neither started nor streaming."
+  fn server_live_blocked() -> bool
   fn server_port() -> number
   fn server_client_connected() -> bool
   doc "How many packets the server has sent since a client joined."
@@ -857,4 +951,89 @@ module ReplayMod {
   fn server_seek(tick: number) -> bool
   doc "A one-line status: capture state, sections, bytes, whether a replay is loaded, and whether a client is connected."
   fn status() -> string
+}
+
+module Inventory {
+  capability gamereads
+  doc "Read-only view of the LOCAL player's own inventory. Every value is state the client already holds for its own player, so nothing here reveals another player: there is deliberately no \"read another player's inventory\". The walk is bounded (`kMaxSlots`, 256) and every stack is normalized on the way out — a slot with no usable item id or a non-positive count reads as empty, damage is clamped into the item's own range, and an oversized string is refused at the seam rather than truncated mid-item, so a script never sees a half-item that looks real. Reads fail closed (an empty inventory, a zero count) when no source is bound."
+  doc "How many slots the inventory reports, capped at 256."
+  fn slot_count() -> number
+  doc "The stack in `slot` as {empty, id, name, count, damage, max_damage}. An out-of-range or unreadable slot reads as empty."
+  fn slot(index: number) -> Table
+  doc "Every non-empty stack, in slot order, as a table keyed \"0\",\"1\",…, each a stack table."
+  fn items() -> Table
+  doc "How many non-empty stacks the inventory holds."
+  fn item_count() -> number
+  doc "The selected hotbar slot, or -1 when unknown."
+  fn selected_slot() -> number
+  doc "The total count of `id` across the inventory, 0 when none. An empty or oversized id is refused (0)."
+  fn count_of(id: string) -> number
+  doc "Whether the inventory holds at least `min_count` of `id` (`min_count` <= 0 means \"any\"). False for a bad id or no source."
+  fn has(id: string, min_count: number) -> bool
+  doc "True while a source is bound (the inventory can be read)."
+  fn available() -> bool
+}
+
+module Server {
+  capability gamereads
+  doc "Read-only view of the server this client is already connected to. Everything here is what the client already knows: the address it dialled, the protocol it negotiated, and the counts the tab list already shows. There is no player-list read here (the tab list is a separate, already-visible surface) and nothing is sent. `connected` is false when there is no session, and every read then reports a disconnected state."
+  doc "The session as one table: {connected, host, port, version, protocol, player_count, max_players, motd, gamemode, dimension, latency_ms}."
+  fn info() -> Table
+  doc "True while a session is connected."
+  fn connected() -> bool
+  fn host() -> string
+  fn port() -> number
+  fn version() -> string
+  doc "The negotiated protocol number, 0 when unknown."
+  fn protocol() -> number
+  doc "The players the tab list already shows."
+  fn player_count() -> number
+  fn max_players() -> number
+  fn motd() -> string
+  doc "The local player's own gamemode name."
+  fn gamemode() -> string
+  doc "The local player's own dimension name."
+  fn dimension() -> string
+  doc "Round-trip time to the server in milliseconds, 0 when unknown."
+  fn latency_ms() -> number
+}
+
+module Chat {
+  capability gamereads
+  doc "Read-only view of the chat the client was already sent. It is a copy of the recent history, oldest first, bounded (`kMaxChat`, 128 lines) and normalized (a control-bearing sender reads as empty, an over-long line is truncated). This is the local client's own chat log: nothing here sends a message, and nothing reveals a channel the client is not already in. Reads fail closed (no lines) when no source is bound."
+  doc "The recent chat, oldest first, as a table keyed \"0\",\"1\",…, each {sender, text, at_ms, system}. Capped at 128 lines."
+  fn messages() -> Table
+  doc "How many lines the history holds, capped at 128."
+  fn count() -> number
+  doc "The text of line `index` (0 = oldest), or an empty string when out of range."
+  fn text(index: number) -> string
+  doc "The sender of line `index`, or an empty string for a system line or an out-of-range index."
+  fn sender(index: number) -> string
+  doc "Whether line `index` is a system line. False when out of range."
+  fn is_system(index: number) -> bool
+  doc "The most recent line's text, or an empty string when the history is empty."
+  fn last() -> string
+  doc "True while a source is bound (the chat can be read)."
+  fn available() -> bool
+}
+
+module Screen {
+  capability gamereads
+  doc "Read-only view of the screen the client is currently drawing. It reports which menu is up, its title and its size, and whether a keyboard is open — all of which the client is already rendering. It is deliberately a description, not a control surface: nothing here opens, closes or clicks a screen, and nothing here reads a widget's contents. `open` is false when the client is in the world with no menu up, and every read then reports a closed state."
+  doc "The screen as one table: {open, name, title, width, height, keyboard_open}."
+  fn state() -> Table
+  doc "True while a menu is open."
+  fn open() -> bool
+  doc "The open screen's name (\"chat\", \"inventory\", \"pause\", …), or an empty string when none."
+  fn name() -> string
+  doc "The open screen's title, or an empty string."
+  fn title() -> string
+  doc "The open screen's width in pixels, 0 when closed."
+  fn width() -> number
+  doc "The open screen's height in pixels, 0 when closed."
+  fn height() -> number
+  doc "True while a text keyboard is open."
+  fn keyboard_open() -> bool
+  doc "True while a source is bound (the screen can be read)."
+  fn available() -> bool
 }

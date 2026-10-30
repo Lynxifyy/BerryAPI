@@ -227,7 +227,13 @@ bool Animator::BracketLocked(Bone bone, f32 time, const AnimKey** lo,
                              const AnimKey** hi, f32* t) const {
   const AnimClip* c = FindLocked(current_);
   if (!c) return false;
-  const std::vector<AnimKey>& keys = c->keys;
+  return BracketClipLocked(*c, bone, time, lo, hi, t);
+}
+
+bool Animator::BracketClipLocked(const AnimClip& c, Bone bone, f32 time,
+                                 const AnimKey** lo, const AnimKey** hi,
+                                 f32* t) const {
+  const std::vector<AnimKey>& keys = c.keys;
   const AnimKey* base = keys.data();
   // The keys for one bone are contiguous and sorted by time. Find the run.
   const size_t first = (size_t)(std::lower_bound(
@@ -288,6 +294,34 @@ Animator::BonePose Animator::Sample(Bone bone, f32 time) const {
 Animator::BonePose Animator::SampleNow(Bone bone) const {
   std::lock_guard<std::mutex> lk(mutex_);
   return SampleLocked(bone, time_);
+}
+
+Animator::BonePose Animator::SampleClip(const std::string& clip, Bone bone,
+                                        f32 time) const {
+  BonePose out;
+  if (bone == Bone::None || (u32)bone >= (u32)Bone::Count) return out;
+  if (!std::isfinite(time)) return out;
+  std::lock_guard<std::mutex> lk(mutex_);
+  const AnimClip* c = FindLocked(clip);
+  if (!c || c->duration <= 0.0f) return out;
+  // Wrap/clamp the same way playback would land here, so a named clip sampled
+  // by the cosmetic renderer matches what Play() would show.
+  f32 t = time;
+  if (t < 0.0f) t = 0.0f;
+  if (c->looping) {
+    if (t >= c->duration) t = std::fmod(t, c->duration);
+  } else if (t > c->duration) {
+    t = c->duration;
+  }
+  const AnimKey* a = nullptr;
+  const AnimKey* b = nullptr;
+  f32 f = 0.0f;
+  if (!BracketClipLocked(*c, bone, t, &a, &b, &f)) return out;
+  out.position = a->position.Lerp(b->position, f);
+  out.rotation = a->rotation.Lerp(b->rotation, f);
+  out.scale = a->scale + (b->scale - a->scale) * f;
+  out.valid = true;
+  return out;
 }
 
 std::vector<std::pair<Bone, Animator::BonePose>> Animator::SamplePose() const {

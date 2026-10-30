@@ -61,8 +61,8 @@ PUBLIC inline int DobbyHook(void *address, void *fake_func, void **out_origin_fu
 
   if (out_origin_func) {
     *out_origin_func = (void *)entry->relocated.addr();
+    features::apple::arm64e_pac_strip_and_sign(*out_origin_func);
   }
-  features::apple::arm64e_pac_strip_and_sign(*out_origin_func);
 
   gInterceptor.add(entry);
 

@@ -89,15 +89,59 @@ bool Engine::Bootstrap(const BerryConfigC& cfg) {
   internal.enableClient = cfg.enable_client != 0;
   internal.devMode = cfg.dev_mode != 0;
   if (cfg.script_directory) internal.scriptDirectory = cfg.script_directory;
+  if (cfg.script_anchor_key) internal.scriptAnchorKey = cfg.script_anchor_key;
   internal.localPlayerId = cfg.local_player_id;
   internal.enableCosmeticSync = cfg.enable_cosmetic_sync != 0;
   if (cfg.sync_verify_key) internal.syncVerifyKey = cfg.sync_verify_key;
   if (cfg.sync_self_id) internal.syncSelfId = cfg.sync_self_id;
   if (cfg.sync_sign_secret) internal.syncSignSecret = cfg.sync_sign_secret;
   internal.syncUseHmac = cfg.sync_use_hmac != 0;
+  if (cfg.sync_relay_host) internal.syncRelayHost = cfg.sync_relay_host;
+  if (cfg.sync_relay_port != 0) internal.syncRelayPort = cfg.sync_relay_port;
+  if (cfg.sync_room) internal.syncRoom = cfg.sync_room;
+  if (cfg.sync_room_secret) internal.syncRoomSecret = cfg.sync_room_secret;
   internal.enableVoice = cfg.enable_voice != 0;
   if (cfg.voice_self_id) internal.voiceSelfId = cfg.voice_self_id;
+  if (cfg.voice_identity_seed) internal.voiceIdentitySeed = cfg.voice_identity_seed;
+  if (cfg.voice_peer_keys) {
+    // Comma-separated hex Ed25519 public keys; a malformed entry is skipped so
+    // one bad key cannot disable the whole anchor (the rest still verify).
+    std::string keys = cfg.voice_peer_keys;
+    size_t start = 0;
+    while (start <= keys.size()) {
+      const size_t comma = keys.find(',', start);
+      const size_t end = (comma == std::string::npos) ? keys.size() : comma;
+      std::string one = keys.substr(start, end - start);
+      // Trim surrounding whitespace so a config file can be spaced.
+      size_t b = one.find_first_not_of(" \t\r\n");
+      size_t e = one.find_last_not_of(" \t\r\n");
+      if (b != std::string::npos) one = one.substr(b, e - b + 1);
+      if (!one.empty() && !internal.voiceTrust.AddPublicKeyHex(one)) {
+        Log::Warn("engine: voice peer key '%s' is not a 32-byte hex key; skipped",
+                  one.c_str());
+      }
+      if (comma == std::string::npos) break;
+      start = comma + 1;
+    }
+    if (!internal.voiceTrust.publicKeys.empty()) {
+      internal.voiceTrust.kind = VoiceTrustAnchor::Kind::Ed25519Keys;
+    }
+  }
+  if (cfg.voice_room_key && cfg.voice_room_key[0] != '\0') {
+    if (!internal.voiceTrust.SetRoomKey(cfg.voice_room_key)) {
+      Log::Warn("engine: voice room key too short; ignored");
+    }
+  }
+  if (cfg.voice_group) internal.voiceGroup = cfg.voice_group;
+  if (cfg.voice_port != 0) internal.voicePort = cfg.voice_port;
+  if (cfg.voice_relay_host) internal.voiceRelayHost = cfg.voice_relay_host;
+  if (cfg.voice_relay_port != 0) internal.voiceRelayPort = cfg.voice_relay_port;
+  if (cfg.voice_room) internal.voiceRoom = cfg.voice_room;
+  if (cfg.voice_room_secret) internal.voiceRoomSecret = cfg.voice_room_secret;
   if (cfg.lan_iface) internal.lanIface = cfg.lan_iface;
+  if (cfg.script_data_directory) {
+    internal.scriptDataDirectory = cfg.script_data_directory;
+  }
   ApplyConfig(internal);
   Log::Info("BerryAPI v%s bootstrapped (abi %u)", BERRY_VERSION_STRING,
             (unsigned)BERRY_ABI_VERSION);
@@ -141,6 +185,12 @@ bool Engine::Attach() {
     ccfg.scriptDirectory = cfg_.scriptDirectory;
     ccfg.requireSignature = !cfg_.devMode;
     ccfg.requireSourceHash = !cfg_.devMode;
+    // The trust anchor a manifest signature is verified against. An empty key
+    // leaves the anchor invalid, which (with requireSignature on) refuses every
+    // manifest: the fail-closed default for a build not provisioned with a key.
+    if (!cfg_.scriptAnchorKey.empty()) {
+      ccfg.anchor = TrustAnchor::Ed25519Key(cfg_.scriptAnchorKey);
+    }
     ccfg.localPlayer.raw = cfg_.localPlayerId;
     // The LAN channels are opt-in. The verify key is hex, parsed into the key
     // struct the channel takes; an empty/blank key leaves the channel
@@ -154,9 +204,22 @@ bool Engine::Attach() {
     ccfg.syncSelfId = cfg_.syncSelfId;
     ccfg.syncSignSecret = cfg_.syncSignSecret;
     ccfg.syncUseHmac = cfg_.syncUseHmac;
+    ccfg.syncRelayHost = cfg_.syncRelayHost;
+    ccfg.syncRelayPort = cfg_.syncRelayPort;
+    ccfg.syncRoom = cfg_.syncRoom;
+    ccfg.syncRoomSecret = cfg_.syncRoomSecret;
     ccfg.enableVoice = cfg_.enableVoice;
     ccfg.voiceSelfId = cfg_.voiceSelfId;
+    ccfg.voiceIdentitySeed = cfg_.voiceIdentitySeed;
+    ccfg.voiceTrust = cfg_.voiceTrust;
+    ccfg.voiceGroup = cfg_.voiceGroup;
+    ccfg.voicePort = cfg_.voicePort;
+    ccfg.voiceRelayHost = cfg_.voiceRelayHost;
+    ccfg.voiceRelayPort = cfg_.voiceRelayPort;
+    ccfg.voiceRoom = cfg_.voiceRoom;
+    ccfg.voiceRoomSecret = cfg_.voiceRoomSecret;
     ccfg.lanIface = cfg_.lanIface;
+    ccfg.scriptDataDirectory = cfg_.scriptDataDirectory;
     client_ = std::make_unique<BerryClient>();
     if (!client_->Attach(*this, ccfg)) {
       Log::Error("BerryClient failed to attach; detaching modules");

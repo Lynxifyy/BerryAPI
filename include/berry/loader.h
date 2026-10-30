@@ -93,6 +93,10 @@ enum class LoadError : u32 {
   SourceHashMissing,
   NotApproved,
   NoCapabilities,
+  /// The manifest requires a newer script API than this build implements.
+  /// Refused rather than loaded, because the surface the script was written
+  /// against is not present and a missing binding would fault at run time.
+  ApiVersionUnsupported,
   HostLoadFailed,
   AlreadyLoaded,
 };
@@ -123,6 +127,13 @@ struct BERRY_API ScriptLoaderConfig {
   /// Require the manifest to bind a source hash (independent of
   /// requireSignature: a signed manifest must always bind its code).
   bool requireSourceHash = true;
+
+  /// Refuse a manifest whose declared `api_version` is newer than this build's
+  /// script API. On by default: a script written for a later surface would
+  /// fault on a missing binding at run time, so it is rejected at load with a
+  /// precise reason instead. Turning this off is a development escape hatch
+  /// and does not make a missing binding exist.
+  bool enforceApiVersion = true;
 
   /// Produces a fresh VM per revision. Empty means the self-contained reference
   /// VM, which is right for the host tests; the device host sets `CreateLuauVm`

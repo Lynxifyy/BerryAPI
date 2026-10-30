@@ -179,13 +179,22 @@ both into the registries that already exist. Shipping a new pack file is enough;
 the library is unchanged. See `include/berry/sigpack.h`.
 
 A pack names the build it was written against and is gated on it, exactly like
-the table it replaces:
+the table it replaces. It is also **signed**: a pack carries an Ed25519
+signature over a small canonical payload that binds its name, its build
+fingerprint, a monotonic anti-rollback `sequence` and an optional `expires`.
+The device holds only the public key, so it can verify a pack but never mint
+one. The signature is checked **before a single signature row or layout is
+parsed**, so a tampered, unsigned, expired or replayed pack never reaches the
+entry parser.
 
 ```json
 {
   "format": 1,
   "name": "berry-1.20.50",
   "build": "1a2b3c4d",
+  "sequence": 7,
+  "expires": 1893456000,
+  "signature": { "algo": "ed25519", "value": "…128 hex chars…" },
   "signatures": [
     { "id": "combat:damageFn", "pattern": "E8 ?? ?? ?? ?? 48 83 C4 20 5B C3" },
     { "id": "world:levelTick", "pattern": "F0 ?? ?? ?? ?? 4C 8D 05", "from_end": 4 }
@@ -202,8 +211,35 @@ the table it replaces:
 }
 ```
 
+The canonical signed payload is defined by `SignaturePack::CanonicalPayload`
+and mirrored by `tools/berry-sigpack-sign.py`:
+
+```
+berry-sigpack-v1\n
+format=1\n
+name=<name>\n
+build=<normalized build>\n
+sequence=<n>\n
+expires=<n>\n
+```
+
+The `build` is normalized (one leading `0x` stripped, lower-cased) so the two
+spellings of a fingerprint produce one payload, matching the apply-time
+comparison. Because the fingerprint is inside the signed bytes, re-pointing a
+pack at another build is a tamper and fails verification.
+
 Rules that make this safe to ship over the air:
 
+- **Signed and verified before parsing.** `VerifyEnvelope` reads only the
+  signed fields and checks the signature; `Parse` (which interprets the
+  signatures and layouts) runs only after it succeeds.
+- **Anti-rollback.** The signed `sequence` must be at or above the accepted
+  floor: the trust's `minSequence` and the loader's session floor (the highest
+  sequence applied so far). A captured pack cannot be replayed to roll a device
+  back onto stale offsets. The floor only ever rises; an embedder persists
+  `sigpackSequenceFloor` across a restart and seeds it back.
+- **Expiry.** A signed `expires` in the past is refused when a wall clock is
+  supplied (`SigPackTrust::nowUnix`).
 - **Build-gated, fail closed.** `ApplySignaturePack` refuses the whole pack when
   its `build` does not equal the active fingerprint, and an empty active build
   refuses every pack. A pack for another build can never resolve to addresses in
@@ -216,19 +252,38 @@ Rules that make this safe to ship over the air:
 - **Seam-read.** Packs load through `IScriptFileSystem`, so a device build
   routes reads through the game's own file layer and the host tests need no disk.
 
+Signing a pack (publisher side; the key file holds a 32-byte seed):
+
+```sh
+python3 tools/berry-sigpack-sign.py keygen --out berry-pack.key
+python3 tools/berry-sigpack-sign.py sign --key berry-pack.key \
+    --file packs/1.20.50.sigpack.json --sequence 7 --expires 1893456000
+python3 tools/berry-sigpack-sign.py verify --pub <hex> --file packs/1.20.50.sigpack.json
+```
+
+Loading packs (device side; provision the public key only):
+
 ```cpp
 MemoryScriptFileSystem fs;              // or RealScriptFileSystem on device
 fs.Write("packs/1.20.50.sigpack.json", packJson);
 
 LayoutRegistry layouts;                 // owned by the engine
-SignaturePackLoader loader(&fs, "packs");
+SigPackTrust trust;
+trust.publicKeyHex = "<64 hex chars>";  // the device's pack anchor
+trust.nowUnix = NowUnixSeconds();
+SignaturePackLoader loader(&fs, trust, "packs");
+loader.SetSequenceFloor(persistedFloor); // from the last run: no rollback
 SigPackLoadReport rep = loader.LoadDirectory("1a2b3c4d",   // active fingerprint
                                              SigCache::Instance(),
                                              &layouts);
+persistedFloor = loader.sequenceFloor(); // persist for the next run
 ```
 
-Only `*.sigpack.json` files are discovered; unrelated JSON in the directory is
-ignored. A failed pack does not stop the others, and the report carries a
-per-pack reason. The loaded layouts answer through `LayoutRegistry::Find`, which
-already gates on the active build, so a decoded field read is bound to the same
-fingerprint that gated the pack.
+`BerryClient` drives exactly this when `ClientConfig::enableSigPacks` is set:
+the loader is built with `sigpackTrust`, seeded with `sigpackSequenceFloor`,
+and `LoadDirectory` runs before the script loads. Only `*.sigpack.json` files
+are discovered; unrelated JSON in the directory is ignored. A failed pack does
+not stop the others, and the report carries a per-pack reason. The loaded
+layouts answer through `LayoutRegistry::Find`, which already gates on the active
+build, so a decoded field read is bound to the same fingerprint that gated the
+pack.

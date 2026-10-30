@@ -150,10 +150,13 @@ class BERRY_API ReplayCapture {
                    EntityId localPlayer = EntityId{});
 
   /// Captures one raw packet from the receive (or send) path. `payload` is the
-  /// packet body verbatim. Returns false when not recording, the packet is over
-  /// the size cap, or packets are disabled in the config.
+  /// packet body verbatim. `kind` classifies the record (a plain `Packet`, or a
+  /// `Chunk` for a chunk/block packet) so a consumer can route it without
+  /// re-parsing the id; it defaults to `Packet`. Returns false when not
+  /// recording, the packet is over the size cap, or packets are disabled in the
+  /// config.
   bool CapturePacket(PacketDir dir, u32 id, const std::string& payload,
-                     u64 tick);
+                     u64 tick, ReplayRecordKind kind = ReplayRecordKind::Packet);
 
   /// Captures a timeline marker (a combat event, a script event).
   bool CaptureEvent(const std::string& channel, const std::string& payload,

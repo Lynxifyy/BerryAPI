@@ -22,6 +22,14 @@
 
 #include <sys/mman.h>
 
+
+// memcpy
+void *memcpy(void *dest, const void *src, size_t n) {
+  for (int i = 0; i < n; i++)
+    ((char *)dest)[i] = ((char *)src)[i];
+  return dest;
+}
+
 #if defined(TARGET_ARCH_ARM64)
 #define SYS_mprotect 74
 int mprotect_impl(void *addr, size_t len, int prot) {

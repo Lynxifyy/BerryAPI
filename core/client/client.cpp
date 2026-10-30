@@ -17,6 +17,7 @@
 
 #include "berry/engine.h"
 #include "berry/logger.h"
+#include "berry/replay_service.h"
 #include "berry/services.h"
 #include "berry/thread.h"
 
@@ -59,15 +60,50 @@ bool BerryClient::Attach(Engine& engine, const ClientConfig& cfg) {
   ui_ = std::make_unique<UiLayer>();
   pvp_ = std::make_unique<PvpOverlay>();
   radial_ = std::make_unique<RadialMenu>();
+  touch_ = std::make_unique<TouchService>();
   animator_ = std::make_unique<Animator>();
   combatState_ = std::make_unique<CombatStateTracker>();
   cosmetics_ = std::make_unique<CosmeticService>();
   // The animator drives the rendered rig through this seam: the cosmetic
   // renderer resolves bones through it, so a clip a script plays moves the
-  // local rig instead of sitting in a table. Its base is null; a device adapter
-  // installs a real skeleton seam behind it.
-  animatorSeam_ = std::make_unique<AnimatedSkeletonSource>(nullptr, animator_.get());
+  // local rig instead of sitting in a table. Its base is the on-device player
+  // model source (built below), so an animated bone layers on top of the real
+  // rig; until the device half is installed the base is null and the animator
+  // animates every entity the base would have resolved (i.e. none).
+  playerModelSkeleton_ = std::make_unique<PlayerModelSkeletonSource>();
+  animatorSeam_ = std::make_unique<AnimatedSkeletonSource>(
+      playerModelSkeleton_.get(), animator_.get());
   cosmetics_->SetSkeletonSource(animatorSeam_.get());
+  // The camera source lets a device render seam project real geometry through
+  // the frame's own camera; the renderer is bound once the engine is up (below).
+  cosmeticCamera_ = std::make_unique<RendererCameraSource>();
+  cosmetics_->SetCameraSource(cosmeticCamera_.get());
+  // Per-asset custom animations sample from the same clip store a script
+  // authors: the adapter is the seam the cosmetic renderer reads a named clip
+  // through, so an asset's `animation` moves it on its own bone. Without it
+  // every asset is placed rigidly.
+  animationSource_ = std::make_unique<AnimatorAnimationSource>(animator_.get());
+  cosmetics_->SetAnimationSource(animationSource_.get());
+  // The on-device mesh backend and the seam that resolves a draw item's
+  // geometry/texture handles against the asset store. On the host the backend
+  // is the null stub: the seam then drops every item (fail closed), which is
+  // the correct headless behaviour. The asset store itself is process-wide
+  // (`CosmeticAssetStore::Instance()`), so the seam borrows it directly.
+  cosmeticMeshBackend_.reset(CreateCosmeticMeshBackend());
+  if (cosmeticMeshBackend_ && cosmeticMeshBackend_->Init()) {
+    cosmeticRenderSeam_ = std::make_unique<DeviceCosmeticRenderSeam>(
+        &CosmeticAssetStore::Instance(), cosmeticMeshBackend_.get());
+    cosmetics_->SetRenderSeam(cosmeticRenderSeam_.get());
+    Log::Info("BerryClient: cosmetic mesh backend '%s' ready",
+              cosmeticMeshBackend_->name());
+  } else {
+    // No mesh backend: leave the service's seam unset rather than installing a
+    // seam that can only drop. A script still authors cosmetics; nothing draws
+    // on a headless host.
+    cosmeticMeshBackend_.reset();
+    Log::Info("BerryClient: no cosmetic mesh backend (headless); cosmetics "
+              "are authored but not drawn");
+  }
   // The local velocity source reaches the world through the same seam every
   // other read uses; the cosmetic sway and `input.velocity` both pull from it.
   velocitySource_ = std::make_unique<WorldVelocitySource>(world_, localPlayer_);
@@ -79,6 +115,7 @@ bool BerryClient::Attach(Engine& engine, const ClientConfig& cfg) {
   audio_ = std::make_unique<AudioService>();
   packets_ = std::make_unique<PacketLog>();
   intents_ = std::make_unique<IntentValidator>();
+  reads_ = std::make_unique<GameReads>();
   wsPool_ = std::make_unique<WsClientPool>();
   replayCamera_ = std::make_unique<ReplayCamera>();
   crystal_ = std::make_unique<CrystalOptimizer>();
@@ -114,6 +151,34 @@ bool BerryClient::Attach(Engine& engine, const ClientConfig& cfg) {
   // multicast socket, so nothing is opened unless the config asks for it.
   BuildLan(cfg);
 
+  // OTA signature packs load before the script: a pack's signature rows and
+  // struct layouts must be registered by the time a script asks the signature
+  // cache or a layout to resolve. Verification happens inside the loader.
+  LoadSigPacks(cfg);
+
+  // Replay guards before anything can start a playback: the capture's
+  // fingerprint and the loopback server's protocol/live checks, so a replay
+  // from another build or a live session cannot feed the game's parsers.
+  InstallReplayGuards(cfg);
+
+  // The packet-capture path: after the replay guards, so the recorder the
+  // observer feeds already carries the build fingerprint and the guards, and
+  // before the script, so a capture that a script starts this frame already has
+  // its hook live. A recording then carries the packets the client actually
+  // received, not only the entity state the seam reports.
+  BuildPacketCapture(cfg);
+
+  // Cosmetic asset data and model packs load, and the player-model hook is
+  // installed, before the script: a script that equips a pack asset this frame
+  // needs the asset's geometry handle and the pack's catalog entry to already
+  // exist, and the hook must be live before the first rendered frame resolves
+  // bones.
+  BuildCosmetics(cfg);
+
+  // Register the built-in starter assets so a fresh client has something to
+  // show. Idempotent; a second call adds nothing.
+  CosmeticRegistry::Instance().RegisterBuiltins();
+
   // Build the services view the ScriptApi binds. The replay service lives on
   // the engine (the World module feeds its capture and the engine drives its
   // review); the script-facing pointer is bound to that same instance.
@@ -147,10 +212,28 @@ bool BerryClient::Attach(Engine& engine, const ClientConfig& cfg) {
     }
   }
 
+  // Bind the sandboxed fs store to the script's own directory, so its data
+  // survives a restart. Runs after the script loads (the directory name comes
+  // from the manifest) and before the worker starts, so the first script call
+  // already sees its persisted files.
+  BindScriptData(cfg);
+
   // The worker runs the script. It is started even when no script loaded, so
   // `Tick` can post and drain uniformly.
   worker_ = std::make_unique<ScriptWorker>();
   worker_->Start();
+
+  // Run the script's on_load on the worker before any tick, so a subscription
+  // or one-time setup it registers exists before the first tick's events. A
+  // missing on_load is not an error (most scripts implement only a subset).
+  if (script_ && script_->host()) {
+    worker_->Post([this]() {
+      ThreadModel::Instance().AssertScripts();
+      ScriptHost* host = script_ ? script_->host() : nullptr;
+      if (!host || !host->loaded()) return;
+      host->RunHook(ScriptHooks::OnLoad());
+    });
+  }
 
   attached_ = true;
   Log::Info("BerryClient attached (script: %s)", script_ ? "loaded" : "none");
@@ -189,10 +272,12 @@ void BerryClient::BuildServices() {
   s.animatorSeam = animatorSeam_.get();
   s.replayCamera = replayCamera_.get();
   s.radial = radial_.get();
+  s.touch = touch_.get();
   s.crystal = crystal_.get();
   s.voice = voice_.get();
   s.discovery = discovery_.get();
   s.sync = syncChannel_.get();
+  s.reads = reads_.get();
   services_ = s;
   api_ = std::make_unique<ScriptApi>(services_);
 }
@@ -214,90 +299,368 @@ bool BerryClient::LoadScript(const ClientConfig& cfg) {
   return true;
 }
 
+void BerryClient::BindScriptData(const ClientConfig& cfg) {
+  if (cfg.scriptDataDirectory.empty() || !script_ || !script_->valid()) return;
+  // One directory per script, named from a hash of the manifest name so a
+  // name with a path separator or a dot cannot climb out of the root, and two
+  // scripts never collide on the same sandbox. The name is not the manifest
+  // name itself: that is attacker-controlled text, and a directory name must
+  // be safe by construction.
+  const std::string id = crypto::Sha256Hex(script_->manifest().name);
+  const std::string dir = cfg.scriptDataDirectory + "/" + id.substr(0, 32);
+  if (!files_->Open(dir)) {
+    // A store that cannot persist must not silently become volatile: leave it
+    // in-memory (the script gets no persistence) and say so.
+    Log::Warn("BerryClient: script data directory '%s' unavailable; "
+              "fs.* stays in-memory",
+              dir.c_str());
+    return;
+  }
+  Log::Info("BerryClient: script data bound to '%s' (%zu files, %zu bytes)",
+            dir.c_str(), files_->FileCount(), files_->TotalBytes());
+}
+
 void BerryClient::BuildLan(const ClientConfig& cfg) {
-  // Cosmetic sync: a private multicast transport carries the signed envelope.
-  // The transport is opened first; if it cannot bind, the channel is still
-  // built (so a script sees a configured-but-unreachable channel) but nothing
-  // is sent or admitted until the socket is up.
+  // Cosmetic sync: a transport carries the signed envelope to peers. Two are
+  // possible: the LAN multicast transport (same subnet) and the relay transport
+  // (the presence backend, reaching another network). Exactly one is built. The
+  // transport is opened first; if it cannot bind, the channel is still built (so
+  // a script sees a configured-but-unreachable channel) but nothing is sent or
+  // admitted until the socket is up.
   if (cfg.enableCosmeticSync) {
-    syncTransport_ = std::make_unique<LanCosmeticTransport>();
-    LanTransportConfig tcfg;
-    if (!cfg.lanIface.empty()) tcfg.iface = cfg.lanIface;
-    if (!syncTransport_->Open(tcfg)) {
-      Log::Warn("BerryClient: cosmetic-sync transport failed to open "
-                "(no multicast?); channel disabled");
-      syncTransport_.reset();
+    const bool useRelay = !cfg.syncRelayHost.empty();
+    CosmeticSyncTransport* transport = nullptr;
+    if (useRelay) {
+      syncRelay_ = std::make_unique<CosmeticRelayTransport>();
+      RelayCosmeticConfig rcfg;
+      rcfg.relayHost = cfg.syncRelayHost;
+      rcfg.relayPort = cfg.syncRelayPort;
+      rcfg.room = cfg.syncRoom.empty() ? "default" : cfg.syncRoom;
+      rcfg.roomSecret = cfg.syncRoomSecret;
+      if (!syncRelay_->Open(rcfg)) {
+        Log::Warn("BerryClient: cosmetic-sync relay failed to open "
+                  "(room secret too short or bad relay?); channel disabled");
+        syncRelay_.reset();
+      } else {
+        transport = syncRelay_.get();
+      }
     } else {
+      syncTransport_ = std::make_unique<LanCosmeticTransport>();
+      LanTransportConfig tcfg;
+      if (!cfg.lanIface.empty()) tcfg.iface = cfg.lanIface;
+      if (!syncTransport_->Open(tcfg)) {
+        Log::Warn("BerryClient: cosmetic-sync transport failed to open "
+                  "(no multicast?); channel disabled");
+        syncTransport_.reset();
+      } else {
+        transport = syncTransport_.get();
+      }
+    }
+
+    if (transport != nullptr) {
       syncChannel_ = std::make_unique<CosmeticSyncChannel>();
       syncChannel_->SetVerifyKey(cfg.syncVerifyKey);
-      syncChannel_->SetTransport(syncTransport_.get());
+      syncChannel_->SetTransport(transport);
       // Remember the publishing side: a tick re-broadcasts the loadout only
       // when it changes, and only when a self id + signing secret are set.
       syncSelfId_ = cfg.syncSelfId;
       syncSignSecret_ = cfg.syncSignSecret;
       syncUseHmac_ = cfg.syncUseHmac;
-      Log::Info("BerryClient: cosmetic-sync channel on port %u (%s)",
-                (unsigned)syncTransport_->localPort(),
+      const u16 localPort =
+          useRelay ? syncRelay_->localPort() : syncTransport_->localPort();
+      Log::Info("BerryClient: cosmetic-sync channel on port %u via %s (%s)",
+                (unsigned)localPort, useRelay ? "relay" : "multicast",
                 syncChannel_->configured() ? "verify key set"
                                            : "NO verify key; receives refused");
-      // mDNS discovery for the same LAN: publish this client so a peer learns
-      // its address and port, and browse for peers. Discovery is best-effort —
-      // a socket that cannot bind leaves it null and the sync channel still
-      // works over the multicast group.
-      discovery_ = std::make_unique<LanDiscovery>();
-      LanDiscoveryConfig dcfg;
-      if (!cfg.lanIface.empty()) dcfg.iface = cfg.lanIface;
-      if (discovery_->Open(dcfg)) {
-        const std::string instance =
-            cfg.syncSelfId.empty() ? "berry-client" : cfg.syncSelfId;
-        discovery_->Publish(instance, syncTransport_->localPort(),
-                            "sync=1");
-        discovery_->Query();
-        Log::Info("BerryClient: LAN discovery on port %u as '%s'",
-                  (unsigned)discovery_->localPort(), instance.c_str());
-      } else {
-        Log::Warn("BerryClient: LAN discovery failed to open; peers not listed");
-        discovery_.reset();
+      // mDNS discovery is LAN-only: a relay client is reached by the relay, not
+      // by a subnet peer, so discovery is not built for it.
+      if (!useRelay) {
+        discovery_ = std::make_unique<LanDiscovery>();
+        LanDiscoveryConfig dcfg;
+        if (!cfg.lanIface.empty()) dcfg.iface = cfg.lanIface;
+        if (discovery_->Open(dcfg)) {
+          const std::string instance =
+              cfg.syncSelfId.empty() ? "berry-client" : cfg.syncSelfId;
+          discovery_->Publish(instance, syncTransport_->localPort(), "sync=1");
+          discovery_->Query();
+          Log::Info("BerryClient: LAN discovery on port %u as '%s'",
+                    (unsigned)discovery_->localPort(), instance.c_str());
+        } else {
+          Log::Warn(
+              "BerryClient: LAN discovery failed to open; peers not listed");
+          discovery_.reset();
+        }
       }
     }
   }
 
-  // Voice: bind the LAN transport and hand it to the voice service. The
-  // session only starts when an id is configured; without one the transport is
-  // bound but silent.
+  // Voice: bind the authenticated, encrypted transport and hand it to the voice
+  // service. The secure transport refuses to open without a signing identity and
+  // a trust anchor, so voice never falls back to plaintext; without them it is
+  // simply disabled. The session only starts when an id is configured; without
+  // one the transport is bound but silent.
   if (cfg.enableVoice) {
-    voiceTransport_ = std::make_unique<LanVoiceTransport>();
-    VoiceTransportConfig vcfg;
-    if (!cfg.lanIface.empty()) vcfg.iface = cfg.lanIface;
-    if (!voiceTransport_->Open(vcfg)) {
-      Log::Warn("BerryClient: voice transport failed to open (no multicast?); "
-                "voice disabled");
-      voiceTransport_.reset();
-    } else {
-      voice_->SetTransport(voiceTransport_.get());
-      if (!cfg.voiceSelfId.empty()) {
-        if (!voice_->Start(cfg.voiceSelfId)) {
-          Log::Warn("BerryClient: voice session refused id '%s'",
-                    cfg.voiceSelfId.c_str());
-        }
+    VoiceIdentity voiceId;
+    if (!cfg.voiceIdentitySeed.empty()) {
+      std::string seed = cfg.voiceIdentitySeed;
+      // Accept a 64-char hex seed as well as raw 32 bytes.
+      if (seed.size() == 64 && crypto::IsHex(seed)) {
+        std::string raw;
+        if (crypto::FromHex(seed, &raw, 32)) seed = raw;
       }
-      Log::Info("BerryClient: voice transport on port %u (self '%s')",
-                (unsigned)voiceTransport_->localPort(), cfg.voiceSelfId.c_str());
+      voiceId = VoiceIdentity::FromSeed(seed);
+      if (!voiceId.valid()) {
+        Log::Warn("BerryClient: voice identity seed is not 32 bytes; "
+                  "voice disabled");
+      }
+    }
+    if (!voiceId.valid() || !cfg.voiceTrust.Valid()) {
+      Log::Warn("BerryClient: voice needs a signing identity and a trust "
+                "anchor; voice disabled (no plaintext fallback)");
+    } else if (!cfg.voiceRelayHost.empty()) {
+      // Relay media plane: reaches a peer on another network through the
+      // presence backend. The room secret keys the relay registration; the
+      // identity/anchor still authenticate and encrypt every frame end to end,
+      // so the relay stays blind. Fail closed: a relay that will not open
+      // disables voice rather than falling back to the LAN group.
+      voiceRelay_ = std::make_unique<VoiceRelayTransport>();
+      RelayVoiceConfig rcfg;
+      rcfg.relayHost = cfg.voiceRelayHost;
+      rcfg.relayPort = cfg.voiceRelayPort;
+      rcfg.room = cfg.voiceRoom.empty() ? "default" : cfg.voiceRoom;
+      rcfg.roomSecret = cfg.voiceRoomSecret;
+      if (!voiceRelay_->Open(rcfg, voiceId, cfg.voiceTrust)) {
+        Log::Warn("BerryClient: voice relay transport failed to open "
+                  "(room secret too short or bad relay?); voice disabled");
+        voiceRelay_.reset();
+      } else {
+        voice_->SetTransport(voiceRelay_.get());
+        if (!cfg.voiceSelfId.empty()) {
+          if (!voice_->Start(cfg.voiceSelfId)) {
+            Log::Warn("BerryClient: voice session refused id '%s'",
+                      cfg.voiceSelfId.c_str());
+          }
+        }
+        Log::Info("BerryClient: relay voice on port %u via %s:%u (self '%s')",
+                  (unsigned)voiceRelay_->localPort(), cfg.voiceRelayHost.c_str(),
+                  (unsigned)cfg.voiceRelayPort, cfg.voiceSelfId.c_str());
+      }
+    } else {
+      secureVoice_ = std::make_unique<SecureVoiceTransport>();
+      SecureVoiceConfig vcfg;
+      vcfg.group = cfg.voiceGroup;
+      vcfg.port = cfg.voicePort;
+      if (!cfg.lanIface.empty()) vcfg.iface = cfg.lanIface;
+      if (!secureVoice_->Open(vcfg, voiceId, cfg.voiceTrust)) {
+        Log::Warn("BerryClient: secure voice transport failed to open; "
+                  "voice disabled");
+        secureVoice_.reset();
+      } else {
+        voice_->SetTransport(secureVoice_.get());
+        if (!cfg.voiceSelfId.empty()) {
+          if (!voice_->Start(cfg.voiceSelfId)) {
+            Log::Warn("BerryClient: voice session refused id '%s'",
+                      cfg.voiceSelfId.c_str());
+          }
+        }
+        Log::Info("BerryClient: secure voice on port %u (self '%s')",
+                  (unsigned)secureVoice_->localPort(), cfg.voiceSelfId.c_str());
+      }
+    }
+  }
+}
+
+u64 BerryClient::sigPackSequenceFloor() const {
+  return sigPackLoader_ ? sigPackLoader_->sequenceFloor() : 0;
+}
+
+void BerryClient::LoadSigPacks(const ClientConfig& cfg) {
+  if (!cfg.enableSigPacks || cfg.sigpackDirectory.empty()) return;
+  // The loader verifies every pack against the anchor BEFORE parsing it, so a
+  // tampered, unsigned, expired or replayed pack never reaches the entry
+  // parser. The floor is seeded from the config so a restart cannot be rolled
+  // back onto an older pack.
+  sigPackFs_ = std::make_unique<RealScriptFileSystem>();
+  sigPackLayouts_ = std::make_unique<LayoutRegistry>();
+  sigPackLoader_ =
+      std::make_unique<SignaturePackLoader>(sigPackFs_.get(), cfg.sigpackTrust,
+                                            cfg.sigpackDirectory);
+  sigPackLoader_->SetSequenceFloor(cfg.sigpackSequenceFloor);
+  sigPackReport_ = sigPackLoader_->LoadDirectory(
+      cfg.sigpackBuild, SigCache::Instance(), sigPackLayouts_.get());
+  Log::Info("BerryClient: signature packs: %zu applied, %zu refused "
+            "(floor %llu)",
+            sigPackReport_.packsApplied, sigPackReport_.packsFailed,
+            (unsigned long long)sigPackLoader_->sequenceFloor());
+}
+
+void BerryClient::InstallReplayGuards(const ClientConfig& cfg) {
+  ReplayService& replay = engine_->Replay();
+  // The capture stamps every recording with this build's protocol version, so a
+  // replay made against another build is refused on load by the check below.
+  ReplayFingerprint fp = replay.capture().fingerprint();
+  fp.protocolVersion = cfg.protocolVersion;
+  replay.capture().SetFingerprint(fp);
+  // The service enforces the version on Load/Attach and answers the live-session
+  // probe on every start/stream, so both guards reach the server and the loader
+  // through one place rather than each call site.
+  replay.SetExpectedProtocolVersion(cfg.protocolVersion);
+  replay.SetLiveSessionProbe(cfg.liveSessionActive);
+}
+
+void BerryClient::BuildPacketCapture(const ClientConfig& cfg) {
+  // The hub and both observers are always built, so the metadata log is fed and
+  // a script can inspect capture state even when no hook is installed. The hook
+  // itself needs a resolved target and a decode ABI; without either it would
+  // capture nothing, so it is simply not installed (fail closed).
+  packetCaptureHub_ = std::make_unique<PacketCaptureHub>();
+  packetLogObserver_ = std::make_unique<PacketLogObserver>(packets_.get());
+  // Resolve names through the hub's own table so the log carries them.
+  packetLogObserver_->SetTable(&packetCaptureHub_->table());
+  // The replay payload recorder points at the engine's capture — the same
+  // instance the World module's tick feeds and the review/server read.
+  replayPacketObserver_ =
+      std::make_unique<ReplayPacketObserver>(&engine_->Replay().capture());
+  // The metadata log is registered first so a script's `packets.recent` sees a
+  // packet in the same dispatch that stores it into a replay.
+  packetCaptureHub_->AddObserver(packetLogObserver_.get());
+  packetCaptureHub_->AddObserver(replayPacketObserver_.get());
+
+  if (!cfg.packetReceiveTarget) {
+    Log::Info("BerryClient: packet capture hub ready (no receive target; "
+              "capture disabled)");
+    return;
+  }
+  if (!cfg.packetCaptureAbi.decode) {
+    Log::Warn("BerryClient: packet receive target set but no decode ABI; "
+              "packet capture disabled");
+    return;
+  }
+
+  IHook* backend = HookManager::Instance().Backend();
+  packetReceiveHook_ = std::make_unique<PacketReceiveHook>();
+  if (!packetReceiveHook_->Install(cfg.packetReceiveTarget,
+                                   cfg.packetCaptureAbi, backend,
+                                   packetCaptureHub_.get(),
+                                   PacketDir::Inbound)) {
+    Log::Warn("BerryClient: packet receive hook refused; capture disabled");
+    packetReceiveHook_.reset();
+  } else {
+    Log::Info("BerryClient: packet receive hook installed");
+  }
+
+  // The send path is opt-in: a recording needs what the client received, and
+  // the player's own input is already captured as `PlayerInput`. Installing it
+  // only on request keeps the hook count (and the risk) to what a recording
+  // needs.
+  if (cfg.captureOutboundPackets) {
+    packetSendHook_ = std::make_unique<PacketReceiveHook>();
+    if (!packetSendHook_->Install(cfg.packetReceiveTarget,
+                                  cfg.packetCaptureAbi, backend,
+                                  packetCaptureHub_.get(),
+                                  PacketDir::Outbound)) {
+      Log::Warn("BerryClient: packet send hook refused");
+      packetSendHook_.reset();
+    } else {
+      Log::Info("BerryClient: packet send hook installed");
+    }
+  }
+}
+
+void BerryClient::BuildCosmetics(const ClientConfig& cfg) {
+  // Cosmetic asset data loads first: a pack names geometry/texture handles, so
+  // the handles must exist before the pack's assets are registered (otherwise a
+  // pack asset would resolve to a retired handle and draw nothing).
+  if (!cfg.cosmeticAssetDirectory.empty()) {
+    cosmeticAssets_ = std::make_unique<CosmeticAssetLoader>(
+        fs_.get(), cfg.cosmeticAssetDirectory);
+    const auto report = cosmeticAssets_->LoadDirectory();
+    Log::Info("BerryClient: cosmetic assets: %zu meshes, %zu textures, "
+              "%zu refused%s",
+              report.meshes, report.textures, report.failed,
+              report.truncated ? " (truncated)" : "");
+  }
+
+  // Model packs register into the catalog the wardrobe reads. Loading after the
+  // assets means a pack's handles resolve; a pack that names a handle no asset
+  // supplied still registers (the asset simply draws nothing), which keeps a
+  // missing texture from discarding a whole cape.
+  if (!cfg.cosmeticPackDirectory.empty()) {
+    packs_->SetRoot(cfg.cosmeticPackDirectory);
+    const PackLoadReport report = packs_->LoadDirectory();
+    Log::Info("BerryClient: cosmetic packs: %zu loaded, %zu refused%s",
+              report.packsLoaded, report.packsFailed,
+              report.truncated ? " (truncated)" : "");
+  }
+
+  // Author the built-in clips into the animator, so the built-in cape flaps and
+  // the aura spins out of the box. A pack or a script can override a clip by
+  // name; the built-ins are added only when the name is free, so a creator's
+  // clip of the same name wins and the built-in never clobbers it.
+  RegisterBuiltinClips();
+
+  // The player-model hook is what makes the bones real: it refreshes the
+  // per-build reader's cache from the rendered pose, so the cosmetic renderer
+  // resolves bones the game actually computed. A missing target or reader
+  // leaves the skeleton source fail-closed (nothing resolves), which is the
+  // correct default for a build whose layout is unknown.
+  if (cfg.playerModelRenderTarget && cfg.playerModelBones.valid()) {
+    playerModelSkeleton_->SetReader(cfg.playerModelBones);
+    playerModelHook_ = std::make_unique<PlayerModelHook>();
+    playerModelHook_->SetReader(cfg.playerModelBones);
+    if (playerModelHook_->Install(cfg.playerModelRenderTarget,
+                                  HookManager::Instance().Backend())) {
+      Log::Info("BerryClient: player-model hook installed");
+    } else {
+      Log::Warn("BerryClient: player-model hook refused; cosmetics resolve no "
+                "bones");
+      playerModelHook_.reset();
+    }
+  } else {
+    Log::Info("BerryClient: no player-model target/reader; cosmetics resolve "
+              "no bones (fail closed)");
+  }
+}
+
+void BerryClient::RegisterBuiltinClips() {
+  if (!animator_) return;
+  // The cape's flap: the back bone lifts and rolls a little over a loop. Keys
+  // are authored at the extremes and the midpoint so the lerp reads as a slow
+  // flap rather than a triangle wave. Registered only when the name is free, so
+  // a creator pack or a script that authors `builtin.cape.flap` wins.
+  if (!animator_->hasClip("builtin.cape.flap")) {
+    if (animator_->AddClip("builtin.cape.flap", 2.0f, true)) {
+      animator_->AddKey("builtin.cape.flap", Bone::Back, 0.0f, Vec3(0, 0, 0),
+                        Vec3(0, 0, 0), 1.0f);
+      animator_->AddKey("builtin.cape.flap", Bone::Back, 1.0f, Vec3(0, 0, -0.08f),
+                        Vec3(-12.0f, 0, 4.0f), 1.0f);
+      animator_->AddKey("builtin.cape.flap", Bone::Back, 2.0f, Vec3(0, 0, 0),
+                        Vec3(0, 0, 0), 1.0f);
+    }
+  }
+  // The aura's spin: the torso bone rolls a full turn over a loop, so a
+  // billboard aura reads as a slow rotation. A one-shot would stop at the end
+  // and then hold; a loop keeps it turning.
+  if (!animator_->hasClip("builtin.aura.spin")) {
+    if (animator_->AddClip("builtin.aura.spin", 3.0f, true)) {
+      animator_->AddKey("builtin.aura.spin", Bone::Torso, 0.0f, Vec3(0, 0, 0),
+                        Vec3(0, 0, 0), 1.0f);
+      animator_->AddKey("builtin.aura.spin", Bone::Torso, 1.5f, Vec3(0, 0.05f, 0),
+                        Vec3(0, 0, 180.0f), 1.1f);
+      animator_->AddKey("builtin.aura.spin", Bone::Torso, 3.0f, Vec3(0, 0, 0),
+                        Vec3(0, 0, 360.0f), 1.0f);
     }
   }
 }
 
 void BerryClient::PollCosmeticSync() {
-  if (!syncChannel_ || !syncTransport_) return;
-  // Both halves of the channel run here, on the frame thread, so the transport
-  // is touched from exactly one thread (its counters and fragment state are not
-  // atomic). Publish first — a local change should reach peers on the same
-  // frame it happened — then drain and apply.
+  if (!syncChannel_ || (!syncTransport_ && !syncRelay_)) return;
   PublishLoadout();
   // Keep the mDNS cache fresh: drain a bounded slice, then re-query on a slow
   // interval so peers that joined after attach are found and known peers do not
   // age out of the TTL cache. Without the re-query the peer list would be
-  // correct only at attach and then decay to empty.
+  // correct only at attach and then decay to empty. A relay client has no
+  // discovery (it is reached by the relay), so this is a no-op for it.
   if (discovery_) {
     discovery_->Poll(1);
     const u64 now = NowMs();
@@ -311,17 +674,21 @@ void BerryClient::PollCosmeticSync() {
   // busy subnet, and apply each verified message. Receive runs the post-
   // signature defences (replay/rate/revoke) and the ownership gate, so a
   // forged or replayed loadout changes nothing.
-  syncTransport_->Poll(
-      [this](const std::string& message, const std::string&, u16) {
-        size_t applied = 0;
-        const CosmeticSyncResult r =
-            syncChannel_->Receive(message, cosmetics_.get(), &applied);
-        if (r != CosmeticSyncResult::Ok) {
-          Log::Debug("BerryClient: cosmetic sync refused: %s",
-                     CosmeticSyncResultName(r));
-        }
-      },
-      2);
+  const auto onMessage = [this](const std::string& message,
+                                const std::string&, u16) {
+    size_t applied = 0;
+    const CosmeticSyncResult r =
+        syncChannel_->Receive(message, cosmetics_.get(), &applied);
+    if (r != CosmeticSyncResult::Ok) {
+      Log::Debug("BerryClient: cosmetic sync refused: %s",
+                 CosmeticSyncResultName(r));
+    }
+  };
+  if (syncRelay_) {
+    syncRelay_->Poll(onMessage, 2);
+  } else {
+    syncTransport_->Poll(onMessage, 2);
+  }
 }
 
 bool BerryClient::PublishLoadout() {
@@ -358,13 +725,41 @@ void BerryClient::Detach() {
   api_.reset();
   bindings_.Clear();
   services_ = ScriptApi::Services{};
+  // Uninstall the packet hooks before the hub and the observers they dispatch
+  // into are released: the detour dereferences `hub_`, so a live hook over a
+  // freed hub would be a use-after-free on the network worker. Uninstall first
+  // (which clears the ABI and the hub pointer), then drop the observers, then
+  // the hub — the reverse of construction.
+  if (packetSendHook_) packetSendHook_->Uninstall();
+  packetSendHook_.reset();
+  if (packetReceiveHook_) packetReceiveHook_->Uninstall();
+  packetReceiveHook_.reset();
+  packetCaptureHub_.reset();
+  replayPacketObserver_.reset();
+  packetLogObserver_.reset();
   // Unbind the cosmetic seams before the owned seam objects are destroyed, so
   // the service never holds a pointer to a destroyed seam. (Its destructor does
   // not touch them, but the explicit clear keeps the ownership honest.)
   if (cosmetics_) {
     cosmetics_->SetSkeletonSource(nullptr);
     cosmetics_->SetVelocitySource(nullptr);
+    // The animation source is borrowed by the service and owns nothing, but the
+    // clear keeps the seam honest before the adapter (and its Animator) die.
+    cosmetics_->SetAnimationSource(nullptr);
+    cosmetics_->SetRenderSeam(nullptr);
+    cosmetics_->SetCameraSource(nullptr);
   }
+  // The player-model hook must be uninstalled before its detour target and the
+  // skeleton source it feeds are released, or the game would call into freed
+  // memory.
+  if (playerModelHook_) playerModelHook_->Uninstall();
+  playerModelHook_.reset();
+  playerModelSkeleton_.reset();
+  animationSource_.reset();
+  cosmeticRenderSeam_.reset();
+  cosmeticMeshBackend_.reset();
+  cosmeticAssets_.reset();
+  cosmeticCamera_.reset();
   // Stop the backend after the renderer is no longer presenting, then release
   // the seam before the backend it points at.
   renderSeam_.reset();
@@ -378,11 +773,14 @@ void BerryClient::Detach() {
     voice_->Stop();
     voice_->SetTransport(nullptr);
   }
+  secureVoice_.reset();
+  voiceRelay_.reset();
   voiceTransport_.reset();
   discovery_.reset();
   if (syncChannel_) syncChannel_->SetTransport(nullptr);
   syncChannel_.reset();
   syncTransport_.reset();
+  syncRelay_.reset();
   Log::Info("BerryClient detached");
 }
 
@@ -405,6 +803,13 @@ void BerryClient::RunTickOnWorker(GameTick tick) {
     async_->Pump(*host, tick);
   } else {
     host->RunHook(ScriptHooks::OnTick());
+  }
+  // Deliver any persistent-subscription events the engine queued since the last
+  // tick. Runs after on_tick so a hook that subscribes this tick is live for
+  // the next one, and it is a no-op when nothing subscribed. A host the tick
+  // faulted is unloaded, so this returns immediately.
+  if (host->loaded() && !host->suspended()) {
+    api_->bus().Pump(*host);
   }
 }
 
@@ -449,6 +854,21 @@ bool BerryClient::ReloadScript() {
   const ReloadResult r = script_->Reload(false);
   if (r.attempted && !r.reloaded && !r.unchanged) {
     lastScriptError_ = r.error.message;
+  }
+  if (r.reloaded) {
+    // A new revision may have renamed or dropped the functions old
+    // subscriptions point at, so the previous revision's subscriptions are
+    // dropped and the fresh host re-registers through on_load. The reload
+    // swaps the host on the worker's timeline; posting the on_load keeps the
+    // re-registration on the worker with every other script call.
+    const std::string name = script_->manifest().name;
+    worker_->Post([this, name]() {
+      ThreadModel::Instance().AssertScripts();
+      api_->bus().OffAll(name);
+      ScriptHost* host = script_ ? script_->host() : nullptr;
+      if (!host || !host->loaded()) return;
+      host->RunHook(ScriptHooks::OnLoad());
+    });
   }
   return r.reloaded;
 }

@@ -17,7 +17,7 @@ DEPFLAGS := -MMD -MP
 # The injectable shared library (android/linux target build).
 # Compile with -fPIC and -fvisibility=hidden; only BERRY_API symbols escape.
 SHARED_CXXFLAGS ?= -std=c++17 -O2 -fPIC -fvisibility=hidden -DBERRY_BUILD_SHARED -Iinclude -Ithird_party/ed25519 $(MBEDTLS_INCLUDES) $(LZ4_INCLUDES) $(LUAU_INCLUDES)
-SHARED_LDFLAGS  ?= -shared -pthread -ldl
+SHARED_LDFLAGS  ?= -shared -pthread -ldl -Wl,--version-script=tools/berry.exports.map
 SHARED_NAME     ?= libBerryAPI.so
 
 include tools/sources.mk
@@ -144,7 +144,7 @@ check-samples: samples/sample_hitmarker.o
 	@echo "== samples compile OK =="
 	@rm -f samples/sample_hitmarker.o
 
-test: idl-check check-signer check-sources $(TEST_BINS) build/$(SHARED_NAME) check-samples
+test: idl-check check-signer check-sigpack-signer check-sources check-android-sources check-mbedtls check-run $(TEST_BINS) build/$(SHARED_NAME) check-samples
 	@for b in $(TEST_BINS); do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
@@ -248,6 +248,58 @@ build/$(SHARED_NAME): $(SHARED_OBJ)
 lib: build/$(SHARED_NAME)
 	@echo "== built $(SHARED_NAME) =="
 
+# The standalone voice-relay host (tools/berry-relay.cpp). It links the portable
+# core, so it can host the UDP forwarder with no game and no Android. Run
+# `make berry-relay` then `./build/berry-relay --help`.
+RELAY_OBJ := build/tools/berry-relay.o
+build/tools/berry-relay.o: tools/berry-relay.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Itools -c $< -o $@
+
+build/berry-relay: $(RELAY_OBJ) $(CORE_OBJ)
+	$(CXX) $(LDFLAGS) $(RELAY_OBJ) $(CORE_OBJ) -ldl -o $@
+
+.PHONY: berry-relay
+berry-relay: build/berry-relay
+	@echo "== built build/berry-relay =="
+
+# The developer CLI (tools/berry-run.cpp): `test`, `run` and `replay` modes over
+# the portable core. It links the shipping (client-only) mbedTLS objects, so it
+# is a plain host binary with no game and no Android. Run `make berry-run` then
+# `./build/berry-run --help`.
+RUN_OBJ := build/tools/berry-run.o
+build/tools/berry-run.o: tools/berry-run.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Itools -c $< -o $@
+
+build/berry-run: $(RUN_OBJ) $(CORE_OBJ)
+	$(CXX) $(LDFLAGS) $(RUN_OBJ) $(CORE_OBJ) -ldl -o $@
+
+.PHONY: berry-run
+berry-run: build/berry-run
+	@echo "== built build/berry-run =="
+
+# End-to-end check for the developer CLI. It drives the real binary through
+# every mode and asserts the exit code, so the argument parsing, the verified
+# loader path, the test runner and the bounded replay reader are all exercised
+# as a user would exercise them. A refusal (wrong anchor, tampered manifest,
+# malformed replay) must exit non-zero, which is what makes the fail-closed
+# claims in docs/RUN.md testable.
+.PHONY: check-run
+check-run: build/berry-run
+	@tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	./build/berry-run version >/dev/null || { echo "check-run: version failed"; exit 1; }; \
+	./build/berry-run --help >/dev/null || { echo "check-run: --help failed"; exit 1; }; \
+	printf 'return { test_ok = function() test.eq(1, 1) end,\n test_bad = function() test.eq(1, 2) end }\n' > "$$tmp/spec.luau"; \
+	./build/berry-run test "$$tmp/spec.luau" >/dev/null 2>&1 && { echo "check-run: a failing suite exited 0"; exit 1; }; \
+	./build/berry-run test "$$tmp/spec.luau" --filter test_ok >/dev/null 2>&1 || { echo "check-run: a passing filter exited non-zero"; exit 1; }; \
+	./build/berry-run replay tests/fixtures/berry-run/sample.replay >/dev/null 2>&1 || { echo "check-run: replay read failed"; exit 1; }; \
+	./build/berry-run replay tests/fixtures/berry-run/sample.replay --expect-build 1 >/dev/null 2>&1 && { echo "check-run: a wrong fingerprint was accepted"; exit 1; }; \
+	head -c 64 /dev/urandom > "$$tmp/bad.replay"; \
+	./build/berry-run replay "$$tmp/bad.replay" >/dev/null 2>&1 && { echo "check-run: a garbage replay was accepted"; exit 1; }; \
+	echo "== berry-run CLI OK =="
+
 # IDL codegen: one description generates the C++ binding table, the TS/Luau
 # type definitions and the API docs. `idl-check` fails when they drift.
 .PHONY: idl idl-check
@@ -264,6 +316,13 @@ idl-check:
 check-signer:
 	@python3 tools/check-signer.py
 
+# The signature-pack signer and the C++ pack verifier must agree on the
+# canonical signed payload byte for byte, or every published pack would
+# be rejected at load time.
+.PHONY: check-sigpack-signer
+check-sigpack-signer:
+	@python3 tools/check-sigpack-signer.py
+
 # Every .cpp under core/ and util/ must be in tools/sources.mk, so the host
 # build and the Android build cannot silently drift apart.
 .PHONY: check-sources
@@ -277,6 +336,35 @@ check-sources:
 	done; \
 	[ $$missing -eq 0 ] || exit 1; \
 	echo "== source manifest complete =="
+
+# The Android build reads the same tools/sources.mk as the host build, so the
+# two cannot drift; this target proves it, and proves the device-only units and
+# the new subsystems are actually in the list. It needs no NDK (it uses
+# build-android.sh --sources-only), so it runs as part of `make test`. A full
+# `tools/build-android.sh <NDK>` is what produces the .so; that needs an NDK and
+# is left to the release job.
+.PHONY: check-android-sources
+check-android-sources:
+	@python3 tools/check-android-sources.py
+
+# Keeps the vendored mbedTLS honest: the version pin (script, build_info.h,
+# PROVENANCE.md), the trimmed client-only config, and the compiled-vs-excluded
+# unit set. `--upstream` additionally asks GitHub for the newest 3.6 release;
+# that needs the network, so it is not part of `make test`.
+.PHONY: check-mbedtls
+check-mbedtls:
+	@python3 tools/check-mbedtls.py
+
+.PHONY: check-mbedtls-upstream
+check-mbedtls-upstream:
+	@python3 tools/check-mbedtls.py --upstream
+
+# Convenience: build the on-device .so when an NDK is present. Not part of
+# `make test` (it needs the NDK and a cross toolchain); `make check-android`
+# builds it and reports the artefact.
+.PHONY: check-android
+check-android:
+	@bash tools/build-android.sh && ls -l build-android/*/libBerryAPI.so
 
 clean:
 	rm -rf build core/events/*.o core/hooks/*.o core/modules/*.o core/lifecycle/*.o \

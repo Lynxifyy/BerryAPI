@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <time.h>
+#include<sys/time.h>
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <unistd.h>
@@ -73,8 +74,8 @@ void Logger::logv(LogLevel level, const char *in_fmt, va_list ap) {
     static void (*os_log_with_args)(void *oslog, char type, const char *format, va_list args, void *ret_addr) = 0;
     if (!os_log_with_args)
       os_log_with_args = (__typeof(os_log_with_args))dlsym((void *)-2, "os_log_with_args");
-    // os_log_with_args(&_os_log_default, 0x10, fmt_buffer, ap, (void *)&os_log_with_args);
-    syslog(LOG_ALERT, out_buffer);
+    os_log_with_args(&_os_log_default, 0x10, fmt_buffer, ap, (void *)&os_log_with_args);
+    // syslog(LOG_INFO, out_buffer);
 
     static int _logDescriptor = 0;
     if (0 && _logDescriptor == 0) {

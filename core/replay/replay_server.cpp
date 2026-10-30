@@ -39,6 +39,8 @@ const char* ReplayServerErrorName(ReplayServerError e) {
     case ReplayServerError::Ok: return "ok";
     case ReplayServerError::NotLoopback: return "not_loopback";
     case ReplayServerError::BindFailed: return "bind_failed";
+    case ReplayServerError::LiveSessionActive: return "live_session_active";
+    case ReplayServerError::BadProtocolVersion: return "bad_protocol_version";
     case ReplayServerError::AlreadyRunning: return "already_running";
   }
   return "unknown";
@@ -53,7 +55,16 @@ ReplayServerError ReplayServer::Start(const ReplayServerConfig& cfg) {
   // The whole safety story: a replay is served to loopback or not at all, so a
   // recorded session can never leave the device.
   if (!IsLoopbackHost(cfg.host)) return ReplayServerError::NotLoopback;
+  // A replay must never run alongside a live session. Starting playback while
+  // connected to a real server would feed recorded packets into that session,
+  // so it is refused up front rather than left to a caller's discipline.
+  if (cfg.liveSessionActive && cfg.liveSessionActive()) {
+    // Remember the probe even on the refusal, so `liveBlocked()` explains why.
+    liveProbe_ = cfg.liveSessionActive;
+    return ReplayServerError::LiveSessionActive;
+  }
   cfg_ = cfg;
+  liveProbe_ = cfg.liveSessionActive;
   if (!sock_.Bind(cfg.port, cfg.host.c_str())) {
     return ReplayServerError::BindFailed;
   }
@@ -87,11 +98,24 @@ ReplayServerConfig ReplayServer::config() const {
   return cfg_;
 }
 
-void ReplayServer::Attach(const ReplayFile* file) {
+ReplayServerError ReplayServer::Attach(const ReplayFile* file) {
   std::lock_guard<std::mutex> lk(mutex_);
+  // A replay is only meaningful to the parsers of the build it was recorded
+  // against. Refuse a protocol mismatch before it can displace a good replay,
+  // so a wrong-version file never reaches the client's packet handlers.
+  if (file && !file->sections.empty() && cfg_.expectedProtocolVersion != 0 &&
+      file->fingerprint.protocolVersion != cfg_.expectedProtocolVersion) {
+    return ReplayServerError::BadProtocolVersion;
+  }
   file_ = (file && !file->sections.empty()) ? file : nullptr;
   client_ = Client{};
   packetsSent_ = 0;
+  return ReplayServerError::Ok;
+}
+
+bool ReplayServer::liveBlocked() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return liveProbe_ && liveProbe_();
 }
 
 bool ReplayServer::SendFrameLocked(const std::string& frame) {
@@ -126,6 +150,14 @@ void ReplayServer::RewindToLocked(u64 tick) {
 
 void ReplayServer::StreamLocked() {
   if (!client_.connected || paused_) return;
+  // The guard is re-checked on every stream, not only at Start: a live session
+  // can begin mid-playback (the player joins a server while a replay is
+  // scrubbing), and from that instant recorded packets must not reach the live
+  // one. Drop the client so the stream cannot resume into a live session.
+  if (liveProbe_ && liveProbe_()) {
+    client_ = Client{};
+    return;
+  }
   if (!file_) {
     if (!client_.sentEnd) {
       std::string frame(kEnd, 4);
@@ -210,6 +242,12 @@ void ReplayServer::HandleDatagramLocked(const std::string& data,
 size_t ReplayServer::Pump(int timeoutMs) {
   std::lock_guard<std::mutex> lk(mutex_);
   if (!running_) return 0;
+  // While a live session is active the server does nothing at all: it neither
+  // accepts a join nor streams, so no recorded byte can reach a live session.
+  if (liveProbe_ && liveProbe_()) {
+    client_ = Client{};
+    return 0;
+  }
 
   size_t processed = 0;
   // Drain the client's datagrams first, so a join or seek is applied before

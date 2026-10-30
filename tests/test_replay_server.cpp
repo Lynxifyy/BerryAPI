@@ -335,6 +335,95 @@ void TestSeekWithoutClient() {
   srv.Stop();
 }
 
+void TestProtocolVersionGate() {
+  // A replay carries the protocol version it was recorded against. A server
+  // pinned to a different version must refuse it — feeding another version's
+  // packet ids to this build's parsers would be undefined — and must keep the
+  // replay it already had.
+  ReplayFile good = BuildReplay(4);
+  good.fingerprint.protocolVersion = 700;
+  ReplayFile other = BuildReplay(4);
+  other.fingerprint.protocolVersion = 999;
+
+  ReplayServer srv;
+  ReplayServerConfig cfg;
+  cfg.port = 0;
+  cfg.expectedProtocolVersion = 700;
+  CHECK(srv.Start(cfg) == ReplayServerError::Ok);
+  CHECK(srv.Attach(&good) == ReplayServerError::Ok);
+  // A wrong-version replay is refused, and the good one stays attached: the
+  // refusal must not displace a working replay.
+  CHECK(srv.Attach(&other) == ReplayServerError::BadProtocolVersion);
+  CHECK(srv.config().expectedProtocolVersion == 700);
+
+  // A null/empty attach always succeeds (it clears), regardless of the pin.
+  CHECK(srv.Attach(nullptr) == ReplayServerError::Ok);
+  // With the check disabled (0) any version is accepted.
+  ReplayServer srv2;
+  ReplayServerConfig cfg2;
+  cfg2.port = 0;
+  cfg2.expectedProtocolVersion = 0;
+  CHECK(srv2.Start(cfg2) == ReplayServerError::Ok);
+  CHECK(srv2.Attach(&other) == ReplayServerError::Ok);
+  srv2.Stop();
+  srv.Stop();
+}
+
+void TestLiveSessionGuard() {
+  // A live session must block playback entirely: the server refuses to start,
+  // and a server already running stops the moment a live session appears, so a
+  // recorded packet can never reach a live one.
+  bool live = false;
+  ReplayServer srv;
+  ReplayServerConfig cfg;
+  cfg.port = 0;
+  cfg.liveSessionActive = [&live]() { return live; };
+
+  // Starting while live is refused.
+  live = true;
+  CHECK(srv.Start(cfg) == ReplayServerError::LiveSessionActive);
+  CHECK(!srv.running());
+  CHECK(srv.liveBlocked());
+
+  // Not live: it starts and streams normally.
+  live = false;
+  CHECK(srv.Start(cfg) == ReplayServerError::Ok);
+  CHECK(srv.running());
+  CHECK(!srv.liveBlocked());
+
+  ReplayFile f = BuildReplay(10);
+  CHECK(srv.Attach(&f) == ReplayServerError::Ok);
+  const u16 port = srv.port();
+
+  TestClient cli;
+  CHECK(cli.Open());
+  CHECK(cli.Join("127.0.0.1", port));
+  bool gotAccept = false;
+  for (int i = 0; i < 50 && !gotAccept; ++i) {
+    srv.Pump(5);
+    std::string frame;
+    if (cli.Recv(&frame, 20) > 0 && frame.size() >= 8 &&
+        frame.compare(0, 4, "BRAC") == 0) {
+      gotAccept = true;
+    }
+  }
+  CHECK(gotAccept);
+  CHECK(srv.clientConnected());
+
+  // A live session begins mid-playback. The very next pump must stop serving:
+  // the client is dropped and no further packet is streamed.
+  live = true;
+  srv.Pump(2);
+  CHECK(!srv.clientConnected());
+  CHECK(srv.liveBlocked());
+  // Even a join while live is ignored.
+  CHECK(cli.Join("127.0.0.1", port));
+  srv.Pump(2);
+  CHECK(!srv.clientConnected());
+  live = false;
+  srv.Stop();
+}
+
 }  // namespace
 
 int main() {
@@ -345,6 +434,8 @@ int main() {
   TestEmptyReplaySendsEnd();
   TestUnknownFrameDropped();
   TestSeekWithoutClient();
+  TestProtocolVersionGate();
+  TestLiveSessionGuard();
 
   if (g_fail == 0) {
     printf("test_replay_server: ALL OK\n");

@@ -8,6 +8,7 @@
 #include "berry/sigscan.h"
 #include "berry/event.h"
 #include "berry/module.h"
+#include "berry/voice_crypto.h"
 #include <atomic>
 #include <memory>
 #include <string>
@@ -44,6 +45,12 @@ struct EngineConfig {
   bool devMode = false;
   /// The directory the client loads a script from, or empty for none.
   std::string scriptDirectory;
+  /// The Ed25519 public key (64 hex chars) a script manifest's signature is
+  /// verified against. Empty means "no anchor", and since the loader requires a
+  /// signature outside dev mode, an empty anchor then refuses every manifest —
+  /// which is the correct fail-closed default. Production sets this to the
+  /// publisher's key.
+  std::string scriptAnchorKey;
   /// The local player's runtime entity id (0 = unknown).
   u64 localPlayerId = 0;
   /// LAN cosmetic-sync channel (opt-in). Off by default.
@@ -52,11 +59,37 @@ struct EngineConfig {
   std::string syncSelfId;      // empty = verify/apply only, never publish
   std::string syncSignSecret;  // empty = never publish
   bool syncUseHmac = false;
+  /// Presence-backend media plane for cosmetic sync. When `syncRelayHost` is
+  /// set the sync transport is a UDP relay transport instead of the LAN
+  /// multicast transport, so two clients on different networks reach each other.
+  std::string syncRelayHost;    // numeric IPv4; empty = LAN multicast
+  u16 syncRelayPort = 47826;
+  std::string syncRoom;         // relay room name
+  std::string syncRoomSecret;   // raw room secret (>= 16 bytes)
   /// LAN proximity voice (opt-in). Off by default.
   bool enableVoice = false;
   std::string voiceSelfId;     // empty = transport bound but session stopped
+  /// The Ed25519 seed (raw or hex) that identifies this client on the voice
+  /// channel. Empty disables voice: there is no plaintext fallback.
+  std::string voiceIdentitySeed;
+  /// What a peer's voice announce is verified against. The default accepts
+  /// nothing, so voice stays off until an embedder sets it.
+  VoiceTrustAnchor voiceTrust;
+  /// The voice multicast group and port (defaults are a different group from
+  /// the cosmetic channel).
+  std::string voiceGroup = "239.66.0.2";
+  u16 voicePort = 47824;
+  /// Presence-backend media plane for voice. When `voiceRelayHost` is set the
+  /// voice transport is a UDP relay transport instead of the LAN multicast
+  /// transport, so two clients on different networks hear each other.
+  std::string voiceRelayHost;    // numeric IPv4; empty = LAN multicast
+  u16 voiceRelayPort = 47825;
+  std::string voiceRoom;         // relay room name
+  std::string voiceRoomSecret;   // raw room secret (>= 16 bytes)
   /// The interface the LAN channels join and send on ("" = system route).
   std::string lanIface;
+  /// Root directory for the sandboxed `fs.*` store. Empty keeps it in-memory.
+  std::string scriptDataDirectory;
 };
 
 class BERRY_API Engine {

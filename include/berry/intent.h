@@ -64,6 +64,12 @@ enum class IntentKind : u32 {
   // Client-side audio.
   Sound,
 
+  // Client-side advisory: the crystal-placement advisor. Read-only, and
+  // classified client-side because it only ranks spots the client already knows
+  // and never places a block or sends a packet. It has its own group so a
+  // server that bans the crystal-advisor feature can disable it wholesale.
+  CrystalAdvise,
+
   // World writes: denied by classification, always.
   PlaceBlock,
   BreakBlock,
@@ -93,6 +99,7 @@ enum class IntentGroup : u32 {
   Audio = 1 << 3,     // Sound
   Cosmetic = 1 << 4,  // Cosmetic
   World = 1 << 5,     // every WorldWrite intent
+  Crystal = 1 << 6,   // CrystalAdvise
 };
 
 const char* IntentKindName(IntentKind k);

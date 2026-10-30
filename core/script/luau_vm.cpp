@@ -45,6 +45,7 @@
 #include "lualib.h"
 #include "luacode.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -282,6 +283,42 @@ class LuauVm final : public IScriptVm {
     const bool ok = PushFunction(t, name);
     lua_pop(L_, 1);   // drop the scratch coroutine
     return ok;
+  }
+
+  // Enumerates the exports table: a top-level function is its own name, and a
+  // top-level table contributes "ns.fn" for each function it holds (one level
+  // deep, matching PushFunction's lookup). Keys are sorted so the listing is
+  // deterministic across runs and builds.
+  std::vector<std::string> FunctionNames() const override {
+    std::vector<std::string> names;
+    if (!loaded_ || !L_) return names;
+    lua_State* t = lua_newthread(L_);
+    lua_getref(t, exportsRef_);            // exports table at index 1
+    if (!lua_istable(t, -1)) {
+      lua_pop(L_, 1);
+      return names;
+    }
+    lua_pushnil(t);
+    while (lua_next(t, 1) != 0) {
+      // key at -2, value at -1
+      const std::string key = ToString(t, -2);
+      if (lua_isfunction(t, -1) && !key.empty()) {
+        names.push_back(key);
+      } else if (lua_istable(t, -1) && !key.empty()) {
+        lua_pushnil(t);
+        while (lua_next(t, -2) != 0) {
+          const std::string fn = ToString(t, -2);
+          if (lua_isfunction(t, -1) && !fn.empty()) {
+            names.push_back(key + "." + fn);
+          }
+          lua_pop(t, 1);   // drop value, keep key
+        }
+      }
+      lua_pop(t, 1);       // drop value, keep key
+    }
+    lua_pop(L_, 1);        // drop the scratch coroutine
+    std::sort(names.begin(), names.end());
+    return names;
   }
 
   //-- invocation -----------------------------------------------------------

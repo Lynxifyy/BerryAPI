@@ -1274,6 +1274,209 @@ static void TestDrawRemoteGated() {
   CosmeticOwnership::Instance().Clear();
 }
 
+// A per-asset custom animation: an asset that names a clip is moved by the
+// animation source's pose, composed on top of its static offset. The service
+// samples the clip at the animation clock scaled by the asset's speed, and an
+// unknown clip (or no source) fails closed to a rigid placement.
+static void TestAssetCustomAnimation() {
+  FreshRegistry();
+  Berry::Test::ShimSkeleton skel;
+  Berry::Test::CaptureCosmeticSeam seam;
+  Berry::Test::ShimAnimation anim;
+  CosmeticService svc;
+  svc.SetSkeletonSource(&skel);
+  svc.SetRenderSeam(&seam);
+
+  // Register an asset that names a clip and a speed.
+  CosmeticAsset cape;
+  cape.id = "t.anim.cape";
+  cape.slot = CosmeticSlot::Back;
+  cape.offset = Vec3(0, 0, -0.1f);
+  cape.trail = 0.0f;                 // isolate the animation from the sway
+  cape.animation = "cape.flap";
+  cape.animationSpeed = 2.0f;
+  CosmeticError err = CosmeticError::Ok;
+  CHECK(CosmeticRegistry::Instance().Register(cape, &err));
+  svc.SetAnimationSource(&anim);
+  CHECK(svc.Equip("t.anim.cape"));
+
+  // The animation source reports a bone-local flap: +0.3 on y, +30 degrees roll.
+  anim.pose.offset = Vec3(0, 0.3f, 0);
+  anim.pose.rotation = Vec3(0, 0, 30.0f);
+  anim.pose.scale = 1.0f;
+  anim.pose.valid = true;
+
+  const EntityId e{300, 1};
+  // Advance the clock to 0.5 s. The clip is sampled at 0.5 * speed(2) = 1.0 s.
+  svc.AdvanceAnimations(0.5f);
+  CHECK(Near(svc.animationTime(), 0.5f));
+  seam.Clear();
+  CHECK(svc.PresentLocal(e) == 1);
+  CHECK(anim.lastClip == "cape.flap");
+  CHECK(Near(anim.lastTime, 1.0f));
+  // The animation's y offset is added before the bone's 90-degree yaw rotates
+  // it, so a +y offset stays +y. Base offset (0,0,-0.1) yaws to (-0.1,0,0).
+  // The shim rig sits at x=10 plus a 0.01*revision jitter (revision 1 here).
+  CHECK(Near(seam.items[0].position.x, 9.91f));
+  CHECK(Near(seam.items[0].position.y, 64.3f));
+  // The animation's roll adds to the bone yaw (90) on y.
+  CHECK(Near(seam.items[0].rotation.z, 30.0f));
+  CHECK(Near(seam.items[0].rotation.y, 90.0f));
+  CHECK(seam.items[0].animation == "cape.flap");
+  CHECK(Near(seam.items[0].animationTime, 1.0f));
+
+  // A source that cannot sample (unknown clip) places the asset rigidly, and
+  // the draw item carries no animation name.
+  anim.enabled = false;
+  seam.Clear();
+  CHECK(svc.PresentLocal(e) == 1);
+  CHECK(Near(seam.items[0].position.y, 64.0f));
+  CHECK(Near(seam.items[0].rotation.z, 0.0f));
+  CHECK(seam.items[0].animation.empty());
+  CHECK(Near(seam.items[0].animationTime, 0.0f));
+
+  // With no animation source at all, the asset is rigid too (fail closed).
+  anim.enabled = true;
+  svc.SetAnimationSource(nullptr);
+  seam.Clear();
+  CHECK(svc.PresentLocal(e) == 1);
+  CHECK(Near(seam.items[0].position.y, 64.0f));
+  CHECK(seam.items[0].animation.empty());
+}
+
+// An animated loadout is never cached: the pose changes with the clock while
+// the skeleton revision is unchanged, so a cached entry would freeze it. An
+// all-rigid loadout is cached as before.
+static void TestAnimatedResolveNotCached() {
+  FreshRegistry();
+  Berry::Test::ShimSkeleton skel;
+  Berry::Test::CaptureCosmeticSeam seam;
+  Berry::Test::ShimAnimation anim;
+  CosmeticService svc;
+  svc.SetSkeletonSource(&skel);
+  svc.SetRenderSeam(&seam);
+  svc.SetAnimationSource(&anim);
+
+  CosmeticAsset cape;
+  cape.id = "t.anim.spin";
+  cape.slot = CosmeticSlot::Back;
+  cape.animation = "aura.spin";
+  CosmeticError err = CosmeticError::Ok;
+  CHECK(CosmeticRegistry::Instance().Register(cape, &err));
+  CHECK(svc.Equip("t.anim.spin"));
+
+  anim.pose.valid = true;
+  anim.pose.offset = Vec3(0, 0.1f, 0);
+
+  const EntityId e{301, 2};
+  // The skeleton reports a stable revision, so a rigid asset would hit. An
+  // animated one must not: each resolve recomposes and stores no entry.
+  svc.AdvanceAnimations(0.1f);
+  CHECK(svc.PresentLocal(e) == 1);
+  CHECK(svc.resolveCacheSize() == 0);
+  CHECK(svc.stats().cacheMisses == 1);
+  svc.AdvanceAnimations(0.1f);
+  CHECK(svc.PresentLocal(e) == 1);
+  CHECK(svc.resolveCacheSize() == 0);
+  CHECK(svc.stats().cacheHits == 0);
+
+  // Unequip the animated asset and equip a rigid one (the hat names no clip):
+  // the resolve is cacheable again and a second present hits.
+  svc.Unequip(CosmeticSlot::Back);
+  CHECK(svc.Equip("builtin.hat.top"));
+  seam.Clear();
+  CHECK(svc.PresentLocal(e) == 1);
+  CHECK(svc.resolveCacheSize() == 1);
+  seam.Clear();
+  CHECK(svc.PresentLocal(e) == 1);
+  CHECK(svc.stats().cacheHits == 1);
+}
+
+// The AnimatorAnimationSource adapter samples a named clip from the animator,
+// independent of what is playing, so a per-asset clip and a script's playback
+// never fight. An unknown clip fails closed.
+static void TestAnimatorAnimationSource() {
+  Animator anim;
+  CHECK(anim.AddClip("flap", 1.0f, true));
+  CHECK(anim.AddKey("flap", Bone::Back, 0.0f, Vec3(0, 0, 0), Vec3(0, 0, 0), 1.0f));
+  CHECK(anim.AddKey("flap", Bone::Back, 1.0f, Vec3(0, 0.2f, 0), Vec3(0, 0, 45.0f),
+                    1.5f));
+  AnimatorAnimationSource src(&anim);
+
+  CosmeticAnimPose pose;
+  // Halfway through a looping clip: the lerp midpoint.
+  CHECK(src.Sample("flap", Bone::Back, 0.5f, &pose));
+  CHECK(pose.valid);
+  CHECK(Near(pose.offset.y, 0.1f));
+  CHECK(Near(pose.rotation.z, 22.5f));
+  CHECK(Near(pose.scale, 1.25f));
+
+  // A looping clip wraps: t=1.5 samples the same as t=0.5.
+  CosmeticAnimPose wrapped;
+  CHECK(src.Sample("flap", Bone::Back, 1.5f, &wrapped));
+  CHECK(Near(wrapped.offset.y, 0.1f));
+
+  // Unknown clip, unknown bone and an empty name all fail closed.
+  CosmeticAnimPose bad;
+  CHECK(!src.Sample("nope", Bone::Back, 0.5f, &bad));
+  CHECK(!bad.valid);
+  CHECK(!src.Sample("flap", Bone::Head, 0.5f, &bad));
+  CHECK(!src.Sample("", Bone::Back, 0.5f, &bad));
+
+  // Sampling a clip never disturbs the animator's own playback state.
+  CHECK(anim.Play("flap"));
+  anim.Advance(0.25f);
+  CHECK(src.Sample("flap", Bone::Back, 0.9f, &pose));
+  CHECK(Near(anim.time(), 0.25f));
+}
+
+// A pack may name a clip and a speed; a bad name (over-long) or a bad speed is
+// refused wholesale, and a valid one round-trips through the registry.
+static void TestPackAnimationFields() {
+  CosmeticRegistry::Instance().Clear();
+  const std::string good = R"({
+    "format": 1, "name": "anim-pack", "author": "t",
+    "assets": [
+      {"id": "p.cape", "slot": "back", "animation": "flap",
+       "animation_speed": 2.5}
+    ]
+  })";
+  std::vector<CosmeticAsset> assets;
+  std::string name;
+  std::string detail;
+  CHECK(CosmeticPackLoader::ParsePack(good, &assets, &name, &detail) ==
+        PackError::Ok);
+  CHECK(assets.size() == 1);
+  CHECK(assets[0].animation == "flap");
+  CHECK(Near(assets[0].animationSpeed, 2.5f));
+
+  // A non-positive speed is refused.
+  const std::string badSpeed = R"({
+    "format": 1, "name": "p", "author": "t",
+    "assets": [{"id": "p.cape", "slot": "back", "animation_speed": 0}]
+  })";
+  CHECK(CosmeticPackLoader::ParsePack(badSpeed, &assets) ==
+        PackError::BadAsset);
+
+  // An over-long animation name is refused.
+  std::string longName(65, 'a');
+  const std::string badName = R"({
+    "format": 1, "name": "p", "author": "t",
+    "assets": [{"id": "p.cape", "slot": "back", "animation": ")" +
+                              longName + R"("}]
+  })";
+  CHECK(CosmeticPackLoader::ParsePack(badName, &assets) == PackError::BadAsset);
+
+  // The registry refuses a non-finite speed directly.
+  CosmeticAsset a;
+  a.id = "r.anim";
+  a.slot = CosmeticSlot::Back;
+  a.animationSpeed = std::nanf("");
+  CosmeticError err = CosmeticError::Ok;
+  CHECK(!CosmeticRegistry::Instance().Register(a, &err));
+  CHECK(err == CosmeticError::BadAnimation);
+}
+
 int main() {
   TestRegistryFailClosed();
   TestBuiltins();
@@ -1302,6 +1505,10 @@ int main() {
   TestVelocityBinding();
   TestDrawThroughRenderer();
   TestDrawRemoteGated();
+  TestAssetCustomAnimation();
+  TestAnimatedResolveNotCached();
+  TestAnimatorAnimationSource();
+  TestPackAnimationFields();
   if (g_fail == 0) printf("test_cosmetic: ALL OK\n");
   return g_fail;
 }

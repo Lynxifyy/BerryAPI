@@ -1,6 +1,7 @@
 // Cosmetics data model: registry, loadout/wardrobe and ownership.
 // See include/berry/cosmetic.h for the rules.
 #include "berry/cosmetic.h"
+#include "berry/cosmetic_assets.h"
 #include "berry/logger.h"
 
 #include <algorithm>
@@ -86,6 +87,7 @@ const char* CosmeticErrorName(CosmeticError e) {
     case CosmeticError::NotOwned: return "asset not owned";
     case CosmeticError::BadTransform: return "non-finite transform";
     case CosmeticError::BadScale: return "scale must be positive";
+    case CosmeticError::BadAnimation: return "bad animation name or speed";
     case CosmeticError::SlotOccupied: return "slot already occupied";
     case CosmeticError::TooManyAssets: return "registry full";
   }
@@ -106,6 +108,16 @@ bool ValidCosmeticTransform(const CosmeticAsset& a, CosmeticError* out) {
   }
   if (!std::isfinite(a.trail) || a.trail < 0.0f || a.trail > 1.0f) {
     if (out) *out = CosmeticError::BadTransform;
+    return false;
+  }
+  // A custom-animation name is bounded; a bad speed would make the clip jump
+  // (non-finite) or run backwards (non-positive), so both are refused.
+  if (a.animation.size() > CosmeticAsset::kMaxAnimationNameLen) {
+    if (out) *out = CosmeticError::BadAnimation;
+    return false;
+  }
+  if (!std::isfinite(a.animationSpeed) || a.animationSpeed <= 0.0f) {
+    if (out) *out = CosmeticError::BadAnimation;
     return false;
   }
   if (out) *out = CosmeticError::Ok;
@@ -235,19 +247,59 @@ size_t CosmeticRegistry::RegisterBuiltins() {
   // duplicate-id rule makes a second call a no-op for each asset. Capes and
   // wings carry a trail factor so they sway with motion; rigid pieces (a hat,
   // an aura) do not.
+  //
+  // Each built-in gets REAL geometry and a solid-colour texture from the asset
+  // store's procedural builders, so a built-in draws on a fresh client instead
+  // of resolving to a null handle and rendering nothing. The handles are cached
+  // per shape/colour, so the four built-ins share at most three meshes and four
+  // textures.
+  CosmeticAssetStore& store = CosmeticAssetStore::Instance();
+  const GeometryId plane = store.BuiltinGeometry(BuiltinShape::Plane);
+  const GeometryId box = store.BuiltinGeometry(BuiltinShape::Box);
+  const GeometryId quad = store.BuiltinGeometry(BuiltinShape::Quad);
+  const TextureId red = store.BuiltinTexture(0xd23a3aff);
+  const TextureId gold = store.BuiltinTexture(0xf0d060ff);
+  const TextureId white = store.BuiltinTexture(0xffffffff);
+  const TextureId violet = store.BuiltinTexture(0x8a5cf0ff);
+
+  // Named-field construction rather than a positional aggregate: the asset
+  // struct grows (it gained `animation`/`animationSpeed`), and a positional
+  // initializer silently mis-assigns when a field is inserted. Each built-in
+  // names a clip the client registers (`builtin.cape.flap`, `builtin.aura.spin`)
+  // so it animates out of the box; on a host with no clips registered the name
+  // resolves to nothing and the asset is placed rigidly (fail closed).
+  auto make = [](const char* id, CosmeticSlot slot, Bone bone, GeometryId geo,
+                 TextureId tex, const Vec3& off, f32 trail, const char* anim,
+                 f32 animSpeed, std::vector<std::string> tags) {
+    CosmeticAsset a;
+    a.id = id;
+    a.slot = slot;
+    a.bone = bone;
+    a.geometry = geo;
+    a.texture = tex;
+    a.offset = off;
+    a.rotation = Vec3(0, 0, 0);
+    a.scale = 1.0f;
+    a.tint = Vec3(1, 1, 1);
+    a.trail = trail;
+    a.pack = "builtin";
+    a.author = "BerryAPI";
+    a.animation = anim ? anim : "";
+    a.animationSpeed = animSpeed;
+    a.tags = std::move(tags);
+    return a;
+  };
+
   const CosmeticAsset builtins[] = {
-      {"builtin.cape.red", CosmeticSlot::Back, Bone::Back, 1001, 2001,
-       Vec3(0, 0, -0.1f), Vec3(0, 0, 0), 1.0f, Vec3(1, 1, 1), "builtin",
-       "BerryAPI", {"cape"}, 0.8f},
-      {"builtin.wings.angel", CosmeticSlot::Shoulders, Bone::Torso, 1002, 2002,
-       Vec3(0, 0.4f, -0.1f), Vec3(0, 0, 0), 1.0f, Vec3(1, 1, 1), "builtin",
-       "BerryAPI", {"wings"}, 0.6f},
-      {"builtin.hat.top", CosmeticSlot::Head, Bone::Head, 1003, 2003,
-       Vec3(0, 0.25f, 0), Vec3(0, 0, 0), 1.0f, Vec3(1, 1, 1), "builtin",
-       "BerryAPI", {"hat"}, 0.0f},
-      {"builtin.aura.spark", CosmeticSlot::Body, Bone::Torso, 1004, 2004,
-       Vec3(0, 0.5f, 0), Vec3(0, 0, 0), 1.0f, Vec3(1, 1, 1), "builtin",
-       "BerryAPI", {"aura"}, 0.2f},
+      make("builtin.cape.red", CosmeticSlot::Back, Bone::Back, plane, red,
+           Vec3(0, 0, -0.1f), 0.8f, "builtin.cape.flap", 1.0f, {"cape"}),
+      make("builtin.wings.angel", CosmeticSlot::Shoulders, Bone::Torso, plane,
+           white, Vec3(0, 0.4f, -0.1f), 0.6f, "builtin.cape.flap", 0.8f,
+           {"wings"}),
+      make("builtin.hat.top", CosmeticSlot::Head, Bone::Head, box, gold,
+           Vec3(0, 0.25f, 0), 0.0f, nullptr, 1.0f, {"hat"}),
+      make("builtin.aura.spark", CosmeticSlot::Body, Bone::Torso, quad, violet,
+           Vec3(0, 0.5f, 0), 0.2f, "builtin.aura.spin", 1.0f, {"aura"}),
   };
   size_t added = 0;
   for (const auto& a : builtins) {
@@ -434,6 +486,14 @@ CosmeticTrailPose CosmeticTrailingPose(f32 trail, const Vec3& velocity,
 CosmeticDrawItem ComposeAttach(const CosmeticAsset& asset,
                                const CosmeticBoneTransform& bone,
                                EntityId entity) {
+  CosmeticAnimPose none;
+  return ComposeAttach(asset, bone, none, entity);
+}
+
+CosmeticDrawItem ComposeAttach(const CosmeticAsset& asset,
+                               const CosmeticBoneTransform& bone,
+                               const CosmeticAnimPose& anim,
+                               EntityId entity) {
   CosmeticDrawItem item;
   item.assetId = asset.id;
   item.slot = asset.slot;
@@ -447,7 +507,20 @@ CosmeticDrawItem ComposeAttach(const CosmeticAsset& asset,
   // cape stays behind the back as the player turns.
   const f32 yaw = bone.rotation.y * Mathf::DEG2RAD;
   const f32 c = std::cos(yaw), s = std::sin(yaw);
-  const Vec3 off = asset.offset * bone.scale;
+
+  // The custom-animation offset, when one applies, is a bone-local displacement:
+  // scale it by the bone's scale and rotate it by the bone's yaw exactly like
+  // the static offset, so a clip authored for a bone composes the same way the
+  // asset does. Its rotation and scale add to the static values.
+  Vec3 staticOffset = asset.offset;
+  Vec3 animRotation;
+  f32 animScale = 1.0f;
+  if (anim.valid) {
+    staticOffset = staticOffset + anim.offset;
+    animRotation = anim.rotation;
+    animScale = anim.scale;
+  }
+  const Vec3 off = staticOffset * bone.scale;
   const Vec3 rotated(off.x * c + off.z * s, off.y, -off.x * s + off.z * c);
 
   // Slack assets lag and lean with the player's motion, so a cape is not welded
@@ -457,18 +530,47 @@ CosmeticDrawItem ComposeAttach(const CosmeticAsset& asset,
       CosmeticTrailingPose(asset.trail, bone.velocity, bone.rotation);
 
   item.position = bone.position + rotated + trail.offset;
-  item.rotation = Vec3(bone.rotation.x + asset.rotation.x + trail.rotation.x,
-                       bone.rotation.y + asset.rotation.y + trail.rotation.y,
-                       bone.rotation.z + asset.rotation.z + trail.rotation.z);
-  item.scale = bone.scale * asset.scale;
+  item.rotation = Vec3(bone.rotation.x + asset.rotation.x + animRotation.x +
+                           trail.rotation.x,
+                       bone.rotation.y + asset.rotation.y + animRotation.y +
+                           trail.rotation.y,
+                       bone.rotation.z + asset.rotation.z + animRotation.z +
+                           trail.rotation.z);
+  item.scale = bone.scale * asset.scale * animScale;
   item.tint = asset.tint;
   item.velocity = trail.velocity;
+  if (anim.valid) item.animation = asset.animation;
   return item;
 }
 
 //----------------------------------------------------------------------------
 // CosmeticService
 //----------------------------------------------------------------------------
+
+namespace {
+
+/// Opens the seam's frame with the current camera, or a no-op when no camera
+/// source is bound or it reports none. Factored out so every present path
+/// brackets its submissions identically.
+void OpenSeamFrame(CosmeticRenderSeam* seam, CosmeticCameraSource* camera,
+                   bool* opened) {
+  *opened = false;
+  if (!seam) return;
+  CameraState cam;
+  if (camera && camera->Camera(&cam)) {
+    // The surface size comes from the camera snapshot (the same projection the
+    // overlay uses), so a seam never has to ask the renderer separately.
+    seam->BeginFrame(cam, Vec2(cam.width, cam.height));
+  } else {
+    // No camera: open with an invalid one so the seam knows this is a real
+    // present that simply cannot project, rather than skipping the frame.
+    CameraState none;
+    seam->BeginFrame(none, Vec2(0, 0));
+  }
+  *opened = true;
+}
+
+}  // namespace
 
 CosmeticLoadout CosmeticService::localLoadout() const {
   std::lock_guard<std::mutex> lk(mutex_);
@@ -567,6 +669,10 @@ std::vector<CosmeticDrawItem> CosmeticService::ResolveLocked(
   // did not report its own motion, so a skeleton seam that only knows bone
   // positions still produces trailing sway.
   const Vec3 velocity = LocalVelocity();
+  // The custom-animation clock, read once: every animated asset on this entity
+  // samples against the same instant, so a cape and its aura stay in phase.
+  const f32 animTime = animClock_.load();
+  const CosmeticAnimationSource* anim = animationSource_;
   for (const auto& asset : loadout.Resolved()) {
     CosmeticBoneTransform bone;
     if (!skel->BoneTransform(entity, asset.ResolvedBone(), &bone) ||
@@ -579,7 +685,17 @@ std::vector<CosmeticDrawItem> CosmeticService::ResolveLocked(
         bone.velocity.z == 0) {
       bone.velocity = velocity;
     }
-    items.push_back(ComposeAttach(asset, bone, entity));
+    // A named clip, when a source can sample it, animates the asset on its own
+    // bone: a flapping cape or a spinning aura. An unknown clip (or no source)
+    // yields an invalid pose, and the asset is placed rigidly — fail closed.
+    CosmeticAnimPose pose;
+    if (anim && !asset.animation.empty()) {
+      const f32 t = animTime * asset.animationSpeed;
+      anim->Sample(asset.animation, asset.ResolvedBone(), t, &pose);
+    }
+    CosmeticDrawItem item = ComposeAttach(asset, bone, pose, entity);
+    item.animationTime = pose.valid ? animTime * asset.animationSpeed : 0.0f;
+    items.push_back(std::move(item));
   }
   return items;
 }
@@ -593,6 +709,22 @@ std::vector<CosmeticDrawItem> CosmeticService::Resolve(
   stats_.skippedNoBone += skipped;
   if (hit) ++stats_.cacheHits; else ++stats_.cacheMisses;
   return items;
+}
+
+void CosmeticService::AdvanceAnimations(f32 dtSeconds) {
+  if (!std::isfinite(dtSeconds) || dtSeconds < 0.0f) return;
+  animClock_.store(animClock_.load() + dtSeconds);
+}
+
+bool CosmeticService::AnimationAppliesTo(const CosmeticLoadout& loadout) const {
+  if (!animationSource_) return false;
+  // A loadout's resolved assets are the registry's own rows; only an asset that
+  // names a clip can move on its own. The registry is immutable during a
+  // resolve, so this reads no shared mutable state.
+  for (const auto& asset : loadout.Resolved()) {
+    if (!asset.animation.empty()) return true;
+  }
+  return false;
 }
 
 void CosmeticService::EvictLruLocked() const {
@@ -636,8 +768,14 @@ std::vector<CosmeticDrawItem> CosmeticService::ResolveWithCache(
   // not report its own motion, so it is part of the cache identity: if the
   // player sped up or slowed down, the sway changed and the entry is stale.
   const Vec3 velocity = LocalVelocity();
+  // A custom-animation clock advances every frame, so an entity whose loadout
+  // carries ANY animated asset produces a different pose each resolve. Such a
+  // resolve is never cached: the revision would be unchanged while the pose
+  // moved, and reusing it would freeze the animation. Only an all-rigid loadout
+  // is cacheable.
+  const bool animated = AnimationAppliesTo(loadout);
   u64 revision = 0;
-  const bool haveRevision = skel->PoseRevision(entity, &revision);
+  const bool haveRevision = !animated && skel->PoseRevision(entity, &revision);
   if (haveRevision) {
     std::lock_guard<std::mutex> lk(cacheMutex_);
     auto it = resolveCache_.find(key);
@@ -684,6 +822,7 @@ size_t CosmeticService::PresentLocal(EntityId localPlayer) {
   // seam callback must not run while the script worker waits on this mutex.
   CosmeticSkeletonSource* skel = skeleton_;
   CosmeticRenderSeam* seam = seam_;
+  CosmeticCameraSource* camera = cameraSource_;
   if (!seam || !skel) return 0;
   CosmeticLoadout snapshot;
   {
@@ -694,7 +833,10 @@ size_t CosmeticService::PresentLocal(EntityId localPlayer) {
   u64 skipped = 0;
   bool hit = false;
   const auto items = ResolveWithCache(localPlayer, snapshot, skel, &skipped, &hit);
+  bool opened = false;
+  OpenSeamFrame(seam, camera, &opened);
   for (const auto& item : items) seam->SubmitGeometry(item);
+  if (opened) seam->EndFrame();
   {
     std::lock_guard<std::mutex> lk(mutex_);
     stats_.submitted += items.size();
@@ -708,6 +850,7 @@ size_t CosmeticService::PresentRemote(const std::string& playerId,
                                       EntityId entity) {
   CosmeticSkeletonSource* skel = skeleton_;
   CosmeticRenderSeam* seam = seam_;
+  CosmeticCameraSource* camera = cameraSource_;
   if (!seam || !skel) return 0;
   CosmeticLoadout snapshot;
   {
@@ -720,7 +863,10 @@ size_t CosmeticService::PresentRemote(const std::string& playerId,
   u64 skipped = 0;
   bool hit = false;
   const auto items = ResolveWithCache(entity, snapshot, skel, &skipped, &hit);
+  bool opened = false;
+  OpenSeamFrame(seam, camera, &opened);
   for (const auto& item : items) seam->SubmitGeometry(item);
+  if (opened) seam->EndFrame();
   {
     std::lock_guard<std::mutex> lk(mutex_);
     stats_.submitted += items.size();

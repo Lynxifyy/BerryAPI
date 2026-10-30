@@ -36,6 +36,7 @@
 #include "berry/animator.h"
 #include "berry/replay_camera.h"
 #include "berry/radial.h"
+#include "berry/touch.h"
 #include "berry/crystal.h"
 #include "berry/voice.h"
 #include "berry/cosmetic.h"
@@ -43,6 +44,7 @@
 #include "berry/lan_discovery.h"
 #include "berry/event.h"
 #include "berry/fs.h"
+#include "berry/gamereads.h"
 #include "berry/hud.h"
 #include "berry/input.h"
 #include "berry/intent.h"
@@ -53,6 +55,7 @@
 #include "berry/package.h"
 #include "berry/render.h"
 #include "berry/script.h"
+#include "berry/script_bus.h"
 #include "berry/scriptmod.h"
 #include "berry/session_recorder.h"
 #include "berry/replay_service.h"
@@ -204,6 +207,10 @@ class BERRY_API ScriptApi {
     /// Client-side radial (pie) menu. Null makes the `radial.*` bindings fail
     /// closed and the frame hook skip the menu.
     RadialMenu* radial = nullptr;
+    /// Client-side touch, gesture and on-screen button service. Null makes the
+    /// `touch.*` bindings fail closed (edits report false, reads are inert)
+    /// and the frame hook skip the button draw.
+    TouchService* touch = nullptr;
     /// Client-side crystal-placement advisor. Null makes the `crystal.*`
     /// bindings fail closed (an analysis recommends nothing) and the tick hook
     /// skip the advisory overlay. It needs `world` for the entity list the
@@ -224,6 +231,11 @@ class BERRY_API ScriptApi {
     /// configured=false. The channel verifies every inbound loadout, so the
     /// stats it exposes are counts of what it accepted and refused.
     CosmeticSyncChannel* sync = nullptr;
+    /// Read-only game reads: the local player's own inventory, the server it is
+    /// connected to, the chat it was sent and the screen it is drawing. Null
+    /// makes the `inventory.*`/`server.*`/`chat.*`/`screen.*` bindings fail
+    /// closed (empty reads), which is the same shape an unbound seam produces.
+    GameReads* reads = nullptr;
   };
 
   ScriptApi();
@@ -263,6 +275,12 @@ class BERRY_API ScriptApi {
   RenderCommandQueue& queue() { return queue_; }
   const RenderCommandQueue& queue() const { return queue_; }
 
+  /// The script event bus. The client pumps it on the script worker (see
+  /// `ScriptEventBus::Pump`) between hooks, so a persistent `Events.on`
+  /// handler runs on the worker like every other script callback.
+  ScriptEventBus& bus() { return bus_; }
+  const ScriptEventBus& bus() const { return bus_; }
+
   //--- introspection (tests) ------------------------------------------------
   /// True when the binding `name` is installed.
   bool installed(const std::string& name) const;
@@ -291,6 +309,13 @@ class BERRY_API ScriptApi {
   void SetWidgetId(u64 handle, WidgetId id);
   bool ResolveWidgetId(u64 handle, WidgetId* out);
 
+  /// True when the active server policy allows a client-side intent. An unbound
+  /// validator is permissive (the policy layer is opt-in); a bound one gates, so
+  /// a profile that disables a group genuinely disables the action.
+  bool IntentAllows(IntentKind kind) const {
+    return !services_.intents || services_.intents->Allowed(kind);
+  }
+
   Services services_;
   RenderCommandQueue queue_;
   std::vector<std::string> installed_;
@@ -303,6 +328,11 @@ class BERRY_API ScriptApi {
   // Why the last replay_mod.load failed, for the script to read back.
   mutable std::mutex replayErrorMutex_;
   std::string lastReplayError_;
+
+  // The script event bus: persistent subscriptions and their bounded delivery
+  // queue. One per ScriptApi, so a subscription is scoped to the script the
+  // api serves.
+  ScriptEventBus bus_;
 
   // Published by the render thread, read by the script thread.
   std::atomic<f32> frameMs_{0.0f};
@@ -343,6 +373,10 @@ class BERRY_API ScriptApi {
   u64 lastAnimatorMs_ = 0;
   /// Frame clock for replay-camera playback, kept separate for the same reason.
   u64 lastReplayMs_ = 0;
+  /// Frame clock for the cosmetic per-asset animation, kept separate so a
+  /// custom clip (a flapping cape) advances at the real frame delta even when
+  /// no replay camera is active.
+  u64 lastCosmeticAnimMs_ = 0;
   /// Frame clock for the radial menu's open/close animation, kept separate for
   /// the same reason.
   u64 lastRadialMs_ = 0;

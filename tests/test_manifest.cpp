@@ -120,6 +120,31 @@ static void TestCapabilities() {
   CHECK(a.Covers(need));
   CHECK(!need.Covers(a));
   CHECK(a.ToModuleMask() == (kCapWorld | kCapCombat));
+
+  // The crystal advisor has its own grant, separate from combat: a script that
+  // asks for combat does not thereby get the advisor, and vice versa.
+  CHECK(IsGrantableKind(CapKind::Crystal));
+  CHECK(CapKindFromName("crystal") == CapKind::Crystal);
+  CHECK(std::string(CapKindName(CapKind::Crystal)) == "crystal");
+  CapabilitySet crystal;
+  CHECK(crystal.Add("crystal"));
+  CHECK(crystal.CoversCap([] { Capability c; c.kind = CapKind::Crystal; return c; }()));
+  CapabilitySet combat;
+  CHECK(combat.Add("combat"));
+  CHECK(!combat.CoversCap([] { Capability c; c.kind = CapKind::Crystal; return c; }()));
+  CHECK(!crystal.CoversCap([] { Capability c; c.kind = CapKind::Combat; return c; }()));
+
+  // The read-only game reads (inventory/server/chat/screen) are their own
+  // grant, separate from world and combat: a script that asks for the world
+  // does not thereby get the inventory, and vice versa.
+  CHECK(IsGrantableKind(CapKind::GameReads));
+  CHECK(CapKindFromName("gamereads") == CapKind::GameReads);
+  CHECK(std::string(CapKindName(CapKind::GameReads)) == "gamereads");
+  CapabilitySet reads;
+  CHECK(reads.Add("gamereads"));
+  CHECK(reads.CoversCap([] { Capability c; c.kind = CapKind::GameReads; return c; }()));
+  CHECK(!a.CoversCap([] { Capability c; c.kind = CapKind::GameReads; return c; }()));
+  CHECK(!reads.CoversCap([] { Capability c; c.kind = CapKind::World; return c; }()));
 }
 
 static const char* kManifestJson =
@@ -442,6 +467,113 @@ static void TestEd25519Manifest() {
   CHECK(err == ManifestError::BadSignature);
 }
 
+//----------------------------------------------------------------------------
+// Script API versioning + deprecation policy (Phase 17).
+//----------------------------------------------------------------------------
+
+static void TestApiVersionParse() {
+  // A declared requirement is read and validated.
+  ScriptManifest m;
+  ManifestError err = ManifestError::Ok;
+  std::string msg;
+  CHECK(ScriptManifest::Parse(
+      "{\"name\":\"a\",\"version\":\"1.0.0\",\"entry\":\"m\","
+      "\"api_version\":\"1.2.0\",\"capabilities\":[\"render\"]}",
+      &m, &err, &msg));
+  CHECK(err == ManifestError::Ok);
+  CHECK(m.apiVersion == "1.2.0");
+
+  // Absent api_version means "no requirement" (pre-versioning manifests).
+  ScriptManifest noApi;
+  CHECK(ScriptManifest::Parse(kManifestJson, &noApi, &err, &msg));
+  CHECK(noApi.apiVersion.empty());
+
+  // A malformed requirement fails closed rather than reading as "no
+  // requirement": a typo must not silently disable the compatibility check.
+  ScriptManifest bad;
+  CHECK(!ScriptManifest::Parse(
+      "{\"name\":\"a\",\"version\":\"1.0.0\",\"entry\":\"m\","
+      "\"api_version\":\"1.2\",\"capabilities\":[\"render\"]}",
+      &bad, &err, &msg));
+  CHECK(err == ManifestError::BadApiVersion);
+
+  // A non-string api_version is rejected.
+  CHECK(!ScriptManifest::Parse(
+      "{\"name\":\"a\",\"version\":\"1.0.0\",\"entry\":\"m\","
+      "\"api_version\":7,\"capabilities\":[\"render\"]}",
+      &bad, &err, &msg));
+  CHECK(err == ManifestError::BadApiVersion);
+
+  // A leading `v` and build metadata are tolerated, as SemVer::Parse does.
+  ScriptManifest loose;
+  CHECK(ScriptManifest::Parse(
+      "{\"name\":\"a\",\"version\":\"1.0.0\",\"entry\":\"m\","
+      "\"api_version\":\"v1.0.0+ci.5\",\"capabilities\":[\"render\"]}",
+      &loose, &err, &msg));
+  CHECK(err == ManifestError::Ok);
+  CHECK(loose.apiVersion == "v1.0.0+ci.5");
+}
+
+static void TestApiVersionSatisfaction() {
+  // No requirement is always satisfied.
+  CHECK(ScriptManifest::ApiVersionSatisfied("", "1.0.0"));
+  // Equal, older and newer requirements behave per the SemVer total order.
+  CHECK(ScriptManifest::ApiVersionSatisfied("1.0.0", "1.0.0"));
+  CHECK(ScriptManifest::ApiVersionSatisfied("0.9.0", "1.0.0"));
+  CHECK(ScriptManifest::ApiVersionSatisfied("1.0.0", "1.2.0"));
+  CHECK(!ScriptManifest::ApiVersionSatisfied("1.1.0", "1.0.0"));
+  CHECK(!ScriptManifest::ApiVersionSatisfied("2.0.0", "1.9.9"));
+  // A pre-release requirement is satisfied by its release.
+  CHECK(ScriptManifest::ApiVersionSatisfied("1.0.0-rc.1", "1.0.0"));
+  // A malformed requirement on either side fails closed.
+  CHECK(!ScriptManifest::ApiVersionSatisfied("banana", "1.0.0"));
+  CHECK(!ScriptManifest::ApiVersionSatisfied("1.0.0", "not-a-version"));
+  // The build's own version must satisfy itself.
+  CHECK(ScriptManifest::ApiVersionSatisfied(ScriptManifest::BuildApiVersion(),
+                                            ScriptManifest::BuildApiVersion()));
+  CHECK(std::string(ScriptManifest::BuildApiVersion()) != "");
+}
+
+static void TestApiVersionIsSigned() {
+  std::string seed, pub, sec;
+  CHECK(crypto::FromHex(kRfcSeed1, &seed, 32));
+  CHECK(crypto::Ed25519KeypairFromSeed(seed, &pub, &sec));
+  const std::string pubHex = crypto::ToHexLower(pub);
+
+  ScriptManifest m;
+  ManifestError err = ManifestError::Ok;
+  CHECK(ScriptManifest::Parse(
+      "{\"name\":\"a\",\"version\":\"1.0.0\",\"entry\":\"m\","
+      "\"author\":\"Lynxifyy\",\"api_version\":\"1.0.0\","
+      "\"capabilities\":[\"render\"]}",
+      &m, &err, nullptr));
+  m.sourceSha256 = ScriptManifest::SourceHash("x");
+  CHECK(m.SignEd25519(sec));
+  CHECK(m.VerifyEd25519(pubHex, &err));
+
+  // The requirement is part of the payload: raising it invalidates the hash and
+  // therefore the signature, so a script cannot silently demand a newer API.
+  ScriptManifest raised = m;
+  raised.apiVersion = "9.9.9";
+  CHECK(raised.ComputeHash() != m.ComputeHash());
+  CHECK(!raised.VerifyEd25519(pubHex, &err));
+  CHECK(err == ManifestError::HashMismatch);
+
+  // Dropping the requirement also changes the payload (it is a signed field).
+  ScriptManifest dropped = m;
+  dropped.apiVersion.clear();
+  CHECK(dropped.ComputeHash() != m.ComputeHash());
+  CHECK(!dropped.VerifyEd25519(pubHex, &err));
+  CHECK(err == ManifestError::HashMismatch);
+
+  // A manifest that never declared a requirement keeps its pre-versioning
+  // payload byte-for-byte, so an already-published signature still verifies.
+  ScriptManifest legacy;
+  CHECK(ScriptManifest::Parse(kManifestJson, &legacy, &err, nullptr));
+  legacy.sourceSha256 = ScriptManifest::SourceHash("x");
+  CHECK(legacy.CanonicalPayload().find("api_version=") == std::string::npos);
+}
+
 static void TestTrustAnchor() {
   std::string seed, pub, sec;
   CHECK(crypto::FromHex(kRfcSeed1, &seed, 32));
@@ -525,6 +657,9 @@ int main() {
   TestStore();
   TestEd25519Vectors();
   TestEd25519Manifest();
+  TestApiVersionParse();
+  TestApiVersionSatisfaction();
+  TestApiVersionIsSigned();
   TestTrustAnchor();
   TestStoreRequiresVerifiedSource();
   if (g_fail == 0) printf("test_manifest: ALL OK\n");

@@ -523,7 +523,8 @@ void ReplayCapture::CaptureTick(u64 tick, LevelSeam& seam,
 }
 
 bool ReplayCapture::CapturePacket(PacketDir dir, u32 id,
-                                  const std::string& payload, u64 tick) {
+                                  const std::string& payload, u64 tick,
+                                  ReplayRecordKind kind) {
   std::lock_guard<std::mutex> lk(mutex_);
   if (state_ != CaptureState::Recording && state_ != CaptureState::Throttled) {
     return false;
@@ -542,7 +543,11 @@ bool ReplayCapture::CapturePacket(PacketDir dir, u32 id,
   pending_.endTick = std::max(pending_.endTick, tick);
   ReplayRecord r;
   r.tick = tick;
-  r.kind = ReplayRecordKind::Packet;
+  // A chunk/block packet is stored under its own kind so the loopback server
+  // and a consumer can route it without re-parsing the id; everything else is
+  // a plain packet.
+  r.kind = (kind == ReplayRecordKind::Chunk) ? ReplayRecordKind::Chunk
+                                             : ReplayRecordKind::Packet;
   r.tag = id;
   r.dir = dir == PacketDir::Outbound ? 1 : 0;
   r.payload = payload;

@@ -40,6 +40,7 @@ const char* LoadErrorName(LoadError e) {
     case LoadError::SourceHashMissing: return "source-hash-missing";
     case LoadError::NotApproved: return "not-approved";
     case LoadError::NoCapabilities: return "no-capabilities";
+    case LoadError::ApiVersionUnsupported: return "api-version-unsupported";
     case LoadError::HostLoadFailed: return "host-load-failed";
     case LoadError::AlreadyLoaded: return "already-loaded";
   }
@@ -191,6 +192,18 @@ bool VerifyManifestAndSource(const ScriptLoaderConfig& config,
   std::string msg;
   if (!ScriptManifest::Parse(manifestJson, &manifest, &merr, &msg)) {
     return fail(LoadError::ManifestInvalid, merr, msg);
+  }
+
+  // The api_version gate runs before the signature check: a manifest that
+  // asks for a newer surface is refused for that reason, and the reason is
+  // reported even when the manifest is also unsigned (a development manifest
+  // must still not load onto a build that cannot run it).
+  if (config.enforceApiVersion &&
+      !ScriptManifest::ApiVersionSatisfied(manifest.apiVersion,
+                                           ScriptManifest::BuildApiVersion())) {
+    return fail(LoadError::ApiVersionUnsupported, ManifestError::Ok,
+                "script requires script API " + manifest.apiVersion +
+                    ", this build implements " + ScriptManifest::BuildApiVersion());
   }
 
   // The source binding is what makes a signature cover the code and not just

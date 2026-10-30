@@ -2,6 +2,7 @@
 // capability-gated binding registry, and the VM-facing convenience paths.
 #include "berry/script.h"
 #include "berry/event.h"     // NowNs
+#include "berry/generated_bindings.h"  // api::IsBindingDeprecated (IDL source of truth)
 #include "berry/logger.h"
 #include "berry/thread.h"
 
@@ -232,6 +233,16 @@ ScriptValue ScriptBindings::Invoke(ScriptContext& ctx, const std::string& name,
       if (denied) *denied = true;
       return ScriptValue::Nil();
     }
+    // Deprecation notice, once per script per binding. The gate is the one
+    // path every native call takes, so the warning cannot be missed by a
+    // caller that reaches a binding through a different route, and it is
+    // emitted only for a call that got past the capability gate.
+    if (api::IsBindingDeprecated(name) && ctx.NoteDeprecatedUse(name)) {
+      const api::BindingSpec* spec = api::FindBindingSpec(name);
+      Log::Warn("script '%s' called deprecated binding '%s': %s",
+                ctx.scriptName().c_str(), name.c_str(),
+                spec && spec->deprecated ? spec->deprecated : "(no advice)");
+    }
     if (!e.second.fn) {
       if (ok) *ok = true;
       return ScriptValue::Nil();
@@ -275,6 +286,14 @@ bool ScriptContext::GetScratch(const std::string& key, ScriptValue* out) const {
     }
   }
   return false;
+}
+
+bool ScriptContext::NoteDeprecatedUse(const std::string& binding) {
+  for (const auto& seen : deprecatedUses_) {
+    if (seen == binding) return false;
+  }
+  deprecatedUses_.push_back(binding);
+  return true;
 }
 
 //----------------------------------------------------------------------------

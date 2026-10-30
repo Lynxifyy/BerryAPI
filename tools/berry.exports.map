@@ -1,0 +1,23 @@
+/* Symbol export map for libBerryAPI.so.
+ *
+ * The library is injected into the game process, so its dynamic symbol table
+ * must not leak the vendored C dependencies (mbedTLS, LZ4, ed25519) or the
+ * Luau VM: a default-visibility `LZ4_compress` or `mbedtls_*` would either
+ * interpose the game's own copy or be interposed by it, and a symbol the game
+ * already defines could be bound to ours by accident. `-fvisibility=hidden`
+ * only covers symbols the compiler emits; the vendored C is compiled by
+ * translation units whose symbols are still default-visible at the ELF level,
+ * so the link needs an explicit map.
+ *
+ * Two groups are exported:
+ *   BERRY_*    the C ABI (include/berry/export.h, Inject/Detach/Version/...).
+ *   Berry::*   the C++ surface a device adapter links against.
+ * Everything else - vendored C, Luau, internal helpers - is local.
+ */
+{
+  global:
+    BERRY_*;
+    _ZN5Berry*;
+  local:
+    *;
+};
