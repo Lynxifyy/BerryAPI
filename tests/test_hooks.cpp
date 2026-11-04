@@ -1,15 +1,18 @@
 // Host tests for the x86-64 shim hotpatch backend.
 //
 // The shim overwrites the first >=5 bytes of a function with `jmp rel32` and
-// relocates the overwritten whole instructions into a trampoline. Two failure
-// modes are catastrophic and are pinned here with hand-assembled code (so the
-// test does not depend on what the compiler emits):
+// relocates the overwritten whole instructions into a trampoline. The failure
+// modes that matter are pinned here with hand-assembled code (so the test does
+// not depend on what the compiler emits):
 //
 //   * A prologue whose rel32 field is not the last thing in its instruction
 //     (`cmp dword [rip+x], imm8`) must be rebased against the instruction end,
-//     not the field end (bug 1), or the trampoline reads the wrong address.
+//     not the field end, or the trampoline reads the wrong address (bug 1).
 //   * The prologue walk must stop at a terminal instruction (bug 3), or a patch
 //     overruns a short function into its neighbour.
+//   * A branch from inside the overwritten span into its middle is refused
+//     (bug 4).
+//   * Unpatch must not clobber a prologue that no longer holds our jump (bug 9).
 //
 // The target, the detour and the RIP-referenced global all live in one RWX page
 // so every `jmp rel32` and every RIP displacement fits in 32 bits — exactly the
@@ -94,6 +97,16 @@ int main() {
     CHECK(BERRY_ShimPatchInPlace(fn, page.detour()) == nullptr);
   }
 
+  // --- bug 4: a branch from the span into its own middle is refused ------
+  {
+    CodePage page;
+    CHECK(page.ok());
+    // jmp rel32 with disp = -4: from offset 5 back to offset 1, which is inside
+    // the five-byte span the patch would overwrite.
+    u8* fn = page.Emit({0xE9, 0xFC, 0xFF, 0xFF, 0xFF, 0x90, 0x90});
+    CHECK(BERRY_ShimPatchInPlace(fn, page.detour()) == nullptr);
+  }
+
   // --- a normal prologue installs, the detour fires, the trampoline calls
   //     the original ------------------------------------------------------
   {
@@ -109,14 +122,36 @@ int main() {
     int (*patched)() = (int (*)())fn;
     CHECK(patched() == 42);                       // detour is live
     CHECK(((int (*)())tramp)() == 1);             // trampoline runs the original
+
+    // Diagnostics: the hook is listed.
+    BERRY_ShimHookInfo info[4];
+    int n = BERRY_ShimListHooks(info, 4);
+    CHECK(n == 1);
+    CHECK(n == 1 && info[0].target == (void*)fn);
+    CHECK(n == 1 && info[0].trampoline == (void*)tramp);
+
     CHECK(BERRY_ShimUnpatch(fn) == 0);
     CHECK(orig() == 1);                           // restored
+    CHECK(BERRY_ShimListHooks(info, 4) == 0);     // nothing left
     // A re-install works; a second install on a live target is refused; a
     // second unpatch reports "not hooked".
     CHECK(BERRY_ShimPatchInPlace(fn, page.detour()) != nullptr);
     CHECK(BERRY_ShimPatchInPlace(fn, page.detour()) == nullptr);
     CHECK(BERRY_ShimUnpatch(fn) == 0);
     CHECK(BERRY_ShimUnpatch(fn) == -1);
+  }
+
+  // --- bug 9: unpatch refuses to clobber a foreign prologue --------------
+  {
+    CodePage page;
+    CHECK(page.ok());
+    u8* fn = page.Emit({0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3});
+    CHECK(BERRY_ShimPatchInPlace(fn, page.detour()) != nullptr);
+    // Simulate another hook replacing our jump: byte 0 is no longer 0xE9.
+    fn[0] = 0xCC;
+    CHECK(BERRY_ShimUnpatch(fn) == -1);   // refuses to restore over it
+    fn[0] = 0xE9;                          // put our jump back for cleanup
+    CHECK(BERRY_ShimUnpatch(fn) == 0);
   }
 
   // --- bug 1: a RIP-relative operand whose rel32 field is not last -------

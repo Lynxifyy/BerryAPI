@@ -29,6 +29,13 @@ include tools/sources.mk
 -include $(patsubst %.cpp,build/san/%.d,$(CORE_SRC))
 -include $(patsubst %.cpp,build/san/tests/%.d,$(TEST_SRC))
 -include $(patsubst %.cpp,build/shared/%.d,$(CORE_SRC))
+# The tools/ binaries (berry-run, berry-relay) compile with -MMD too, but their
+# .d files live under build/tools/. Without these two lines a header change
+# leaves build/tools/berry-run.o stale, and it then links against core objects
+# with a different layout — the exact silent-mismatch failure the header
+# tracking exists to prevent.
+-include build/tools/berry-run.d
+-include build/tools/berry-relay.d
 -include $(MBEDTLS_SRC:.c=.d)
 -include $(LZ4_SRC:.c=.d)
 -include $(patsubst %.c,build/san/%.d,$(LZ4_SRC))

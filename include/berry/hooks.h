@@ -136,6 +136,7 @@ class BERRY_API HookManager {
 
  private:
   IHook* backend_ = nullptr;
+  mutable std::mutex backendMutex_;   // guards backend_ selection/swaps
   mutable std::mutex mutex_;
   std::unordered_map<void*, HookSymbol> active_;
 };
@@ -181,6 +182,22 @@ typedef void (*BERRY_PatchedFn)();
 BERRY_API BERRY_PatchedFn BERRY_ShimPatchInPlace(void* target, void* detour);
 BERRY_API int BERRY_ShimUnpatch(void* target);
 BERRY_API bool BERRY_ShimCanPatch();
+
+// One active hook, as reported by BERRY_ShimListHooks (diagnostics).
+struct BERRY_ShimHookInfo {
+  void* target;
+  void* trampoline;
+  size_t patchLen;
+  unsigned long long calls;
+  unsigned long long faults;
+};
+
+/// Fills `out` with up to `maxOut` active hooks and returns the count written.
+BERRY_API int BERRY_ShimListHooks(BERRY_ShimHookInfo* out, int maxOut);
+
+/// Reports the per-hook counters for `target` (zero when not hooked).
+BERRY_API void BERRY_ShimHookStats(void* target, unsigned long long* calls,
+                                   unsigned long long* faults);
 #ifdef __cplusplus
 }
 #endif
