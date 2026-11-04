@@ -117,6 +117,8 @@ inline const char* Wait() { return "async.wait"; }
 inline const char* EventsOnce() { return "async.events_once"; }
 inline const char* HttpGet() { return "async.http_get"; }
 inline const char* All() { return "async.all"; }
+inline const char* Race() { return "async.race"; }
+inline const char* Timeout() { return "async.timeout"; }
 }  // namespace AsyncBindings
 
 /// Bridges awaited operations to the scheduler. One per ScriptHost; installed

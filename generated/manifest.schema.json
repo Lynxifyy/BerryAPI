@@ -1,0 +1,60 @@
+{
+  "$id": "https://berryapi.dev/schema/manifest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "api_version": {
+      "description": "Minimum script API this script needs.",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+",
+      "type": "string"
+    },
+    "author": {
+      "type": "string"
+    },
+    "capabilities": {
+      "description": "Capabilities the script requests; the host must grant each before a binding runs.",
+      "items": {
+        "enum": [
+          "audio",
+          "combat",
+          "cosmetic",
+          "crystal",
+          "events",
+          "fileio",
+          "gamereads",
+          "hud",
+          "input",
+          "network",
+          "packets",
+          "perf",
+          "render",
+          "voice",
+          "world"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "entry": {
+      "type": "string"
+    },
+    "name": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "signature": {
+      "description": "Hex Ed25519 signature over the canonical manifest payload.",
+      "type": "string"
+    },
+    "version": {
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "version"
+  ],
+  "title": "BerryAPI script manifest",
+  "type": "object"
+}

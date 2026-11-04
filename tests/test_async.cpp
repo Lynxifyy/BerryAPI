@@ -347,6 +347,61 @@ static void TestWaitWithoutClock() {
   TaskScheduler::Instance().Clear();
 }
 
+// The combinators are capability-free, so a script may call them without any
+// grant. They register and resolve without faulting (improvement 71).
+static void TestCombinatorBindings() {
+  TaskScheduler::Instance().Clear();
+  GameTick tick = 0;
+  u64 now = 0;
+  AsyncRuntime rt([&tick]() { return tick; }, [&now]() { return now; });
+  ScriptBindings bindings;
+  rt.InstallBindings(&bindings);
+
+  CHECK(bindings.Has(AsyncBindings::All()));
+  CHECK(bindings.Has(AsyncBindings::Race()));
+  CHECK(bindings.Has(AsyncBindings::Timeout()));
+  CHECK(bindings.Has(AsyncBindings::Wait()));
+  CHECK(bindings.Has(AsyncBindings::EventsOnce()));
+  CHECK(bindings.Has(AsyncBindings::HttpGet()));
+
+  // Each combinator needs no capability (NoCap), not an unset requirement.
+  CHECK(bindings.Required(AsyncBindings::All()).kind == CapKind::NoCap);
+  CHECK(bindings.Required(AsyncBindings::Race()).kind == CapKind::NoCap);
+  CHECK(bindings.Required(AsyncBindings::Timeout()).kind == CapKind::NoCap);
+  TaskScheduler::Instance().Clear();
+}
+
+// async.timeout awaits a tick deadline and resolves with true.
+static void TestTimeoutCombinatorResumes() {
+  TaskScheduler::Instance().Clear();
+  GameTick tick = 0;
+  u64 now = 0;
+  AsyncRuntime rt([&tick]() { return tick; }, [&now]() { return now; });
+  ScriptBindings bindings;
+  rt.InstallBindings(&bindings);
+
+  auto vm = std::unique_ptr<IScriptVm>(CreateReferenceVm());
+  ScriptHost host("combo", Grant({}), std::move(vm));
+  host.SetBindings(&bindings);
+
+  ScriptError err;
+  const char* src =
+      "func on_tick\n"
+      "  push 3\n"
+      "  native async.timeout 1\n"
+      "  pop\n"
+      "  ret 0\n"
+      "end\n";
+  CHECK(host.Load(src, "combo", &err));
+  CHECK(host.RunHook("on_tick") == ScriptStatus::Yielded);
+  CHECK(TaskScheduler::Instance().Pending() == 1);
+  CHECK(rt.Pump(host, 1) == 0);   // not yet
+  tick = 3;
+  CHECK(rt.Pump(host, 3) == 1);   // fires at the deadline
+  CHECK(!host.suspended());
+  TaskScheduler::Instance().Clear();
+}
+
 int main() {
   TestSchedulerBasics();
   TestSchedulerTimeout();
@@ -358,6 +413,8 @@ int main() {
   TestAwaitTimeoutFaultsHost();
   TestHttpBindingGated();
   TestWaitWithoutClock();
+  TestCombinatorBindings();
+  TestTimeoutCombinatorResumes();
   if (g_fail == 0) printf("test_async: ALL OK\n");
   return g_fail;
 }

@@ -1,0 +1,803 @@
+{
+  "api_version": "1.0.0",
+  "binding_count": 493,
+  "capabilities": [
+    {
+      "capability": "audio",
+      "modules": [
+        {
+          "bindings": [
+            "audio.play",
+            "audio.set_volume",
+            "audio.volume",
+            "audio.set_muted",
+            "audio.muted",
+            "audio.history",
+            "audio.history_count",
+            "audio.clear_history"
+          ],
+          "events": [],
+          "module": "Audio"
+        }
+      ]
+    },
+    {
+      "capability": "combat",
+      "modules": [
+        {
+          "bindings": [
+            "combat.recent_kills",
+            "combat.last_hit_damage",
+            "combat.observe"
+          ],
+          "events": [],
+          "module": "Combat"
+        },
+        {
+          "bindings": [
+            "combat_state.max_reach",
+            "combat_state.set_max_reach",
+            "combat_state.last_reach",
+            "combat_state.reach_violations",
+            "combat_state.hitbox_count",
+            "combat_state.hitbox_ticks",
+            "combat_state.hitbox_at",
+            "combat_state.swing",
+            "combat_state.last_swing",
+            "combat_state.average_swing_cps",
+            "combat_state.predict_projectile",
+            "combat_state.note_projectile",
+            "combat_state.resolve_projectile",
+            "combat_state.prediction_error",
+            "combat_state.prediction_count",
+            "combat_state.predict_hit",
+            "combat_state.hit_accuracy",
+            "combat_state.predicted_hits",
+            "combat_state.confirmed_hits",
+            "combat_state.missed_hits",
+            "combat_state.note_click",
+            "combat_state.click_rate",
+            "combat_state.click_limited",
+            "combat_state.click_tokens",
+            "combat_state.set_click_budget",
+            "combat_state.clear"
+          ],
+          "events": [],
+          "module": "CombatState"
+        }
+      ]
+    },
+    {
+      "capability": "cosmetic",
+      "modules": [
+        {
+          "bindings": [
+            "cosmetic.list",
+            "cosmetic.equipped",
+            "cosmetic.equip",
+            "cosmetic.unequip",
+            "cosmetic.save_preset",
+            "cosmetic.apply_preset",
+            "cosmetic.presets",
+            "cosmetic.set_local_only",
+            "cosmetic.reload_packs",
+            "cosmetic.peers",
+            "cosmetic.peer",
+            "cosmetic.sync_stats"
+          ],
+          "events": [],
+          "module": "Cosmetic"
+        },
+        {
+          "bindings": [
+            "animator.add_clip",
+            "animator.add_key",
+            "animator.remove_clip",
+            "animator.clear_clip",
+            "animator.clip_count",
+            "animator.has_clip",
+            "animator.key_count",
+            "animator.play",
+            "animator.stop",
+            "animator.reset",
+            "animator.playing",
+            "animator.time",
+            "animator.duration",
+            "animator.current_clip",
+            "animator.seek",
+            "animator.sample",
+            "animator.pose",
+            "animator.save",
+            "animator.load",
+            "animator.clear",
+            "animator.target",
+            "animator.set_target"
+          ],
+          "events": [],
+          "module": "Animator"
+        }
+      ]
+    },
+    {
+      "capability": "crystal",
+      "modules": [
+        {
+          "bindings": [
+            "crystal.config",
+            "crystal.set_range",
+            "crystal.set_blast_radius",
+            "crystal.set_max_damage",
+            "crystal.set_min_targets",
+            "crystal.set_self_damage_weight",
+            "crystal.set_max_self_damage",
+            "crystal.set_levels",
+            "crystal.set_max_results",
+            "crystal.analyze",
+            "crystal.count",
+            "crystal.best",
+            "crystal.placement",
+            "crystal.estimate",
+            "crystal.stats",
+            "crystal.reset",
+            "crystal.arm",
+            "crystal.disarm",
+            "crystal.armed"
+          ],
+          "events": [],
+          "module": "Crystal"
+        }
+      ]
+    },
+    {
+      "capability": "events",
+      "modules": [
+        {
+          "bindings": [
+            "events.on",
+            "events.off",
+            "events.off_all",
+            "events.subscriptions",
+            "events.emit",
+            "events.channels"
+          ],
+          "events": [
+            "hit",
+            "kill",
+            "tick_count",
+            "entityEntered",
+            "entityLeft",
+            "entityUpdated",
+            "blockChanged",
+            "entityHurt",
+            "entityDeath",
+            "entitySpawn",
+            "combatPredicted",
+            "combatConfirmed",
+            "combatMissed",
+            "radialSelected",
+            "crystalAdvice"
+          ],
+          "module": "Events"
+        }
+      ]
+    },
+    {
+      "capability": "fileio",
+      "modules": [
+        {
+          "bindings": [
+            "fs.write",
+            "fs.read",
+            "fs.append",
+            "fs.exists",
+            "fs.remove",
+            "fs.size",
+            "fs.list",
+            "fs.count",
+            "fs.total_bytes",
+            "fs.clear"
+          ],
+          "events": [],
+          "module": "Fs"
+        },
+        {
+          "bindings": [
+            "package.add",
+            "package.has",
+            "package.versions",
+            "package.resolve",
+            "package.require_path",
+            "package.clear"
+          ],
+          "events": [],
+          "module": "Package"
+        }
+      ]
+    },
+    {
+      "capability": "gamereads",
+      "modules": [
+        {
+          "bindings": [
+            "inventory.slot_count",
+            "inventory.slot",
+            "inventory.items",
+            "inventory.item_count",
+            "inventory.selected_slot",
+            "inventory.count_of",
+            "inventory.has",
+            "inventory.available"
+          ],
+          "events": [],
+          "module": "Inventory"
+        },
+        {
+          "bindings": [
+            "server.info",
+            "server.connected",
+            "server.host",
+            "server.port",
+            "server.version",
+            "server.protocol",
+            "server.player_count",
+            "server.max_players",
+            "server.motd",
+            "server.gamemode",
+            "server.dimension",
+            "server.latency_ms"
+          ],
+          "events": [],
+          "module": "Server"
+        },
+        {
+          "bindings": [
+            "chat.messages",
+            "chat.count",
+            "chat.text",
+            "chat.sender",
+            "chat.is_system",
+            "chat.last",
+            "chat.available"
+          ],
+          "events": [],
+          "module": "Chat"
+        },
+        {
+          "bindings": [
+            "screen.state",
+            "screen.open",
+            "screen.name",
+            "screen.title",
+            "screen.width",
+            "screen.height",
+            "screen.keyboard_open",
+            "screen.available"
+          ],
+          "events": [],
+          "module": "Screen"
+        }
+      ]
+    },
+    {
+      "capability": "hud",
+      "modules": [
+        {
+          "bindings": [
+            "pvp.cps",
+            "pvp.combo",
+            "pvp.combo_active",
+            "pvp.session",
+            "pvp.armor",
+            "pvp.effects",
+            "pvp.net",
+            "pvp.target",
+            "pvp.health",
+            "pvp.max_health",
+            "pvp.set_config",
+            "pvp.config",
+            "pvp.attach",
+            "pvp.detach",
+            "pvp.attached",
+            "pvp.low_health"
+          ],
+          "events": [],
+          "module": "Pvp"
+        },
+        {
+          "bindings": [
+            "mod.create",
+            "mod.set_meta",
+            "mod.add_toggle",
+            "mod.add_slider",
+            "mod.add_select",
+            "mod.add_keybind",
+            "mod.add_text",
+            "mod.add_button",
+            "mod.set_number",
+            "mod.set_text",
+            "mod.press",
+            "mod.number",
+            "mod.text",
+            "mod.enabled",
+            "mod.set_enabled",
+            "mod.count",
+            "mod.get",
+            "mod.info",
+            "mod.list",
+            "mod.settings",
+            "mod.clear",
+            "mod.set_overlay",
+            "mod.overlay"
+          ],
+          "events": [],
+          "module": "Mod"
+        },
+        {
+          "bindings": [
+            "hud.create_label",
+            "hud.create_panel",
+            "hud.attach",
+            "hud.set_visible",
+            "hud.tween",
+            "hud.stats"
+          ],
+          "events": [],
+          "module": "Hud"
+        },
+        {
+          "bindings": [
+            "ui.begin_frame",
+            "ui.end_frame",
+            "ui.begin_window",
+            "ui.end_window",
+            "ui.button",
+            "ui.checkbox",
+            "ui.slider_float",
+            "ui.slider_int",
+            "ui.input_text",
+            "ui.collapsing_header",
+            "ui.begin_tab_bar",
+            "ui.end_tab_bar",
+            "ui.begin_tab_item",
+            "ui.end_tab_item",
+            "ui.text",
+            "ui.text_colored",
+            "ui.progress_bar",
+            "ui.separator",
+            "ui.spacing",
+            "ui.same_line",
+            "ui.dummy",
+            "ui.indent",
+            "ui.unindent",
+            "ui.bullet_text",
+            "ui.set_theme",
+            "ui.theme",
+            "ui.stats",
+            "ui.any_window_dragging",
+            "ui.reset"
+          ],
+          "events": [],
+          "module": "Ui"
+        },
+        {
+          "bindings": [
+            "radial.add_item",
+            "radial.remove_item",
+            "radial.clear",
+            "radial.count",
+            "radial.item_label",
+            "radial.item_enabled",
+            "radial.set_item_enabled",
+            "radial.open",
+            "radial.close",
+            "radial.is_open",
+            "radial.radius",
+            "radial.set_radius",
+            "radial.inner_radius",
+            "radial.set_inner_radius",
+            "radial.open_ms",
+            "radial.set_open_ms",
+            "radial.state",
+            "radial.sector_at"
+          ],
+          "events": [],
+          "module": "Radial"
+        }
+      ]
+    },
+    {
+      "capability": "input",
+      "modules": [
+        {
+          "bindings": [
+            "input.is_key_down",
+            "input.clicks_per_second",
+            "input.velocity"
+          ],
+          "events": [],
+          "module": "Input"
+        },
+        {
+          "bindings": [
+            "intent.allowed",
+            "intent.classify",
+            "intent.server",
+            "intent.profile",
+            "intent.disabled_groups",
+            "intent.list"
+          ],
+          "events": [],
+          "module": "Intent"
+        },
+        {
+          "bindings": [
+            "touch.pointer_down",
+            "touch.pointer_move",
+            "touch.pointer_up",
+            "touch.clear_pointers",
+            "touch.pointer_count",
+            "touch.pointers",
+            "touch.update",
+            "touch.set_gesture_enabled",
+            "touch.gesture_enabled",
+            "touch.gesture_mask",
+            "touch.last_gesture",
+            "touch.config",
+            "touch.set_tap_max_move",
+            "touch.set_tap_max_ms",
+            "touch.set_long_press_ms",
+            "touch.set_double_tap_max_ms",
+            "touch.set_swipe_min_dist",
+            "touch.set_swipe_max_ms",
+            "touch.set_pinch_min_scale",
+            "touch.swipe_direction",
+            "touch.add_button",
+            "touch.remove_button",
+            "touch.clear_buttons",
+            "touch.button_count",
+            "touch.button_label",
+            "touch.button_enabled",
+            "touch.set_button_enabled",
+            "touch.set_button_intent",
+            "touch.button_intent",
+            "touch.button_state",
+            "touch.state"
+          ],
+          "events": [
+            "touchGesture"
+          ],
+          "module": "Touch"
+        }
+      ]
+    },
+    {
+      "capability": "network",
+      "modules": [
+        {
+          "bindings": [
+            "network.get",
+            "network.post"
+          ],
+          "events": [],
+          "module": "Network"
+        },
+        {
+          "bindings": [
+            "ws.connect",
+            "ws.send_text",
+            "ws.send_binary",
+            "ws.pump",
+            "ws.poll",
+            "ws.pending",
+            "ws.is_open",
+            "ws.close",
+            "ws.count",
+            "ws.url"
+          ],
+          "events": [],
+          "module": "Ws"
+        },
+        {
+          "bindings": [
+            "json_rpc.call"
+          ],
+          "events": [],
+          "module": "JsonRpc"
+        }
+      ]
+    },
+    {
+      "capability": "packets",
+      "modules": [
+        {
+          "bindings": [
+            "packets.recent",
+            "packets.last",
+            "packets.totals",
+            "packets.summary",
+            "packets.count_of",
+            "packets.size",
+            "packets.clear"
+          ],
+          "events": [],
+          "module": "Packets"
+        }
+      ]
+    },
+    {
+      "capability": "perf",
+      "modules": [
+        {
+          "bindings": [
+            "perf.frame_time_ms",
+            "perf.stats",
+            "perf.quality",
+            "perf.set_target_fps",
+            "perf.set_thermal_mode",
+            "perf.set_platform",
+            "perf.flame",
+            "perf.spans",
+            "perf.flame_reset",
+            "perf.pipeline",
+            "perf.lod_tier",
+            "perf.lod_should_tick"
+          ],
+          "events": [],
+          "module": "Perf"
+        }
+      ]
+    },
+    {
+      "capability": "render",
+      "modules": [
+        {
+          "bindings": [
+            "render.draw_text",
+            "render.draw_text_centered",
+            "render.draw_rect",
+            "render.draw_line",
+            "render.draw_circle",
+            "render.screen_size",
+            "render.set_zoom",
+            "render.world_to_screen",
+            "render.draw_3d_line",
+            "render.draw_3d_box",
+            "render.draw_3d_text",
+            "render.push_clip_rect",
+            "render.pop_clip_rect",
+            "render.clip_rect",
+            "render.camera",
+            "render.add_occluder",
+            "render.occluded",
+            "render.cull_box"
+          ],
+          "events": [],
+          "module": "Render"
+        },
+        {
+          "bindings": [
+            "shader.register",
+            "shader.unregister",
+            "shader.has",
+            "shader.list",
+            "shader.uniforms",
+            "shader.enable",
+            "shader.chain",
+            "shader.set_param",
+            "shader.param",
+            "shader.clear"
+          ],
+          "events": [],
+          "module": "Shader"
+        }
+      ]
+    },
+    {
+      "capability": "voice",
+      "modules": [
+        {
+          "bindings": [
+            "voice.config",
+            "voice.set_max_range",
+            "voice.set_full_volume_range",
+            "voice.set_master_volume",
+            "voice.set_max_speakers",
+            "voice.set_hold_ms",
+            "voice.set_max_frame_bytes",
+            "voice.set_min_send_interval_ms",
+            "voice.start",
+            "voice.stop",
+            "voice.running",
+            "voice.self_id",
+            "voice.set_talking",
+            "voice.talking",
+            "voice.set_muted",
+            "voice.muted",
+            "voice.set_position",
+            "voice.speaker_count",
+            "voice.speaker",
+            "voice.stats",
+            "voice.reset",
+            "voice.transport"
+          ],
+          "events": [],
+          "module": "Voice"
+        }
+      ]
+    },
+    {
+      "capability": "world",
+      "modules": [
+        {
+          "bindings": [
+            "player.position",
+            "player.rotation",
+            "player.velocity",
+            "player.health",
+            "player.max_health",
+            "player.alive",
+            "player.name",
+            "player.hunger",
+            "player.saturation",
+            "player.armor",
+            "player.gamemode",
+            "player.dimension",
+            "player.xp_level",
+            "player.xp_progress",
+            "player.air",
+            "player.on_fire",
+            "player.sneaking",
+            "player.sprinting",
+            "player.effects",
+            "player.state"
+          ],
+          "events": [],
+          "module": "Player"
+        },
+        {
+          "bindings": [
+            "world.query",
+            "world.entity_count",
+            "world.block_at",
+            "world.time",
+            "world.is_day",
+            "world.is_raining",
+            "world.entities_within",
+            "world.raycast_block",
+            "world.raycast_entity",
+            "world.entities_in_aabb",
+            "world.entities_in_radius",
+            "world.raycast",
+            "world.get_biome",
+            "world.get_light",
+            "world.get_chunk_state",
+            "world.block_id_at"
+          ],
+          "events": [],
+          "module": "World"
+        },
+        {
+          "bindings": [
+            "entity.get",
+            "entity.type_name",
+            "entity.position",
+            "entity.velocity",
+            "entity.health",
+            "entity.alive",
+            "entity.distance_to",
+            "entity.nearest",
+            "entity.get_hitbox",
+            "entity.trace_line"
+          ],
+          "events": [],
+          "module": "Entity"
+        },
+        {
+          "bindings": [
+            "record.start",
+            "record.stop",
+            "record.recording",
+            "record.frames",
+            "record.overflowed",
+            "record.save",
+            "record.load",
+            "record.clear",
+            "record.replay_step",
+            "record.replay_seek",
+            "record.replay_rewind",
+            "record.replay_tick",
+            "record.replay_index",
+            "record.replay_end"
+          ],
+          "events": [],
+          "module": "Record"
+        },
+        {
+          "bindings": [
+            "replay.add_key",
+            "replay.remove_key",
+            "replay.clear",
+            "replay.key_count",
+            "replay.has_key",
+            "replay.first_tick",
+            "replay.last_tick",
+            "replay.duration_ticks",
+            "replay.smoothing",
+            "replay.set_smoothing",
+            "replay.active",
+            "replay.activate",
+            "replay.deactivate",
+            "replay.play",
+            "replay.pause",
+            "replay.stop",
+            "replay.playing",
+            "replay.follow_tape",
+            "replay.set_follow_tape",
+            "replay.speed",
+            "replay.set_speed",
+            "replay.playhead",
+            "replay.seek",
+            "replay.sample",
+            "replay.sample_now",
+            "replay.fov_override",
+            "replay.set_fov_override",
+            "replay.export_begin",
+            "replay.export_end",
+            "replay.exporting",
+            "replay.export_frame",
+            "replay.export_fps"
+          ],
+          "events": [],
+          "module": "Replay"
+        },
+        {
+          "bindings": [
+            "replaymod.capture_start",
+            "replaymod.capture_stop",
+            "replaymod.capturing",
+            "replaymod.section_count",
+            "replaymod.bytes",
+            "replaymod.first_tick",
+            "replaymod.last_tick",
+            "replaymod.save",
+            "replaymod.load",
+            "replaymod.loaded",
+            "replaymod.unload",
+            "replaymod.last_error",
+            "replaymod.loaded_sections",
+            "replaymod.loaded_first_tick",
+            "replaymod.loaded_last_tick",
+            "replaymod.world_entity_count",
+            "replaymod.world_entity",
+            "replaymod.world_block",
+            "replaymod.tick_range",
+            "replaymod.set_review_active",
+            "replaymod.review_active",
+            "replaymod.review_play",
+            "replaymod.review_pause",
+            "replaymod.review_playing",
+            "replaymod.review_tick",
+            "replaymod.review_seek",
+            "replaymod.review_speed",
+            "replaymod.set_review_speed",
+            "replaymod.review_present",
+            "replaymod.server_start",
+            "replaymod.server_stop",
+            "replaymod.server_running",
+            "replaymod.server_live_blocked",
+            "replaymod.server_port",
+            "replaymod.server_client_connected",
+            "replaymod.server_packets_sent",
+            "replaymod.server_set_paused",
+            "replaymod.server_paused",
+            "replaymod.server_seek",
+            "replaymod.status"
+          ],
+          "events": [],
+          "module": "ReplayMod"
+        }
+      ]
+    }
+  ],
+  "event_count": 16
+}

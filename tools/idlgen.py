@@ -102,7 +102,8 @@ class Param:
 
 
 class Function:
-    def __init__(self, name, params, ret, capability, doc, module, deprecated=None):
+    def __init__(self, name, params, ret, capability, doc, module, deprecated=None,
+                 since=None, removed=None):
         self.name = name
         self.params = params
         self.ret = ret
@@ -110,6 +111,11 @@ class Function:
         self.doc = doc
         self.module = module
         self.deprecated = deprecated
+        # SemVer bounds (improvement 77). `since` is the first script-API
+        # version the binding exists in; `removed` the first it is gone from.
+        # Both optional; the breaking-change linter diffs them.
+        self.since = since
+        self.removed = removed
 
     @property
     def binding(self):
@@ -176,6 +182,8 @@ def parse(text):
     pending_doc = None
     pending_cap = None
     pending_deprecated = None
+    pending_since = None
+    pending_removed = None
     api_version = ""
     seen_fns = set()
     seen_events = set()
@@ -214,19 +222,33 @@ def parse(text):
                 if current is None:
                     raise IdlError("deprecated outside a module")
                 pending_deprecated = _unquote(line.split(None, 1)[1].strip())
+            elif line.startswith("since "):
+                if current is None:
+                    raise IdlError("since outside a module")
+                pending_since = line.split(None, 1)[1].strip()
+                if not _SEMVER_RE.match(pending_since):
+                    raise IdlError("bad since version %r" % pending_since)
+            elif line.startswith("removed "):
+                if current is None:
+                    raise IdlError("removed outside a module")
+                pending_removed = line.split(None, 1)[1].strip()
+                if not _SEMVER_RE.match(pending_removed):
+                    raise IdlError("bad removed version %r" % pending_removed)
             elif line.startswith("doc "):
                 pending_doc = _unquote(line.split(None, 1)[1].strip())
             elif line.startswith("fn "):
                 if current is None:
                     raise IdlError("fn outside a module")
                 fn = _parse_fn(line, current, pending_doc, pending_cap,
-                               pending_deprecated)
+                               pending_deprecated, pending_since, pending_removed)
                 if fn.binding in seen_fns:
                     raise IdlError("duplicate binding %s" % fn.binding)
                 seen_fns.add(fn.binding)
                 current.functions.append(fn)
                 pending_doc = None
                 pending_deprecated = None
+                pending_since = None
+                pending_removed = None
             elif line.startswith("event "):
                 if current is None:
                     raise IdlError("event outside a module")
@@ -250,7 +272,7 @@ def _unquote(s):
     return s
 
 
-def _parse_fn(line, module, doc, cap, deprecated=None):
+def _parse_fn(line, module, doc, cap, deprecated=None, since=None, removed=None):
     m = re.match(r"fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*->\s*(\S+)\s*$", line)
     if not m:
         raise IdlError("bad fn declaration: %r" % line)
@@ -265,7 +287,7 @@ def _parse_fn(line, module, doc, cap, deprecated=None):
         params.append(Param(pname, ptype))
     _check_type(ret, "fn %s return" % name)
     return Function(name, params, ret, cap or module.capability, doc or "",
-                    module.name, deprecated)
+                    module.name, deprecated, since, removed)
 
 
 def _parse_event(line, module, doc):
@@ -348,18 +370,23 @@ def emit_cpp(api_version, modules):
            "  int arity;",
            "  const char* module;",
            "  const char* deprecated;",
+           "  const char* since;",     # first script-API version (nullptr = 0.0.0)
+           "  const char* removed;",   # first version it is gone from (nullptr = live)
            "};",
            ""]
     specs = []
     for mod in modules:
         for fn in mod.functions:
             specs.append((fn.binding, _capability_enum(fn.capability), len(fn.params),
-                          mod.name, fn.deprecated))
+                          mod.name, fn.deprecated, fn.since, fn.removed))
     out.append("inline const BindingSpec* BindingSpecs() {")
     out.append("  static const BindingSpec kSpecs[] = {")
-    for name, cap, arity, module, dep in specs:
+    for name, cap, arity, module, dep, since, removed in specs:
         dep_lit = "nullptr" if dep is None else _cxx_string_literal(dep)
-        out.append("      {\"%s\", %s, %d, \"%s\", %s}," % (name, cap, arity, module, dep_lit))
+        since_lit = "nullptr" if since is None else _cxx_string_literal(since)
+        removed_lit = "nullptr" if removed is None else _cxx_string_literal(removed)
+        out.append("      {\"%s\", %s, %d, \"%s\", %s, %s, %s}," %
+                   (name, cap, arity, module, dep_lit, since_lit, removed_lit))
     out.append("  };")
     out.append("  return kSpecs;")
     out.append("}")
@@ -591,6 +618,72 @@ def emit_docs(api_version, modules):
     return "\n".join(out)
 
 
+#----------------------------------------------------------------------------
+# Machine-readable catalogue + manifest schema (improvement 80)
+#----------------------------------------------------------------------------
+
+def emit_capability_catalogue(api_version, modules):
+    """A JSON capability catalogue for tooling (an editor, a consent UI, a
+    packaging tool): every capability, which modules need it, and the reason a
+    module gives. Kept in sync with the IDL by `make idl`."""
+    import json
+    by_cap = {}
+    for mod in modules:
+        cap = mod.capability or "nocap"
+        entry = by_cap.setdefault(cap, {"capability": cap, "modules": []})
+        entry["modules"].append({
+            "module": mod.name,
+            "bindings": [fn.binding for fn in mod.functions],
+            "events": [ev.name for ev in mod.events],
+        })
+    catalogue = {
+        "api_version": api_version,
+        "capabilities": sorted(by_cap.values(), key=lambda e: e["capability"]),
+        "binding_count": sum(len(m.functions) for m in modules),
+        "event_count": sum(len(m.events) for m in modules),
+    }
+    return json.dumps(catalogue, indent=2, sort_keys=True) + "\n"
+
+
+def emit_manifest_schema(api_version, modules):
+    """A JSON Schema for a script manifest (berry.manifest.json), so an editor
+    and a packaging tool validate a manifest without the loader. The capability
+    enum is closed to the IDL's set, so an unknown capability is a schema error
+    rather than a runtime denial."""
+    import json
+    caps = sorted({(m.capability or "nocap") for m in modules})
+    schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://berryapi.dev/schema/manifest.schema.json",
+        "title": "BerryAPI script manifest",
+        "type": "object",
+        "required": ["name", "version"],
+        "additionalProperties": True,
+        "properties": {
+            "name": {"type": "string", "minLength": 1},
+            "version": {"type": "string",
+                        "pattern": r"^[0-9]+\.[0-9]+\.[0-9]+"},
+            "api_version": {
+                "type": "string",
+                "pattern": r"^[0-9]+\.[0-9]+\.[0-9]+",
+                "description": "Minimum script API this script needs.",
+            },
+            "capabilities": {
+                "type": "array",
+                "items": {"type": "string", "enum": caps},
+                "description": "Capabilities the script requests; the host "
+                               "must grant each before a binding runs.",
+            },
+            "entry": {"type": "string"},
+            "author": {"type": "string"},
+            "signature": {"type": "string",
+                          "description": "Hex Ed25519 signature over the "
+                                         "canonical manifest payload."},
+        },
+    }
+    return json.dumps(schema, indent=2, sort_keys=True) + "\n"
+
+
 def write_if_changed(path, content):
     if os.path.exists(path):
         with open(path, "r") as fh:
@@ -635,6 +728,14 @@ SELF_TEST_CASES = [
      "module A {\n capability events\n event e()\n event e()\n}\n", True),
     ("event with typed param",
      "module A {\n capability events\n event e(dmg: number)\n}\n", False),
+    ("since accepted",
+     "module A {\n capability render\n since 1.2.0\n fn go() -> nil\n}\n", False),
+    ("removed accepted",
+     "module A {\n capability render\n removed 2.0.0\n fn go() -> nil\n}\n", False),
+    ("bad since rejected",
+     "module A {\n capability render\n since 1.2\n fn go() -> nil\n}\n", True),
+    ("since outside a module rejected",
+     "since 1.2.0\nmodule A {\n capability render\n fn go() -> nil\n}\n", True),
 ]
 
 
@@ -688,6 +789,31 @@ def self_test():
                 failures.append("event in %s has no name" % mod.name)
             if not mod.name:
                 failures.append("event %s has no module" % ev.name)
+    # The breaking-change linter must flag a removal, an arity change and a
+    # capability change, and must not flag an addition.
+    base = "module A {\n capability render\n fn a(x: number) -> nil\n fn b() -> nil\n}\n"
+    added = "module A {\n capability render\n fn a(x: number) -> nil\n fn b() -> nil\n fn c() -> nil\n}\n"
+    removed = "module A {\n capability render\n fn a(x: number) -> nil\n}\n"
+    rearity = "module A {\n capability render\n fn a(x: number, y: number) -> nil\n fn b() -> nil\n}\n"
+    recap = "module A {\n capability world\n fn a(x: number) -> nil\n fn b() -> nil\n}\n"
+    try:
+        if breaking_changes(base, added):
+            failures.append("breaking linter flagged an addition")
+        if not breaking_changes(base, removed):
+            failures.append("breaking linter missed a removal")
+        if not breaking_changes(base, rearity):
+            failures.append("breaking linter missed an arity change")
+        if not breaking_changes(base, recap):
+            failures.append("breaking linter missed a capability change")
+        # A removal the OLD declaration marked `removed` is a planned
+        # retirement, not an accidental break, so it is not reported.
+        basePlanned = ("module A {\n capability render\n removed 2.0.0\n"
+                       " fn a(x: number) -> nil\n fn b() -> nil\n}\n")
+        newPlanned = "module A {\n capability render\n fn b() -> nil\n}\n"
+        if breaking_changes(basePlanned, newPlanned):
+            failures.append("breaking linter flagged a declared removal")
+    except IdlError as exc:
+        failures.append("breaking linter raised: %s" % exc)
     if failures:
         for f in failures:
             sys.stderr.write("idlgen self-test: %s\n" % f)
@@ -695,9 +821,61 @@ def self_test():
     return 0
 
 
+def breaking_changes(old_text, new_text):
+    """Diff two IDL documents and return the breaking changes (improvement 77):
+    a binding removed, its arity or return changed, or its capability changed
+    without a `removed` marker. A non-breaking change (a new binding, a new
+    event) is not reported. Returns a list of human-readable strings."""
+    _, old_mods = parse(old_text)
+    _, new_mods = parse(new_text)
+    old_fns = {}
+    for m in old_mods:
+        for fn in m.functions:
+            old_fns[fn.binding] = fn
+    new_fns = {}
+    for m in new_mods:
+        for fn in m.functions:
+            new_fns[fn.binding] = fn
+
+    changes = []
+    for name, ofn in sorted(old_fns.items()):
+        nfn = new_fns.get(name)
+        if nfn is None:
+            if ofn.removed is None:
+                changes.append(
+                    "REMOVED binding %s (no `removed` version declared)" % name)
+            continue
+        if len(ofn.params) != len(nfn.params):
+            changes.append("ARITY %s: %d -> %d params" %
+                           (name, len(ofn.params), len(nfn.params)))
+        if ofn.ret != nfn.ret:
+            changes.append("RETURN %s: %s -> %s" % (name, ofn.ret, nfn.ret))
+        if (ofn.capability or "") != (nfn.capability or ""):
+            changes.append("CAPABILITY %s: %s -> %s" %
+                           (name, ofn.capability, nfn.capability))
+    return changes
+
+
 def main(argv):
     if "--self-test" in argv:
         return self_test()
+    if "--breaking-diff" in argv:
+        idx = argv.index("--breaking-diff")
+        if idx + 2 >= len(argv):
+            sys.stderr.write("idlgen: --breaking-diff needs two IDL files\n")
+            return 2
+        with open(argv[idx + 1]) as fh:
+            old_text = fh.read()
+        with open(argv[idx + 2]) as fh:
+            new_text = fh.read()
+        try:
+            changes = breaking_changes(old_text, new_text)
+        except IdlError as exc:
+            sys.stderr.write("idlgen: %s\n" % exc)
+            return 2
+        for c in changes:
+            sys.stderr.write("idlgen breaking-change: %s\n" % c)
+        return 1 if changes else 0
     check = "--check" in argv
     with open(IDL_PATH, "r") as fh:
         text = fh.read()
@@ -712,6 +890,10 @@ def main(argv):
         os.path.join(ROOT, "generated", "berry.d.ts"): emit_ts(api_version, modules),
         os.path.join(ROOT, "generated", "berry.luau"): emit_luau(api_version, modules),
         os.path.join(ROOT, "docs", "API.md"): emit_docs(api_version, modules),
+        os.path.join(ROOT, "generated", "capabilities.json"):
+            emit_capability_catalogue(api_version, modules),
+        os.path.join(ROOT, "generated", "manifest.schema.json"):
+            emit_manifest_schema(api_version, modules),
     }
 
     if check:

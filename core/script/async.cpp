@@ -20,6 +20,22 @@
 
 namespace Berry {
 
+namespace {
+
+/// Collects task ids from the first argument of a combinator call. A table
+/// argument contributes its values in key order; anything else yields nothing,
+/// so a malformed argument resolves to an empty task set rather than faulting.
+std::vector<u64> TaskIdsFrom(const std::vector<ScriptValue>& args) {
+  std::vector<u64> ids;
+  if (args.empty()) return ids;
+  const ScriptTable* t = args[0].AsTable();
+  if (!t) return ids;
+  for (const auto& kv : *t) ids.push_back((u64)kv.second.AsNumber());
+  return ids;
+}
+
+}  // namespace
+
 //----------------------------------------------------------------------------
 // TaskState
 //----------------------------------------------------------------------------
@@ -308,6 +324,88 @@ void AsyncRuntime::InstallBindings(ScriptBindings* bindings,
   // the gate answers "does this script hold any network capability at all?";
   // HttpGetBlocking then narrows it to the concrete host it is about to
   // contact, which is the only place the URL is known.
+  // Promise combinators (improvement 71). The await model is one suspension per
+  // binding call, so a combinator cannot itself await other awaits; instead it
+  // awaits a *predicate* over already-running state. `async.timeout` is the one
+  // that needs a clock: it suspends until `ticks` elapse and then completes.
+  //
+  // async.timeout(ticks): resolves after `ticks` game ticks, like wait(), but
+  // named for use in a race-style select. Needs no capability.
+  bindings->Register(AsyncBindings::Timeout(), Capability::NoCap(),
+                     [self](ScriptContext& ctx,
+                            const std::vector<ScriptValue>& args) {
+                       const GameTick ticks =
+                           args.empty() ? 0 : (GameTick)args[0].AsNumber();
+                       auto target = std::make_shared<GameTick>(
+                           self->currentTick_ ? self->currentTick_() + ticks : 0);
+                       self->Await(ctx, "timeout(" +
+                                            std::to_string((long long)ticks) + ")",
+                                   [target, self](ScriptValue* out) {
+                                     if (!self->currentTick_) {
+                                       if (out) *out = ScriptValue::Bool(true);
+                                       return true;
+                                     }
+                                     if (self->currentTick_() >= *target) {
+                                       if (out) *out = ScriptValue::Bool(true);
+                                       return true;
+                                     }
+                                     return false;
+                                   });
+                       return ScriptValue::Nil();
+                     });
+
+  // async.race(tasks): resolves with the first task's result. `tasks` is a
+  // table of task ids (from a prior await setup); the predicate fires when any
+  // one is no longer Pending. Needs no capability.
+  bindings->Register(AsyncBindings::Race(), Capability::NoCap(),
+                     [self](ScriptContext& ctx,
+                            const std::vector<ScriptValue>& args) {
+                       std::vector<u64> ids = TaskIdsFrom(args);
+                       auto idsSp = std::make_shared<std::vector<u64>>(ids);
+                       self->Await(ctx, "race", [idsSp](ScriptValue* out) {
+                         for (u64 id : *idsSp) {
+                           AsyncTask t;
+                           if (!TaskScheduler::Instance().Find(id, &t)) continue;
+                           if (t.state != TaskState::Pending &&
+                               t.state != TaskState::Ready) {
+                             if (out) *out = t.hasResult ? t.result : ScriptValue::Nil();
+                             return true;
+                           }
+                         }
+                         return false;
+                       });
+                       return ScriptValue::Nil();
+                     });
+
+  // async.all(tasks): resolves with a table of every task's result once all
+  // have completed. Needs no capability.
+  bindings->Register(AsyncBindings::All(), Capability::NoCap(),
+                     [self](ScriptContext& ctx,
+                            const std::vector<ScriptValue>& args) {
+                       std::vector<u64> ids = TaskIdsFrom(args);
+                       auto idsSp = std::make_shared<std::vector<u64>>(ids);
+                       self->Await(ctx, "all", [idsSp](ScriptValue* out) {
+                         ScriptTable results;
+                         size_t i = 0;
+                         for (u64 id : *idsSp) {
+                           AsyncTask t;
+                           if (!TaskScheduler::Instance().Find(id, &t)) {
+                             results[std::to_string(i++)] = ScriptValue::Nil();
+                             continue;
+                           }
+                           if (t.state == TaskState::Pending ||
+                               t.state == TaskState::Ready) {
+                             return false;   // not all done yet
+                           }
+                           results[std::to_string(i++)] =
+                               t.hasResult ? t.result : ScriptValue::Nil();
+                         }
+                         if (out) *out = ScriptValue::Tbl(std::move(results));
+                         return true;
+                       });
+                       return ScriptValue::Nil();
+                     });
+
   Capability netCap;
   Capability::Parse("network:*", &netCap);
   bindings->Register(AsyncBindings::HttpGet(), netCap,

@@ -44,6 +44,16 @@ static void TestSpecTableWellFormed() {
     const size_t dot = full.find('.');
     CHECK(dot != std::string::npos);
     CHECK(dot > 0 && dot + 1 < full.size());
+    // The version bounds (improvement 77) are either null or a real
+    // major.minor.patch string; a malformed one would break the loader's gate.
+    if (s.since) {
+      const std::string v(s.since);
+      CHECK(v.find('.') != std::string::npos);
+    }
+    if (s.removed) {
+      const std::string v(s.removed);
+      CHECK(v.find('.') != std::string::npos);
+    }
   }
 }
 

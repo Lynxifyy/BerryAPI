@@ -342,6 +342,20 @@ idl-check:
 	@python3 tools/idlgen.py --self-test
 	@python3 tools/idlgen.py --check
 
+# Breaking-change lint (improvement 77): diff the current IDL against the last
+# released copy (api/berry.idl.prev, kept by the release job). A binding removed
+# without a `removed` version, or an arity/return/capability change, fails. A
+# missing .prev (a fresh checkout) is not an error.
+.PHONY: idl-breaking
+idl-breaking:
+	@if [ -f api/berry.idl.prev ]; then \
+	  python3 tools/idlgen.py --breaking-diff api/berry.idl.prev api/berry.idl \
+	    && echo "== no breaking script-API changes ==" \
+	    || { echo "idl-breaking: breaking script-API change; bump the major version and mark it"; exit 1; }; \
+	else \
+	  echo "idl-breaking: no api/berry.idl.prev to diff against; skipped"; \
+	fi
+
 # The Python signer and the C++ verifier must agree on the canonical payload
 # byte for byte, or every published script would be rejected at load time.
 .PHONY: check-signer
