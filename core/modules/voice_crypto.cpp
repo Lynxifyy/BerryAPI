@@ -183,6 +183,12 @@ bool VoiceRandomBytes(void* out, size_t n) {
   return mbedtls_ctr_drbg_random(&g_drbg, (unsigned char*)out, n) == 0;
 }
 
+void VoiceZeroizeString(std::string* s) {
+  if (s == nullptr || s->empty()) return;
+  volatile char* p = &(*s)[0];
+  for (size_t i = 0; i < s->size(); ++i) p[i] = 0;
+}
+
 bool VoiceX25519PublicKey(const std::string& secret32, std::string* pub32) {
   if (pub32 == nullptr) return false;
   if (secret32.size() != VoiceCrypto::kEphemeralBytes) return false;
@@ -499,6 +505,13 @@ void VoiceSession::Reset() {
   recvBitmap_ = 0;
 }
 
+void VoiceSession::Zeroize() {
+  VoiceZeroizeString(&key_);
+  key_.clear();
+  direction_ = 0;
+  Reset();
+}
+
 bool VoiceSession::AcceptSeq(u64 seq) {
   // Convention: bit `delta` in `recvBitmap_` is set when sequence
   // `recvMax_ - delta` has been accepted, so bit 0 always tracks the maximum.
@@ -644,10 +657,14 @@ bool VoiceSecureChannel::Configure(const VoiceIdentity& identity,
 
 void VoiceSecureChannel::RotateEphemeral() {
   haveLocal_ = false;
+  // Wipe the ephemeral secret before releasing it, and wipe every session key
+  // with the sessions, so a rotated key does not linger in freed heap (bug 58).
+  VoiceZeroizeString(&localEphSecret_);
   localEphSecret_.clear();
   localEphPublic_.clear();
   localNonce_.clear();
   announce_.clear();
+  for (auto& kv : sessions_) VoiceZeroizeString(&kv.second.session.mutableKey());
   sessions_.clear();
 }
 
@@ -768,6 +785,9 @@ std::vector<VoiceSession*> VoiceSecureChannel::allSessions() {
   return out;
 }
 
-void VoiceSecureChannel::ClearSessions() { sessions_.clear(); }
+void VoiceSecureChannel::ClearSessions() {
+  for (auto& kv : sessions_) kv.second.session.Zeroize();
+  sessions_.clear();
+}
 
 }  // namespace Berry

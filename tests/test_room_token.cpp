@@ -163,14 +163,59 @@ static void TestVerifyDocument() {
   // A malformed document is refused.
   CHECK(!client.VerifyDocument("{not json", "room-1", now, &tok, &err));
 
-  // With no backend key configured, TLS alone authenticates: an unsigned token
-  // is accepted.
+  // With no backend key configured and no explicit opt-in, verification FAILS
+  // CLOSED: an unsigned token is refused (bug 53).
   RoomTokenClientConfig tlsOnly;
   tlsOnly.baseUrl = "https://presence.example.com";
   RoomTokenClient client2(tlsOnly);
-  CHECK(client2.VerifyDocument(
+  CHECK(!client2.VerifyDocument(
       TokenJson("room-1", kSecretHex, kRelayHost, 47825, expiry, ""),
       "room-1", now, &tok, &err));
+
+  // The explicit insecure opt-in accepts an unsigned token (TLS-only).
+  RoomTokenClientConfig tlsOptIn;
+  tlsOptIn.baseUrl = "https://presence.example.com";
+  tlsOptIn.allowUnsigned = true;
+  RoomTokenClient client3(tlsOptIn);
+  CHECK(client3.VerifyDocument(
+      TokenJson("room-1", kSecretHex, kRelayHost, 47825, expiry, ""),
+      "room-1", now, &tok, &err));
+
+  // A token with no expires_at is refused (it would never expire, bug 54).
+  CHECK(!client.VerifyDocument(
+      TokenJson("room-1", kSecretHex, kRelayHost, 47825, 0, sigHex),
+      "room-1", now, &tok, &err));
+
+  // A fractional relay_port is refused, not truncated (bug 55).
+  {
+    std::string frac =
+        "{\"room\":\"room-1\",\"secret\":\"" + kSecretHex +
+        "\",\"relay_host\":\"" + kRelayHost +
+        "\",\"relay_port\":443.7,\"expires_at\":" + std::to_string(expiry) +
+        ",\"signature\":\"" + sigHex + "\"}";
+    CHECK(!client.VerifyDocument(frac, "room-1", now, &tok, &err));
+  }
+
+  // A private / loopback relay host is refused by default (bug 56).
+  {
+    const std::string localHost = "127.0.0.1";
+    const std::string localCanon =
+        Canonical("room-1", kSecretHex, localHost, 47825, expiry);
+    std::string localSig;
+    CHECK(crypto::Ed25519Sign(localCanon, sec, &localSig));
+    CHECK(!client.VerifyDocument(
+        TokenJson("room-1", kSecretHex, localHost, 47825, expiry,
+                  crypto::ToHexLower(localSig)),
+        "room-1", now, &tok, &err));
+    // ...but the explicit opt-in accepts it.
+    RoomTokenClientConfig lanCfg = cfg;
+    lanCfg.allowPrivateRelayHost = true;
+    RoomTokenClient lanClient(lanCfg);
+    CHECK(lanClient.VerifyDocument(
+        TokenJson("room-1", kSecretHex, localHost, 47825, expiry,
+                  crypto::ToHexLower(localSig)),
+        "room-1", now, &tok, &err));
+  }
 }
 
 static void TestFetchOverTls() {
