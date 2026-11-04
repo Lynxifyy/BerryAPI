@@ -221,6 +221,7 @@ TEST_SRC := \
   tests/test_render.cpp \
   tests/test_sample.cpp \
   tests/test_sigscan.cpp \
+  tests/test_x86_length.cpp \
   tests/test_thread.cpp \
   tests/test_fuzz.cpp \
   tests/test_manifest.cpp \
