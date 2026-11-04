@@ -160,6 +160,51 @@ class TinyHttpServer final : public TinyTcpAcceptor {
     ::send(conn, resp.data(), resp.size(), MSG_NOSIGNAL);
   }
 };
+/// A server that answers each path with a specific framing, to exercise the
+/// client's strict body handling: chunked transfer-encoding, a Content-Length
+/// that promises more than is sent (a truncated body), duplicate headers and an
+/// obsolete line fold.
+class TinyFramingServer final : public TinyTcpAcceptor {
+ protected:
+  void Handle(int conn) override {
+    std::string req = RecvUntil(conn, "\r\n\r\n", 2000);
+    if (req.empty()) return;
+    std::string resp;
+    if (req.rfind("GET /chunked", 0) == 0) {
+      // "Hello, " + "chunked world!" in two chunks.
+      resp = "HTTP/1.1 200 OK\r\n"
+             "Transfer-Encoding: chunked\r\n"
+             "Connection: close\r\n\r\n"
+             "7\r\nHello, \r\n"
+             "e\r\nchunked world!\r\n"
+             "0\r\n\r\n";
+    } else if (req.rfind("GET /short", 0) == 0) {
+      // Content-Length 100 but only 5 bytes are sent, then the socket closes.
+      resp = "HTTP/1.1 200 OK\r\n"
+             "Content-Length: 100\r\n"
+             "Connection: close\r\n\r\n"
+             "short";
+    } else if (req.rfind("GET /dup", 0) == 0) {
+      resp = "HTTP/1.1 200 OK\r\n"
+             "X-A: one\r\n"
+             "X-A: two\r\n"
+             "Content-Length: 2\r\n"
+             "Connection: close\r\n\r\nok";
+    } else if (req.rfind("GET /fold", 0) == 0) {
+      resp = "HTTP/1.1 200 OK\r\n"
+             "X-B: alpha\r\n"
+             "  beta\r\n"
+             "Content-Length: 2\r\n"
+             "Connection: close\r\n\r\nok";
+    } else if (req.rfind("GET /badstatus", 0) == 0) {
+      resp = "HTTP/1.1 XX OK\r\nContent-Length: 0\r\n\r\n";
+    } else {
+      resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+    }
+    ::send(conn, resp.data(), resp.size(), MSG_NOSIGNAL);
+  }
+};
+
 /// A server that answers with valid HTTP headers and then dribbles the body
 /// one byte at a time, just slower than a client's per-read timeout. It exists
 /// to pin the difference between a per-read timeout (which it defeats: the read

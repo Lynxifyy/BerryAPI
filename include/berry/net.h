@@ -176,11 +176,27 @@ class BERRY_API HttpRequest {
 
   HttpResponse Do();
 
+  /// True when the URL carried a character that must never appear in a request
+  /// line or a header value (CR, LF or NUL). Such a URL is refused outright so
+  /// it can never become a request-splitting injection (bug 32).
+  bool malformed() const { return malformed_; }
+
  private:
+  /// True when `s` contains CR, LF or NUL.
+  static bool HasControl(const std::string& s);
+  /// Parses the authority (`host[:port]`, with an optional `[IPv6]` literal and
+  /// an optional userinfo prefix) into `host_`/`port_`. Returns false on a
+  /// malformed authority or an out-of-range/non-numeric port.
+  bool ParseAuthority(const std::string& authority, u16 defaultPort);
+
   std::string url_, method_ = "GET", body_, host_, path_;
   u16 port_ = 80;
   bool badScheme_ = false;
   bool tls_ = false;
+  bool malformed_ = false;
+  /// True when the port was written explicitly (so Host must carry it even if
+  /// it equals the scheme default) (bug 35).
+  bool explicitPort_ = false;
   /// Default 4 MiB: comfortably larger than any JSON/config response, small
   /// enough that a streaming server cannot exhaust the worker's memory.
   size_t maxBodyBytes_ = 4u * 1024 * 1024;

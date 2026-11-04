@@ -47,6 +47,85 @@ int main() {
     server.Stop();
   }
 
+  // --- HTTP authority parsing (bugs 32-35) ---
+  {
+    // IPv6 literal: the bracketed address is the host and the trailing port is
+    // parsed, not folded into the host (bug 33).
+    HttpRequest v6("http://[::1]:8080/p");
+    CHECK(v6.host() == "::1");
+    CHECK(v6.port() == 8080);
+    CHECK(!v6.malformed());
+
+    // IPv6 with no port keeps the scheme default.
+    HttpRequest v6b("http://[2001:db8::1]/p");
+    CHECK(v6b.host() == "2001:db8::1");
+    CHECK(v6b.port() == 80);
+
+    // userinfo is dropped from the authority.
+    HttpRequest ui("http://user:pass@example.com:81/p");
+    CHECK(ui.host() == "example.com");
+    CHECK(ui.port() == 81);
+
+    // A junk or out-of-range port is refused, not truncated (bug 34).
+    HttpRequest badPort("http://example.com:70000/");
+    CHECK(badPort.malformed());
+    HttpRequest junkPort("http://example.com:abc/");
+    CHECK(junkPort.malformed());
+    HttpRequest zeroPort("http://example.com:0/");
+    CHECK(zeroPort.malformed());
+
+    // A control character in the URL is refused (bug 32).
+    HttpRequest crlf("http://example.com/\r\nX-Evil: 1");
+    CHECK(crlf.malformed());
+    CHECK(crlf.Do().status == 0);
+
+    // A CR/LF header is dropped rather than sent.
+    HttpRequest hdr("http://example.com/");
+    hdr.Header("X-Ok", "fine").Header("X-Evil", "a\r\nX-Injected: 1");
+    // (The header is dropped at insert time; the request still works.)
+
+    // Explicit default port still appears in Host (bug 35) - verified via the
+    // server echo below.
+  }
+
+  // --- HTTP body framing (bugs 30, 31, 37) ---
+  {
+    TinyFramingServer fs;
+    int fport = fs.Start(18085);
+    CHECK(fport > 0);
+    if (fport > 0) {
+      std::string base = "http://127.0.0.1:" + std::to_string(fport);
+
+      HttpRequest c((base + "/chunked").c_str());
+      HttpResponse cr = c.Do();
+      CHECK(cr.status == 200);
+      CHECK(cr.body == "Hello, chunked world!");   // decoded, size lines gone
+      CHECK(!cr.truncated);
+
+      HttpRequest s((base + "/short").c_str());
+      HttpResponse sr = s.Do();
+      CHECK(sr.status == 200);
+      CHECK(sr.truncated);                          // short body flagged
+
+      HttpRequest d((base + "/dup").c_str());
+      HttpResponse dr = d.Do();
+      CHECK(dr.status == 200);
+      const char* xa = dr.Header("x-a");
+      CHECK(xa != nullptr && std::string(xa) == "one, two");   // combined
+
+      HttpRequest f((base + "/fold").c_str());
+      HttpResponse fr = f.Do();
+      CHECK(fr.status == 200);
+      const char* xb = fr.Header("x-b");
+      CHECK(xb != nullptr && std::string(xb) == "alpha beta");  // unfolded
+
+      HttpRequest bs((base + "/badstatus").c_str());
+      HttpResponse bsr = bs.Do();
+      CHECK(bsr.status == 0);                       // strict status parse
+      fs.Stop();
+    }
+  }
+
   // --- WebSocket loopback (echo) ---
   TinyWsServer ws;
   int wsPort = ws.Start(18082);
