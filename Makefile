@@ -36,6 +36,7 @@ include tools/sources.mk
 # tracking exists to prevent.
 -include build/tools/berry-run.d
 -include build/tools/berry-relay.d
+-include build/tools/berry-sigcheck.d
 -include $(MBEDTLS_SRC:.c=.d)
 -include $(LZ4_SRC:.c=.d)
 -include $(patsubst %.c,build/san/%.d,$(LZ4_SRC))
@@ -151,7 +152,7 @@ check-samples: samples/sample_hitmarker.o
 	@echo "== samples compile OK =="
 	@rm -f samples/sample_hitmarker.o
 
-test: idl-check check-signer check-sigpack-signer check-sources check-android-sources check-mbedtls check-run $(TEST_BINS) build/$(SHARED_NAME) check-samples
+test: idl-check check-signer check-sigpack-signer check-sources check-android-sources check-mbedtls check-run check-sigcheck $(TEST_BINS) build/$(SHARED_NAME) check-samples
 	@for b in $(TEST_BINS); do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
@@ -285,6 +286,30 @@ build/berry-run: $(RUN_OBJ) $(CORE_OBJ)
 .PHONY: berry-run
 berry-run: build/berry-run
 	@echo "== built build/berry-run =="
+
+# The offline signature-table validator (tools/berry-sigcheck.cpp): proves a
+# signature table against an extracted module in CI, before release. It links
+# the portable core so it uses the same parser/scanner the runtime uses.
+SIGCHECK_OBJ := build/tools/berry-sigcheck.o
+build/tools/berry-sigcheck.o: tools/berry-sigcheck.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Itools -c $< -o $@
+
+build/berry-sigcheck: $(SIGCHECK_OBJ) $(CORE_OBJ)
+	$(CXX) $(LDFLAGS) $(SIGCHECK_OBJ) $(CORE_OBJ) -ldl -o $@
+
+.PHONY: berry-sigcheck
+berry-sigcheck: build/berry-sigcheck
+	@echo "== built build/berry-sigcheck =="
+
+# Self-check: the tool must read a build-id from a real ELF and match a pattern
+# against it. Uses the tool's own binary as the ELF.
+.PHONY: check-sigcheck
+check-sigcheck: build/berry-sigcheck
+	@id=$$(./build/berry-sigcheck build/berry-sigcheck --build-id) || { echo "check-sigcheck: no build-id"; exit 1; }; \
+	[ -n "$$id" ] || { echo "check-sigcheck: empty build-id"; exit 1; }; \
+	./build/berry-sigcheck build/berry-sigcheck --pattern "7F 45 4C 46" >/dev/null || { echo "check-sigcheck: ELF magic did not match"; exit 1; }; \
+	echo "== berry-sigcheck OK =="
 
 # End-to-end check for the developer CLI. It drives the real binary through
 # every mode and asserts the exit code, so the argument parsing, the verified

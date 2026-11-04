@@ -31,19 +31,29 @@ const char* SigStateName(SigState s);
 // single JSON signature table rather than hardcoded offsets.
 //----------------------------------------------------------------------------
 
-// A signature is a byte array where `0x00` bytes at positions covered by
-// `mask` are wildcards.
+// A signature is a byte array plus a per-byte mask of the bits that must match.
+// `wild[i]` is the fixed-bit mask (0xFF = a whole byte must match, 0x00 = a
+// full wildcard, 0xF0 / 0x0F = a half-nibble wildcard). `mask` is kept as the
+// "1 = fully fixed, 0 = fully wildcard" view for existing callers.
 struct BERRY_API Signature {
   std::string id;
   std::vector<u8> bytes;
   std::vector<u8> mask;  // 0 = wildcard, 1 = must-match
+  std::vector<u8> wild;  // bit mask of fixed bits (0xFF fully fixed)
   i32 fromEndOffset = 0; // offset from scan start to "resolve target"
 
   Signature() = default;
   Signature(std::string id_, const char* hexPattern, i32 fromEndOffset_ = 0);
 
-  /// Parses "xx xx x? xx ..." style pattern strings with '?' wildcards.
-  bool Parse(const char* hex);
+  /// Parses a hex pattern. Accepts space-separated tokens in several styles:
+  ///   "48 8D 0D ? ? ? ?"   (classic '?' wildcard byte)
+  ///   "48 8D ?? 0D"        (IDA/Ghidra '??' wildcard byte)
+  ///   "A? 10 ?B"           (half-nibble wildcards)
+  ///   "\x48\x8D\x0D"       (C-escaped bytes)
+  /// A single hex digit with no wildcard ("F") is a parse error, not 0xF0
+  /// (bugs 14, 15). On failure the pattern is cleared and `error` (when given)
+  /// explains why.
+  bool Parse(const char* hex, std::string* error = nullptr);
   bool Match(const u8* data) const;
   uptr Resolve(uptr scanStart) const;
 };
@@ -53,13 +63,29 @@ struct BERRY_API MemRange {
   uptr base;
   size_t size;
   std::string name;
+  /// The `dev` field and inode of the backing file (both 0 for an anonymous
+  /// mapping), so a range is identified by identity rather than by a path
+  /// substring (bugs 19, 23).
+  std::string dev;
+  u64 inode = 0;
+  /// True for an execute-only (`--x`) mapping, whose bytes are not readable
+  /// directly (bug 18).
+  bool executeOnly = false;
 };
 
 class BERRY_API ProcessImages {
  public:
-  /// Enumerates readable/executable ranges of the current process, merged by
-  /// mapping. On Android this is /proc/self/maps, on desktop /proc/self/maps.
+  /// Enumerates the readable/executable (and execute-only) ranges of the
+  /// current process, merged by backing file identity. The result is cached;
+  /// call `Refresh` after a dlopen/dlclose so newly loaded libraries appear
+  /// (bugs 24, 25).
   static std::vector<MemRange> EnumExecutable();
+  /// Drops the cached maps parse so the next EnumExecutable re-reads
+  /// /proc/self/maps.
+  static void Refresh();
+  /// A counter bumped on every Refresh, so a cached scanner can tell that the
+  /// mapping set changed and rebuild (bug 25).
+  static u64 Generation();
   /// The main game module (libminecraftpe.so) if identified.
   static uptr MainModuleBase(const char* name = "libminecraftpe.so");
   static size_t MainModuleSize();
@@ -79,15 +105,30 @@ class BERRY_API ProcessImages {
 
 struct BERRY_API BuildLibrary {
   std::string name;          // e.g. "libminecraftpe.so"
-  uptr base = 0;             // module base address
-  u64 textHash = 0;          // hash of the exported .text bytes
+  uptr base = 0;             // module base address (informational; ASLR-variant)
+  u64 textHash = 0;          // hash of the exported .text bytes (on disk)
   u64 fileSize = 0;          // size of the backing file, if available
   size_t textSize = 0;
+  /// The ELF NT_GNU_BUILD_ID of the module, hex. This is the ASLR-stable
+  /// identity the gate compares (bug 22); it is empty when it cannot be read.
+  std::string buildId;
+  /// The module's `dev` and inode, which identify it without relying on a path
+  /// substring (bugs 19, 23).
+  std::string dev;
+  u64 inode = 0;
   bool verified = false;     // matched an expected fingerprint
 
   /// Fingerprints the main game module (or `name`) in the current process.
   static BuildLibrary Fingerprint(const char* name = "libminecraftpe.so");
+  /// Hashes `len` bytes with FNV-1a. Retained for callers that need a cheap
+  /// in-memory fingerprint; integrity checks use `HashSectionSha256`.
   static u64 HashSection(const u8* data, size_t len);
+  /// SHA-256 (hex) of `len` bytes. Used to fingerprint the on-disk file rather
+  /// than live, hook-patched memory (bugs 21, improvement 22).
+  static std::string HashSectionSha256(const u8* data, size_t len);
+  /// The NT_GNU_BUILD_ID of the ELF at `path` (hex), or empty. Reads the file,
+  /// not memory, so it is unaffected by our own hooks.
+  static std::string ReadBuildId(const char* path);
 };
 
 /// Scans `range` memory for the signature; returns resolved target or 0.
@@ -104,6 +145,30 @@ class BERRY_API SigScanner {
   /// True if a pattern matches at `addr`.
   bool MatchesAt(uptr addr, const Signature& sig) const;
 
+  /// A rule that must match exactly once. On success `out` holds the address;
+  /// on failure `matches` reports how many times it matched (0 = not found,
+  /// >1 = ambiguous), so a failure explains itself (improvement 24).
+  uptr FindUnique(const Signature& sig, size_t* matches) const;
+
+  /// The address of the occurrence that differs from `sig` in the fewest
+  /// fixed bits, and that difference count, so a rule that missed after a game
+  /// patch can be updated quickly (improvement 25). Returns 0 when no range is
+  /// long enough to hold the pattern.
+  uptr ClosestMatch(const Signature& sig, size_t* differingBits) const;
+
+  /// Scans the ranges in parallel on a small worker pool, stopping at the first
+  /// hit (improvement 31). Falls back to a serial scan for a single range.
+  uptr FindParallel(const Signature& sig, size_t workers) const;
+
+  /// The ranges this scanner was built over (a copy), so a caller can scan
+  /// without holding a lock on the cache.
+  const std::vector<MemRange>& ranges() const { return ranges_; }
+
+  /// Scans with a SIGSEGV guard: if a page in the range is unmapped or
+  /// unreadable mid-scan (a dlclose raced the scan), the fault aborts the scan
+  /// and returns 0 instead of crashing the game (bug 20, improvement 29).
+  uptr FindGuarded(const Signature& sig) const;
+
  private:
   std::vector<MemRange> ranges_;
 };
@@ -115,13 +180,23 @@ class BERRY_API SigScanner {
 
 namespace arm64 {
 
+/// True when `insn` is an `adrp`. The opcode field is `0x90` in bits 28:24 and
+/// bit 31 (op) is 1; immlo in bits 30:29 varies, so testing only bits 31:24
+/// against 0x90 misses three quarters of adrp instructions (bug 27).
+inline bool IsAdrp(u32 insn) {
+  return (insn & 0x9F000000U) == 0x90000000U;
+}
+
 /// Decodes `adrp Rd, #imm` at `pc`; returns page address (Rd's value).
 BERRY_API uptr DecodeAdrp(u32 insn, uptr pc);
-/// Decodes `add Rd, Rn, #imm12`; returns the offset applied.
+/// Decodes `add Rd, Rn, #imm12` (with the optional `lsl #12`); returns the
+/// offset applied. The `sh` field is ONE bit (bit 22) meaning `<<12`, not a
+/// two-bit shift count (bug 28): reading bits 23:22 as a shift count returned
+/// 2 for `add x0, x0, #1, lsl 12` instead of 4096.
 inline uptr DecodeAddImm(u32 insn) {
   u32 imm = (insn & 0x3FFC00U) >> 10;             // imm12
-  u32 shift = (insn & 0xC00000U) >> 22;           // 0=byte,1=half,2=word,3=double
-  return imm << (shift == 1 ? 1 : shift == 2 ? 2 : shift == 3 ? 3 : 0);
+  u32 sh = (insn & 0x00400000U) >> 22;            // 0=<<0, 1=<<12
+  return (uptr)(imm << (sh ? 12 : 0));
 }
 inline u32 InsnOpcode(u32 insn) { return insn & 0x7C000000U; }
 
@@ -132,9 +207,24 @@ BERRY_API uptr ResolveAdrpAdd(uptr pc, u32 rdTarget);
 BERRY_API uptr ResolveAdrpAddForward(uptr adrpPc, u32 rd);
 
 /// Scans the module for all instructions that reference `target` via the
-/// adrp+add pair, returning up to maxResults PCs. Classic xref finder.
+/// adrp+add pair, returning up to maxResults PCs. Classic xref finder. The scan
+/// stays inside [moduleBase, moduleBase+moduleSize) and never reads past the
+/// end (bug 29).
 BERRY_API std::vector<uptr> FindAdrpXrefs(uptr moduleBase, size_t moduleSize,
                                           uptr target, size_t maxResults = 32);
+
+/// Typed xref helpers (improvement 26). Each returns 0 (or an empty vector)
+/// when the instruction is not of the expected form, and every look-ahead is
+/// bounds-checked against [moduleBase, moduleBase+moduleSize).
+
+/// Destination of a `bl #imm` / `b #imm` at `pc`, or 0 when `pc` is out of
+/// range or the instruction is not an unconditional branch-with-link.
+BERRY_API uptr XrefBlTarget(uptr moduleBase, size_t moduleSize, uptr pc);
+/// The PC of the first `adrp; add` pair that resolves to `target`.
+BERRY_API uptr XrefAdrpAdd(uptr moduleBase, size_t moduleSize, uptr target);
+/// All PCs of `bl #imm` instructions that target `target` in the module.
+BERRY_API std::vector<uptr> XrefBls(uptr moduleBase, size_t moduleSize,
+                                    uptr target, size_t maxResults = 32);
 
 /// Decodes `bl #offset` (BL/B) at `pc` -> destination address.
 inline uptr BranchTarget(u32 insn, uptr pc) {
@@ -184,9 +274,11 @@ class BERRY_API SigCache {
   };
   SigCache() = default;
   bool BuildVerifiedLocked() const;
+  /// Rebuilds the scanner from the current maps when they have changed.
+  SigScanner& ScannerLocked();
   std::vector<std::pair<std::string, Entry>> entries_;
-  SigScanner* scanner_ = nullptr;
-  SigScanner& Scanner();
+  std::unique_ptr<SigScanner> scanner_;
+  u64 scannerGeneration_ = 0;
   BuildLibrary expectedBuild_;
   mutable std::atomic<bool> buildGateOpen_{false};   // fingerprint verified
   std::atomic<bool> gateClosedPermanently_{false};  // empty fingerprint given

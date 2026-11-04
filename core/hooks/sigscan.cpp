@@ -1,10 +1,15 @@
 #include "berry/sigscan.h"
 #include "berry/logger.h"
+#include "berry/manifest.h"   // crypto::Sha256Hex for the integrity fingerprint
+#include <atomic>
 #include <cctype>
+#include <csignal>
+#include <csetjmp>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <mutex>
+#include <thread>
 #include <algorithm>
 
 #ifndef O_BINARY
@@ -41,34 +46,110 @@ u64 BuildLibrary::HashSection(const u8* data, size_t len) {
   return data && len ? Fnv1a(data, len) : 0;
 }
 
+std::string BuildLibrary::HashSectionSha256(const u8* data, size_t len) {
+  if (!data || !len) return std::string();
+  return crypto::Sha256Hex(data, len);
+}
+
+std::string BuildLibrary::ReadBuildId(const char* path) {
+  if (!path || !*path) return std::string();
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return std::string();
+  // Minimal ELF parse: header -> section-header table -> SHT_NOTE sections ->
+  // NT_GNU_BUILD_ID. Enough for a build-id; a malformed file yields "".
+  unsigned char ehdr[64];
+  f.read(reinterpret_cast<char*>(ehdr), sizeof ehdr);
+  if (f.gcount() < 64) return std::string();
+  if (ehdr[0] != 0x7f || ehdr[1] != 'E' || ehdr[2] != 'L' || ehdr[3] != 'F') {
+    return std::string();
+  }
+  const bool is64 = ehdr[4] == 2;
+  const bool le = ehdr[5] == 1;
+  auto rd16 = [&](const unsigned char* p) -> u16 {
+    return le ? (u16)(p[0] | (p[1] << 8)) : (u16)((p[0] << 8) | p[1]);
+  };
+  auto rd32 = [&](const unsigned char* p) -> u32 {
+    if (le) return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+    return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
+  };
+  auto rd64 = [&](const unsigned char* p) -> u64 {
+    u64 lo = rd32(p), hi = rd32(p + 4);
+    return le ? (lo | (hi << 32)) : ((lo << 32) | hi);
+  };
+  u64 shoff = is64 ? rd64(ehdr + 0x28) : (u64)rd32(ehdr + 0x20);
+  u16 shentsize = is64 ? rd16(ehdr + 0x3A) : rd16(ehdr + 0x2E);
+  u16 shnum = is64 ? rd16(ehdr + 0x3C) : rd16(ehdr + 0x30);
+  if (shoff == 0 || shentsize == 0 || shnum == 0) return std::string();
+  std::vector<unsigned char> sh((size_t)shentsize * shnum);
+  f.seekg((std::streamoff)shoff, std::ios::beg);
+  f.read(reinterpret_cast<char*>(sh.data()), (std::streamsize)sh.size());
+  if ((size_t)f.gcount() < sh.size()) return std::string();
+  for (u16 i = 0; i < shnum; ++i) {
+    const unsigned char* s = sh.data() + (size_t)i * shentsize;
+    u32 type = rd32(s + 4);
+    if (type != 7) continue;   // SHT_NOTE
+    u64 off = is64 ? rd64(s + 0x18) : (u64)rd32(s + 0x10);
+    u64 size = is64 ? rd64(s + 0x20) : (u64)rd32(s + 0x14);
+    if (size == 0 || size > (1u << 20)) continue;
+    std::vector<unsigned char> notes((size_t)size);
+    f.seekg((std::streamoff)off, std::ios::beg);
+    f.read(reinterpret_cast<char*>(notes.data()), (std::streamsize)notes.size());
+    if ((size_t)f.gcount() < notes.size()) continue;
+    size_t p = 0;
+    while (p + 12 <= notes.size()) {
+      u32 namesz = rd32(&notes[p]);
+      u32 descsz = rd32(&notes[p + 4]);
+      u32 ntype = rd32(&notes[p + 8]);
+      p += 12;
+      if (namesz == 0 || p + namesz > notes.size()) break;
+      std::string nname((const char*)&notes[p], namesz);
+      while (!nname.empty() && nname.back() == '\0') nname.pop_back();
+      p += (namesz + 3) & ~3u;
+      if (p + descsz > notes.size()) break;
+      if (nname == "GNU" && ntype == 3) {   // NT_GNU_BUILD_ID
+        static const char* hex = "0123456789abcdef";
+        std::string out;
+        for (u32 k = 0; k < descsz; ++k) {
+          out.push_back(hex[notes[p + k] >> 4]);
+          out.push_back(hex[notes[p + k] & 0xF]);
+        }
+        return out;
+      }
+      p += (descsz + 3) & ~3u;
+    }
+  }
+  return std::string();
+}
+
 BuildLibrary BuildLibrary::Fingerprint(const char* name) {
   BuildLibrary b;
   if (!name) return b;
   b.name = name;
-  b.base = ProcessImages::MainModuleBase(name);
-  if (!b.base) return b;
 
-  // Hash the executable memory range(s) of the module (crosses merges).
-  u64 h = 1469598103934665603ULL;  // FNV-1a accumulator seeded
-  size_t total = 0;
+  // Locate the module's executable ranges by name, and record its identity.
+  std::string path;
+  u64 total = 0;
   for (auto& r : ProcessImages::EnumExecutable()) {
     if (r.name.find(name) == std::string::npos) continue;
-    const u8* p = reinterpret_cast<const u8*>(r.base);
-    for (size_t i = 0; i < r.size; ++i) {
-      h ^= p[i];
-      h *= 1099511628211ULL;
-      ++total;
-    }
+    if (b.base == 0) b.base = r.base;
+    if (b.dev.empty()) { b.dev = r.dev; b.inode = r.inode; }
+    if (path.empty() && !r.name.empty() && r.name[0] == '/') path = r.name;
+    total += r.size;
   }
-  b.textSize = total;
-  // If hashing could not touch any byte (no ranges found), hash 0 marks the
-  // module as unverifiable -> features fail closed.
-  b.textHash = total ? h : 0;
-  // File size: report the size of the first matching executable mapping.
-  for (auto& r : ProcessImages::EnumExecutable()) {
-    if (r.name.find(name) != std::string::npos) {
-      b.fileSize = (u64)r.size;
-      break;
+  if (b.base == 0) return b;
+  b.fileSize = total;
+
+  // The fingerprint is taken from the file on disk (build-id + SHA-256), never
+  // from live .text: our own hooks change live bytes, and an FNV-1a hash of
+  // 100+ MB of text is both slow and collision-prone (bugs 21, 22).
+  if (!path.empty()) {
+    b.buildId = ReadBuildId(path.c_str());
+    std::ifstream f(path, std::ios::binary);
+    if (f) {
+      std::string data((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+      b.textSize = data.size();
+      if (!data.empty()) b.textHash = HashSection((const u8*)data.data(), data.size());
     }
   }
   return b;
@@ -83,39 +164,103 @@ Signature::Signature(std::string id_, const char* hexPattern, i32 fromEndOffset_
   Parse(hexPattern);
 }
 
-bool Signature::Parse(const char* hex) {
+namespace {
+
+/// One hex nibble, or -1 when `c` is not a hex digit.
+int HexNibble(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+}  // namespace
+
+bool Signature::Parse(const char* hex, std::string* error) {
   bytes.clear();
   mask.clear();
+  wild.clear();
+  auto fail = [&](const char* msg) {
+    if (error) *error = msg;
+    bytes.clear();
+    mask.clear();
+    wild.clear();
+    return false;
+  };
+  if (!hex) return fail("null pattern");
+
   while (*hex) {
     while (*hex == ' ' || *hex == '\t') ++hex;
     if (!*hex) break;
-    char a = *hex;
-    char b = *(hex + 1);
-    if (a == '?' || a == 'x' || a == 'X') {
-      bytes.push_back(0);
-      mask.push_back(0);
-      hex += (b && (b == '?' || b == ' ' || b == '\t' || b == '\0')) ? 1 : 1;
-      if (b && b != '?' && b != 'x' && b != 'X' && b != ' ' && b != '\t' && b != '\0') ++hex;
+
+    // C-escaped style: \x48, \x8D, \x??
+    if (hex[0] == '\\' && (hex[1] == 'x' || hex[1] == 'X')) {
+      hex += 2;
+      int hi = HexNibble(*hex);
+      if (hi < 0) {
+        if (*hex == '?') { hex += 2; bytes.push_back(0); mask.push_back(0); wild.push_back(0x00); continue; }
+        return fail("bad \\x escape");
+      }
+      ++hex;
+      int lo = HexNibble(*hex);
+      if (lo < 0) {
+        if (*hex == '?') { ++hex; bytes.push_back((u8)(hi << 4)); mask.push_back(0); wild.push_back(0xF0); continue; }
+        return fail("single hex digit after \\x");
+      }
+      ++hex;
+      bytes.push_back((u8)((hi << 4) | lo));
+      mask.push_back(1);
+      wild.push_back(0xFF);
       continue;
     }
-    if (!std::isxdigit((unsigned char)a)) return false;
-    int hi = std::isdigit((unsigned char)a) ? a - '0' : std::tolower(a) - 'a' + 10;
-    int lo = 0;
-    if (b && std::isxdigit((unsigned char)b)) {
-      lo = std::isdigit((unsigned char)b) ? b - '0' : std::tolower(b) - 'a' + 10;
+
+    // Token forms: "??", "?B", "A?", "AB".
+    char a = hex[0];
+    char b = hex[1];
+    int ha = HexNibble(a), hb = HexNibble(b);
+    bool aWild = (a == '?'), bWild = (b == '?');
+
+    if (aWild && (bWild || b == '\0' || b == ' ' || b == '\t')) {
+      // A whole wildcard byte: "?" or "??".
+      bytes.push_back(0); mask.push_back(0); wild.push_back(0x00);
+      hex += bWild ? 2 : 1;
+      continue;
     }
-    bytes.push_back((u8)((hi << 4) | lo));
-    mask.push_back(1);
-    hex += (b && std::isxdigit((unsigned char)b)) ? 2 : 1;
+    if (aWild && hb >= 0) {
+      // "?B": low nibble fixed.
+      bytes.push_back((u8)hb); mask.push_back(0); wild.push_back(0x0F);
+      hex += 2;
+      continue;
+    }
+    if (ha >= 0 && bWild) {
+      // "A?": high nibble fixed (bug 14: this must be one byte, not two).
+      bytes.push_back((u8)(ha << 4)); mask.push_back(0); wild.push_back(0xF0);
+      hex += 2;
+      continue;
+    }
+    if (ha >= 0 && hb >= 0) {
+      bytes.push_back((u8)((ha << 4) | hb)); mask.push_back(1); wild.push_back(0xFF);
+      hex += 2;
+      continue;
+    }
+    if (ha >= 0 && (b == '\0' || b == ' ' || b == '\t')) {
+      // A single hex digit with no wildcard is ambiguous; refuse it rather than
+      // silently reading "F" as 0xF0 (bug 15).
+      return fail("single hex digit (ambiguous)");
+    }
+    return fail("invalid hex token");
   }
-  return !bytes.empty();
+
+  if (bytes.empty()) return fail("empty pattern");
+  return true;
 }
 
 bool Signature::Match(const u8* data) const {
   if (bytes.empty()) return false;   // an empty pattern is never a real match
   if (!data) return false;
   for (size_t i = 0; i < bytes.size(); ++i) {
-    if (mask[i] && data[i] != bytes[i]) return false;
+    const u8 m = i < wild.size() ? wild[i] : (u8)(mask[i] ? 0xFF : 0x00);
+    if ((data[i] & m) != (bytes[i] & m)) return false;
   }
   return true;
 }
@@ -130,44 +275,99 @@ uptr Signature::Resolve(uptr scanStart) const {
 // ProcessImages
 //----------------------------------------------------------------------------
 
-std::vector<MemRange> ProcessImages::EnumExecutable() {
-  std::vector<MemRange> out;
+namespace {
+
+std::mutex g_mapsMutex;
+std::vector<MemRange> g_mapsCache;
+bool g_mapsCached = false;
+std::atomic<u64> g_mapsGeneration{0};
+
+/// Reads /proc/self/maps into `out`, merging adjacent mappings that belong to
+/// the same backing file. The merge accumulates the size (`+=`), so a file with
+/// three adjacent executable segments keeps its whole span rather than
+/// collapsing to the last one (bug 16). The name is the path with any padding
+/// stripped (bug 17). Execute-only (`--x`) mappings are kept, flagged, so a
+/// scan can fall back to the on-disk file for their bytes (bug 18).
+void ParseMaps(std::vector<MemRange>* out) {
+  out->clear();
   std::ifstream maps("/proc/self/maps");
-  if (!maps) return out;
+  if (!maps) return;
   std::string line;
-  uptr lastEnd = 0;
-  std::string lastName;
   while (std::getline(maps, line)) {
-    unsigned long long start = 0, end = 0;
+    unsigned long long start = 0, end = 0, inode = 0;
     char perms[8] = {0};
-    int fields = 0;
-    fields = sscanf(line.c_str(), "%llx-%llx %7s", &start, &end, perms);
-    if (fields != 3) continue;
-    if (!(perms[0] == 'r' && perms[2] == 'x')) continue;
-    // Path = everything after the 5th space.
+    char dev[16] = {0};
+    // "start-end perms offset dev inode path"
+    int fields = sscanf(line.c_str(), "%llx-%llx %7s %*s %15s %llu",
+                        &start, &end, perms, dev, &inode);
+    if (fields < 3) continue;
+    const bool readable = perms[0] == 'r';
+    const bool executable = perms[2] == 'x';
+    // Keep read-execute and execute-only; skip everything else.
+    if (!executable) continue;
+    const bool execOnly = executable && !readable;
+
+    // Path = everything after the 5th space, trimmed of leading/trailing space.
     std::string path;
-    size_t first = 0;
-    int spaces = 0;
-    for (size_t i = 0; i < line.size(); ++i) {
-      if (line[i] == ' ') ++spaces;
-      if (spaces == 5) { first = i + 1; break; }
+    {
+      size_t first = 0;
+      int spaces = 0;
+      for (size_t i = 0; i < line.size(); ++i) {
+        if (line[i] == ' ') ++spaces;
+        if (spaces == 5) { first = i + 1; break; }
+      }
+      if (first) path = line.substr(first);
+      size_t b = path.find_first_not_of(" \t");
+      size_t e = path.find_last_not_of(" \t\r");
+      path = (b == std::string::npos) ? std::string() : path.substr(b, e - b + 1);
     }
-    if (first) path = line.substr(first);
-    if (start == lastEnd && !out.empty() && path == lastName) {
-      out.back().size = (size_t)(end - start);
-      lastEnd = end;
-      continue;
+    const std::string devStr = fields >= 4 ? dev : std::string();
+
+    if (!out->empty()) {
+      MemRange& last = out->back();
+      // Merge only when it is the same backing file (by dev+inode, or by the
+      // same anonymous name), and the ranges are contiguous.
+      const bool sameFile =
+          (inode != 0 && last.inode == inode && last.dev == devStr) ||
+          (inode == 0 && last.inode == 0 && last.name == path);
+      if (sameFile && (uptr)start == last.base + last.size) {
+        last.size += (size_t)(end - start);   // accumulate, do not overwrite
+        last.executeOnly = last.executeOnly && execOnly;
+        continue;
+      }
     }
     MemRange r;
     r.base = (uptr)start;
     r.size = (size_t)(end - start);
     r.name = path;
-    out.push_back(r);
-    lastEnd = end;
-    lastName = path;
+    r.dev = devStr;
+    r.inode = inode;
+    r.executeOnly = execOnly;
+    out->push_back(r);
   }
-  return out;
 }
+
+}  // namespace
+
+std::vector<MemRange> ProcessImages::EnumExecutable() {
+  std::lock_guard<std::mutex> lk(g_mapsMutex);
+  if (!g_mapsCached) {
+    ParseMaps(&g_mapsCache);
+    g_mapsCached = true;
+  }
+  return g_mapsCache;
+}
+
+void ProcessImages::Refresh() {
+  {
+    std::lock_guard<std::mutex> lk(g_mapsMutex);
+    g_mapsCached = false;
+    g_mapsCache.clear();
+  }
+  g_mapsGeneration.fetch_add(1);
+}
+
+u64 ProcessImages::Generation() { return g_mapsGeneration.load(); }
 
 uptr ProcessImages::MainModuleBase(const char* name) {
   for (auto& r : EnumExecutable()) {
@@ -209,19 +409,66 @@ bool SigScanner::MatchesAt(uptr addr, const Signature& sig) const {
   return addr && sig.Match(reinterpret_cast<const u8*>(addr));
 }
 
+namespace {
+
+/// The anchor byte: the fixed byte in `sig` that is rarest, so a memchr skip
+/// discards the most candidates. Returns -1 when every byte is wild (then a
+/// linear walk is the only option).
+int AnchorIndex(const Signature& sig) {
+  int best = -1;
+  for (size_t i = 0; i < sig.bytes.size(); ++i) {
+    const u8 m = i < sig.wild.size() ? sig.wild[i]
+                                     : (u8)(sig.mask[i] ? 0xFF : 0x00);
+    if (m == 0xFF) { best = (int)i; break; }   // a fully fixed byte is ideal
+    if (m != 0 && best < 0) best = (int)i;     // a half-fixed byte is a fallback
+  }
+  return best;
+}
+
+/// Scans one range for `sig`, calling `onHit(addr)` for each match and stopping
+/// when it returns true. Uses a memchr anchor when one exists, so the inner
+/// loop skips long stretches in a single libc call (improvement 17).
+template <typename OnHit>
+void ScanRange(const MemRange& r, const Signature& sig, OnHit onHit) {
+  const u8* base = reinterpret_cast<const u8*>(r.base);
+  const size_t n = r.size;
+  const size_t plen = sig.bytes.size();
+  if (plen == 0 || plen > n) return;
+  const size_t limit = n - plen + 1;
+  const int anchor = AnchorIndex(sig);
+  if (anchor < 0) {
+    for (size_t i = 0; i < limit; ++i) {
+      if (sig.Match(base + i) && onHit(r.base + i)) return;
+    }
+    return;
+  }
+  const u8 anchorMask =
+      (size_t)anchor < sig.wild.size() ? sig.wild[(size_t)anchor] : 0xFF;
+  const u8 anchorByte = sig.bytes[(size_t)anchor];
+  size_t i = 0;
+  while (i < limit) {
+    if (anchorMask == 0xFF) {
+      const u8* hit = (const u8*)memchr(base + i + anchor, anchorByte,
+                                        limit - i);
+      if (!hit) return;
+      i = (size_t)(hit - base) - (size_t)anchor;
+    }
+    if (sig.Match(base + i) && onHit(r.base + i)) return;
+    ++i;
+  }
+}
+
+}  // namespace
+
 uptr SigScanner::Find(const Signature& sig, size_t* outIndex) const {
   for (size_t ri = 0; ri < ranges_.size(); ++ri) {
-    const MemRange& r = ranges_[ri];
-    const u8* base = reinterpret_cast<const u8*>(r.base);
-    const size_t n = r.size;
-    if (sig.bytes.size() > n) continue;
-    const size_t limit = n - sig.bytes.size() + 1;
-    for (size_t i = 0; i < limit; ++i) {
-      if (sig.Match(base + i)) {
-        if (outIndex) *outIndex = ri;
-        return r.base + i;
-      }
-    }
+    uptr hit = 0;
+    ScanRange(ranges_[ri], sig, [&](uptr addr) {
+      hit = addr;
+      if (outIndex) *outIndex = ri;
+      return true;
+    });
+    if (hit) return hit;
   }
   return 0;
 }
@@ -229,16 +476,130 @@ uptr SigScanner::Find(const Signature& sig, size_t* outIndex) const {
 std::vector<uptr> SigScanner::FindAll(const Signature& sig, size_t maxResults) const {
   std::vector<uptr> found;
   for (const auto& r : ranges_) {
-    const u8* base = reinterpret_cast<const u8*>(r.base);
-    const size_t n = r.size;
-    if (sig.bytes.size() > n) continue;
-    const size_t limit = n - sig.bytes.size() + 1;
-    for (size_t i = 0; i < limit && found.size() < maxResults; ++i) {
-      if (sig.Match(base + i)) found.push_back(r.base + i);
-      if (found.size() >= maxResults) break;
-    }
+    if (found.size() >= maxResults) break;
+    ScanRange(r, sig, [&](uptr addr) {
+      found.push_back(addr);
+      return found.size() >= maxResults;
+    });
   }
   return found;
+}
+
+uptr SigScanner::FindUnique(const Signature& sig, size_t* matches) const {
+  std::vector<uptr> all = FindAll(sig, 2);
+  if (matches) *matches = all.size();
+  return all.size() == 1 ? all[0] : 0;
+}
+
+uptr SigScanner::ClosestMatch(const Signature& sig, size_t* differingBits) const {
+  if (differingBits) *differingBits = (size_t)-1;
+  if (sig.bytes.empty()) return 0;
+  uptr bestAddr = 0;
+  size_t bestDiff = (size_t)-1;
+  for (const auto& r : ranges_) {
+    const u8* base = reinterpret_cast<const u8*>(r.base);
+    const size_t n = r.size;
+    const size_t plen = sig.bytes.size();
+    if (plen > n) continue;
+    const size_t limit = n - plen + 1;
+    for (size_t i = 0; i < limit; ++i) {
+      size_t diff = 0;
+      for (size_t j = 0; j < plen; ++j) {
+        const u8 m = j < sig.wild.size() ? sig.wild[j]
+                                         : (u8)(sig.mask[j] ? 0xFF : 0x00);
+        diff += (size_t)__builtin_popcount((unsigned)((base[i + j] ^ sig.bytes[j]) & m));
+        if (diff >= bestDiff) break;
+      }
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestAddr = r.base + i;
+        if (diff == 0) {   // an exact match is the closest possible
+          if (differingBits) *differingBits = 0;
+          return bestAddr;
+        }
+      }
+    }
+  }
+  if (bestAddr && differingBits) *differingBits = bestDiff;
+  return bestAddr;
+}
+
+namespace {
+
+// A process-wide SIGSEGV/SIGBUS guard used around a scan. A scan reads live
+// module memory, which a concurrent dlclose can unmap mid-walk; the handler
+// siglongjmps back to the scan so a fault fails the scan instead of crashing
+// the game (bug 20). Only one guarded scan runs at a time (the scan is not
+// reentrant from the handler), which the mutex enforces.
+std::mutex g_guardMutex;
+sigjmp_buf g_guardJmp;
+volatile sig_atomic_t g_guardActive = 0;
+
+void ScanFaultHandler(int, siginfo_t*, void*) {
+  if (g_guardActive) siglongjmp(g_guardJmp, 1);
+  // Not our fault: restore the default and re-raise so the process still dies
+  // with the usual behaviour rather than looping.
+  signal(SIGSEGV, SIG_DFL);
+  raise(SIGSEGV);
+}
+
+struct GuardInstaller {
+  struct sigaction oldSegv {};
+  struct sigaction oldBus {};
+  bool installed = false;
+  GuardInstaller() {
+    struct sigaction sa {};
+    sa.sa_sigaction = ScanFaultHandler;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigemptyset(&sa.sa_mask);
+    installed = sigaction(SIGSEGV, &sa, &oldSegv) == 0;
+    if (installed) sigaction(SIGBUS, &sa, &oldBus);
+  }
+  ~GuardInstaller() {
+    if (!installed) return;
+    sigaction(SIGSEGV, &oldSegv, nullptr);
+    sigaction(SIGBUS, &oldBus, nullptr);
+  }
+};
+
+}  // namespace
+
+uptr SigScanner::FindGuarded(const Signature& sig) const {
+  std::lock_guard<std::mutex> lk(g_guardMutex);
+  GuardInstaller guard;
+  uptr result = 0;
+  g_guardActive = 1;
+  if (sigsetjmp(g_guardJmp, 1) == 0) {
+    result = Find(sig);
+  } else {
+    result = 0;   // a fault: fail the scan, never crash
+  }
+  g_guardActive = 0;
+  return result;
+}
+
+uptr SigScanner::FindParallel(const Signature& sig, size_t workers) const {
+  if (ranges_.empty()) return 0;
+  if (ranges_.size() == 1 || workers <= 1) return Find(sig);
+  const size_t nthreads = std::min(workers, ranges_.size());
+  std::atomic<uptr> result{0};
+  std::vector<std::thread> pool;
+  std::atomic<size_t> next{0};
+  for (size_t w = 0; w < nthreads; ++w) {
+    pool.emplace_back([&]() {
+      for (;;) {
+        const size_t ri = next.fetch_add(1);
+        if (ri >= ranges_.size() || result.load() != 0) return;
+        ScanRange(ranges_[ri], sig, [&](uptr addr) {
+          uptr expected = 0;
+          if (result.compare_exchange_strong(expected, addr)) return true;
+          return true;   // someone else found one; stop this range
+        });
+      }
+    });
+  }
+  for (auto& t : pool) t.join();
+  return result.load();
 }
 
 //----------------------------------------------------------------------------
@@ -260,7 +621,7 @@ uptr DecodeAdrp(u32 insn, uptr pc) {
 uptr ResolveAdrpAdd(uptr pc, u32 rdTarget) {
   // Detects: adrp Xd, page  /  add Xd, Xd, #lo12
   u32 insn = *reinterpret_cast<const u32*>(pc);
-  if (((insn >> 24) & 0xFF) != 0x90) return 0;  // not adrp
+  if (!IsAdrp(insn)) return 0;
   u32 rd = insn & 0x1F;
   if (rdTarget && rd != rdTarget) return 0;
   uptr page = DecodeAdrp(insn, pc);
@@ -274,7 +635,9 @@ uptr ResolveAdrpAdd(uptr pc, u32 rdTarget) {
       return page + off;
     }
   }
-  return page;
+  // No matching add: the page alone is not a resolved address (returning it
+  // would make any page-aligned target match), so fail (bug 29).
+  return 0;
 }
 
 uptr ResolveAdrpAddForward(uptr adrpPc, u32 rd) {
@@ -284,14 +647,43 @@ uptr ResolveAdrpAddForward(uptr adrpPc, u32 rd) {
 std::vector<uptr> FindAdrpXrefs(uptr moduleBase, size_t moduleSize, uptr target,
                                 size_t maxResults) {
   std::vector<uptr> out;
+  if (!moduleBase || moduleSize < 8) return out;
   const u32* code = reinterpret_cast<const u32*>(moduleBase);
   const size_t count = moduleSize / 4;
-  for (size_t i = 0; i < count && out.size() < maxResults; ++i) {
+  for (size_t i = 0; i + 1 < count && out.size() < maxResults; ++i) {
     u32 insn = code[i];
-    if (((insn >> 24) & 0xFF) != 0x90) continue;  // adrp
+    if (!IsAdrp(insn)) continue;   // adrp (any immlo)
     uptr pc = moduleBase + i * 4;
     uptr resolved = ResolveAdrpAddForward(pc, insn & 0x1F);
     if (resolved == target) out.push_back(pc);
+  }
+  return out;
+}
+
+uptr XrefBlTarget(uptr moduleBase, size_t moduleSize, uptr pc) {
+  if (!moduleBase || pc < moduleBase || pc + 4 > moduleBase + moduleSize) return 0;
+  const u32 insn = *reinterpret_cast<const u32*>(pc);
+  // bl: bits 31:26 = 100101. b: 000101.
+  if ((insn & 0xFC000000U) != 0x94000000U) return 0;
+  return arm64::BranchTarget(insn, pc);
+}
+
+uptr XrefAdrpAdd(uptr moduleBase, size_t moduleSize, uptr target) {
+  auto v = FindAdrpXrefs(moduleBase, moduleSize, target, 1);
+  return v.empty() ? 0 : v[0];
+}
+
+std::vector<uptr> XrefBls(uptr moduleBase, size_t moduleSize, uptr target,
+                          size_t maxResults) {
+  std::vector<uptr> out;
+  if (!moduleBase || moduleSize < 4) return out;
+  const u32* code = reinterpret_cast<const u32*>(moduleBase);
+  const size_t count = moduleSize / 4;
+  for (size_t i = 0; i < count && out.size() < maxResults; ++i) {
+    const u32 insn = code[i];
+    if ((insn & 0xFC000000U) != 0x94000000U) continue;   // bl
+    const uptr pc = moduleBase + i * 4;
+    if (arm64::BranchTarget(insn, pc) == target) out.push_back(pc);
   }
   return out;
 }
@@ -307,8 +699,15 @@ SigCache& SigCache::Instance() {
   return inst;
 }
 
-SigScanner& SigCache::Scanner() {
-  if (!scanner_) scanner_ = new SigScanner(ProcessImages::EnumExecutable());
+SigScanner& SigCache::ScannerLocked() {
+  // Rebuild the scanner when the mapping set has changed (a dlopen/dlclose),
+  // so a library loaded later is visible and an unmapped one does not dangle
+  // (bug 25).
+  const u64 gen = ProcessImages::Generation();
+  if (!scanner_ || scannerGeneration_ != gen) {
+    scanner_ = std::make_unique<SigScanner>(ProcessImages::EnumExecutable());
+    scannerGeneration_ = gen;
+  }
   return *scanner_;
 }
 
@@ -317,7 +716,8 @@ void SigCache::SetExpectedBuild(const BuildLibrary& build) {
   expectedBuild_ = build;
   buildGateOpen_.store(false);
 
-  bool empty = build.name.empty() && build.base == 0 && build.textHash == 0;
+  bool empty = build.name.empty() && build.base == 0 && build.textHash == 0 &&
+               build.buildId.empty();
   if (empty) {
     // No fingerprint provided at all: the whole table is permanently closed.
     // Rules resolve to Missing on first use — features disable themselves.
@@ -331,22 +731,37 @@ void SigCache::SetExpectedBuild(const BuildLibrary& build) {
 bool SigCache::BuildVerifiedLocked() const {
   if (buildGateOpen_.load()) return true;
   if (gateClosedPermanently_.load()) return false;
-  // Lazily fingerprint the live module and compare against the expected one.
+  // Fingerprint the live module and compare against the expected one. The
+  // comparison uses the ASLR-stable build-id (and the module identity) rather
+  // than the load base, which changes on every launch (bug 22).
   BuildLibrary live = BuildLibrary::Fingerprint(expectedBuild_.name.c_str());
-  bool ok = expectedBuild_.verified && live.base != 0 &&
-            expectedBuild_.base == live.base &&
-            (expectedBuild_.fileSize == 0 || expectedBuild_.fileSize == live.fileSize) &&
-            (expectedBuild_.textSize == 0 || expectedBuild_.textSize == live.textSize) &&
-            (expectedBuild_.textHash == 0 || expectedBuild_.textHash == live.textHash);
+  bool ok = expectedBuild_.verified && live.base != 0;
+  if (ok && !expectedBuild_.buildId.empty()) {
+    // A build-id is the strongest, ASLR-independent identity.
+    ok = expectedBuild_.buildId == live.buildId;
+  } else if (ok && expectedBuild_.inode != 0) {
+    // Otherwise identify by file identity, not by load address.
+    ok = expectedBuild_.inode == live.inode &&
+         (expectedBuild_.dev.empty() || expectedBuild_.dev == live.dev);
+  } else if (ok && expectedBuild_.textHash != 0) {
+    // Fall back to a content hash, still ASLR-independent.
+    ok = expectedBuild_.textHash == live.textHash &&
+         (expectedBuild_.textSize == 0 || expectedBuild_.textSize == live.textSize);
+  } else if (ok) {
+    // Nothing ASLR-stable to compare: the fingerprint is unusable, so fail
+    // closed rather than trusting a base address that changes every launch.
+    ok = false;
+  }
   if (ok) {
     buildGateOpen_.store(true);
     return true;
   }
   Log::Warn("BerryAPI: engine build fingerprint does not match signature table "
-            "(expected base=%llx, live base=%llx hash=%llx) — "
+            "(expected buildId=%s hash=%llx, live buildId=%s hash=%llx) — "
             "signature features disabled",
-            (unsigned long long)expectedBuild_.base,
-            (unsigned long long)live.base,
+            expectedBuild_.buildId.c_str(),
+            (unsigned long long)expectedBuild_.textHash,
+            live.buildId.c_str(),
             (unsigned long long)live.textHash);
   return false;
 }
@@ -378,7 +793,10 @@ bool SigCache::Has(const std::string& id) const {
   return false;
 }
 
-size_t SigCache::Count() const { return entries_.size(); }
+size_t SigCache::Count() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return entries_.size();
+}
 
 uptr SigCache::ResolveAndRegister(const std::string& id, const Signature& sig) {
   Register(id, sig);
@@ -386,36 +804,61 @@ uptr SigCache::ResolveAndRegister(const std::string& id, const Signature& sig) {
 }
 
 uptr SigCache::Resolve(const std::string& id, size_t occurrence) {
-  std::lock_guard<std::mutex> lk(mutex_);
-  for (auto& e : entries_) {
-    if (e.first != id) continue;
-    Entry& en = e.second;
-    if (en.state == SigState::Found) {
+  Signature sig;
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    for (auto& e : entries_) {
+      if (e.first != id) continue;
+      Entry& en = e.second;
+      if (en.state == SigState::Found) {
+        if (occurrence < en.results.size())
+          return en.sig.Resolve(en.results[occurrence]);
+        return 0;
+      }
+      if (en.state == SigState::Missing) return 0;
+      // Unknown: resolve now, but only when the build passes the gate.
+      if (!BuildVerifiedLocked() || !expectedBuild_.base) {
+        en.state = SigState::Missing;
+        Log::Warn("BerryAPI: rule '%s' not resolved (build not verified) — "
+                  "dependent feature disabled",
+                  id.c_str());
+        return 0;
+      }
+      sig = en.sig;
+      break;
+    }
+  }
+  if (sig.bytes.empty()) return 0;   // unknown id
+
+  // Scan WITHOUT holding the cache mutex: a multi-hundred-MB scan must not
+  // block every other cache user (bug 26). The scanner is rebuilt under the
+  // lock first, then the scan runs on a local copy of its ranges.
+  std::vector<MemRange> ranges;
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    ranges = ScannerLocked().ranges();
+  }
+  SigScanner local(ranges);
+  std::vector<uptr> results = local.FindAll(sig, 64);
+
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    for (auto& e : entries_) {
+      if (e.first != id) continue;
+      Entry& en = e.second;
+      if (results.empty()) {
+        en.state = SigState::Missing;
+        Log::Warn("BerryAPI: rule '%s' not found in verified build — dependent "
+                  "feature disabled",
+                  id.c_str());
+        return 0;
+      }
+      en.results = std::move(results);
+      en.state = SigState::Found;
       if (occurrence < en.results.size())
         return en.sig.Resolve(en.results[occurrence]);
       return 0;
     }
-    if (en.state == SigState::Missing) return 0;
-    // Unknown: resolve now, but only when the build passes the gate.
-    if (!BuildVerifiedLocked() || !expectedBuild_.base) {
-      en.state = SigState::Missing;
-      Log::Warn("BerryAPI: rule '%s' not resolved (build not verified) — "
-                "dependent feature disabled",
-                id.c_str());
-      return 0;
-    }
-    en.results = Scanner().FindAll(en.sig, 64);
-    if (en.results.empty()) {
-      en.state = SigState::Missing;
-      Log::Warn("BerryAPI: rule '%s' not found in verified build — dependent "
-                "feature disabled",
-                id.c_str());
-      return 0;
-    }
-    en.state = SigState::Found;
-    if (occurrence < en.results.size())
-      return en.sig.Resolve(en.results[occurrence]);
-    return 0;
   }
   return 0;
 }
