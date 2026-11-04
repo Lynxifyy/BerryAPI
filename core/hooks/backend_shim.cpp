@@ -91,19 +91,38 @@ ShimPool* EnsurePoolFor(void* target) {
   return nullptr;
 }
 
+/// A rel32 field inside the overwritten prologue that must be rebased when the
+/// span moves to a trampoline. `field` is the byte offset of the field; `insnEnd`
+/// is the offset just past the instruction that owns it, which is the base the
+/// CPU computes a RIP-relative operand or a relative branch from — NOT the field
+/// plus four (bug 1: for `cmp dword [rip+x], imm8` the field is not the last
+/// thing in the instruction).
+struct PrologueReloc {
+  size_t field;
+  size_t insnEnd;
+};
+
 /// How many whole instructions the detour must overwrite so at least 5 bytes are
-/// covered, plus the offsets of the rel32 fields inside that span that must be
-/// rebased when the span moves to a trampoline. Returns 0 when the prologue
-/// cannot be decoded or contains a rel8 branch (whose 127-byte reach cannot be
-/// re-created), so a `jmp rel32` is never written over a partial instruction.
-size_t DecodePrologue(const u8* target, std::vector<size_t>* relocs) {
+/// covered, plus the rel32 fields inside that span that must be rebased when the
+/// span moves to a trampoline. Returns 0 when the prologue cannot be decoded,
+/// contains a rel8 branch (whose 127-byte reach cannot be re-created), or ends
+/// in a terminal instruction before five bytes are covered (bug 3: patching past
+/// a `ret` would overwrite the neighbouring function) — so a `jmp rel32` is never
+/// written over a partial instruction.
+size_t DecodePrologue(const u8* target, std::vector<PrologueReloc>* relocs) {
   size_t total = 0;
   while (total < 5) {
     const X86InsnInfo info = X86DecodeInsn(target + total, 16);
     if (!info.ok()) return 0;
     if (info.rel8Branch) return 0;   // cannot relocate a rel8 branch
-    if (info.relocSize == 4) relocs->push_back(total + info.relocOffset);
+    if (info.relocSize == 4)
+      relocs->push_back({total + info.relocOffset, total + info.length});
     total += info.length;
+    if (info.terminal) {
+      // Control does not fall through here. If the terminal instruction did not
+      // bring the span to five bytes there is nothing safe to patch.
+      return total >= 5 ? total : 0;
+    }
     if (total > 20) return 0;        // pathological; refuse rather than guess
   }
   return total;
@@ -138,7 +157,7 @@ BERRY_API BERRY_PatchedFn BERRY_ShimPatchInPlace(void* target, void* detour) {
   if (g_patches.find(target) != g_patches.end()) return nullptr;
 
   const u8* code = static_cast<const u8*>(target);
-  std::vector<size_t> relocs;
+  std::vector<PrologueReloc> relocs;
   const size_t patchLen = DecodePrologue(code, &relocs);
   if (patchLen < 5 || patchLen > sizeof(ShimTrampoline::bytes) - 5) return nullptr;
 
@@ -152,16 +171,18 @@ BERRY_API BERRY_PatchedFn BERRY_ShimPatchInPlace(void* target, void* detour) {
   //    rel32 field (RIP-relative operands, rel32 branches) to its new address.
   memcpy(tr->bytes, code, patchLen);
   memcpy(tr->original, code, patchLen);
-  for (size_t off : relocs) {
+  for (const PrologueReloc& r : relocs) {
     i32 disp = 0;
-    memcpy(&disp, code + off, 4);
-    // The field's value is relative to the end of the *original* instruction;
-    // recompute it against the trampoline's copy.
-    i64 origNext = reinterpret_cast<i64>(code + off + 4) + disp;
-    i64 newDisp = origNext - reinterpret_cast<i64>(tr->bytes + off + 4);
+    memcpy(&disp, code + r.field, 4);
+    // The displacement is relative to the END of the instruction that owns the
+    // field (instruction start + length), which is the base the CPU uses for a
+    // RIP-relative operand and for a relative branch. Recompute it against the
+    // trampoline's copy of the same instruction.
+    i64 origNext = reinterpret_cast<i64>(code + r.insnEnd) + disp;
+    i64 newDisp = origNext - reinterpret_cast<i64>(tr->bytes + r.insnEnd);
     if (newDisp < INT32_MIN || newDisp > INT32_MAX) return nullptr;
     i32 nd = static_cast<i32>(newDisp);
-    memcpy(tr->bytes + off, &nd, 4);
+    memcpy(tr->bytes + r.field, &nd, 4);
   }
   tr->len = patchLen;
   tr->patchLen = patchLen;

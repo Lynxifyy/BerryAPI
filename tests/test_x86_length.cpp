@@ -30,6 +30,7 @@ struct Case {
   bool rel = false;  // relative branch/call
   bool rel8 = false; // rel8 form (not relocatable)
   size_t relocOff = 0;
+  bool terminal = false;  // control does not fall through
 };
 
 void Run(const Case& c) {
@@ -41,10 +42,11 @@ void Run(const Case& c) {
   }
   if (c.len == 0) return;   // a refusal carries no other guarantees
   if (info.ripRelative != c.rip || info.relative != c.rel ||
-      info.rel8Branch != c.rel8) {
-    printf("FAIL decode %-26s flags rip=%d rel=%d rel8=%d (want %d/%d/%d)\n",
-           c.name, info.ripRelative, info.relative, info.rel8Branch, c.rip,
-           c.rel, c.rel8);
+      info.rel8Branch != c.rel8 || info.terminal != c.terminal) {
+    printf("FAIL decode %-26s flags rip=%d rel=%d rel8=%d term=%d "
+           "(want %d/%d/%d/%d)\n",
+           c.name, info.ripRelative, info.relative, info.rel8Branch,
+           info.terminal, c.rip, c.rel, c.rel8, c.terminal);
     ++g_fail;
   }
   if (c.rip || (c.rel && !c.rel8)) {
@@ -61,8 +63,11 @@ void Run(const Case& c) {
 int main() {
   const std::vector<Case> cases = {
       // --- single-byte, no operand -------------------------------------
-      {"ret",          {0xC3}, 1},
-      {"int3",         {0xCC}, 1},
+      {"ret",          {0xC3}, 1, false, false, false, 0, true},
+      {"ret imm16",    {0xC2, 0x10, 0x00}, 3, false, false, false, 0, true},
+      {"int3",         {0xCC}, 1, false, false, false, 0, true},
+      {"hlt",          {0xF4}, 1, false, false, false, 0, true},
+      {"ud2",          {0x0F, 0x0B}, 2, false, false, false, 0, true},
       {"nop",          {0x90}, 1},
       {"push rbp",     {0x55}, 1},
       {"leave",        {0xC9}, 1},
@@ -73,7 +78,10 @@ int main() {
       {"sub rsp,0x20", {0x48, 0x83, 0xEC, 0x20}, 4},
       {"mov rax,[rbp-8]", {0x48, 0x8B, 0x45, 0xF8}, 4},
       {"mov rax,[rbp+d32]", {0x48, 0x8B, 0x85, 0x00, 0x00, 0x00, 0x00}, 7},
-      {"mov rax,[sib abs]", {0x48, 0x8B, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00}, 8},
+      // mod=00 rm=100 SIB base=101 is RIP-relative [disp32], not absolute.
+      {"mov rax,[rip+sib]", {0x48, 0x8B, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00}, 8, true, false, false, 4},
+      {"mov rax,[rsp]", {0x48, 0x8B, 0x04, 0x24}, 4},
+      {"mov rax,[rsp+8]", {0x48, 0x8B, 0x44, 0x24, 0x08}, 5},
       {"nop dword [rax+rax]", {0x0F, 0x1F, 0x44, 0x00, 0x00}, 5},
       {"endbr64",      {0xF3, 0x0F, 0x1E, 0xFA}, 4},
 
@@ -97,8 +105,8 @@ int main() {
 
       // --- relative branches --------------------------------------------
       {"call rel32",   {0xE8, 0, 0, 0, 0}, 5, false, true, false, 1},
-      {"jmp rel32",    {0xE9, 0, 0, 0, 0}, 5, false, true, false, 1},
-      {"jmp rel8",     {0xEB, 0x05}, 2, false, true, true},
+      {"jmp rel32",    {0xE9, 0, 0, 0, 0}, 5, false, true, false, 1, true},
+      {"jmp rel8",     {0xEB, 0x05}, 2, false, true, true, 0, true},
       {"je rel8",      {0x74, 0x05}, 2, false, true, true},
       {"je rel32",     {0x0F, 0x84, 0, 0, 0, 0}, 6, false, true, false, 2},
       {"jne rel32",    {0x0F, 0x85, 0, 0, 0, 0}, 6, false, true, false, 2},
