@@ -234,12 +234,17 @@ struct BERRY_API WsFrameView {
 };
 
 // Parses a WebSocket frame from an in-memory buffer. Fail closed: returns
-// Invalid for reserved opcodes, RSV bits, or malformed control frames
-// (control frames must be <=125 bytes and FIN). `maxPayload` guards against
-// oversized frame bombs.
+// Invalid for reserved opcodes, RSV bits, malformed control frames (control
+// frames must be <=125 bytes and FIN), a masked frame (a client never receives
+// one from a compliant server) and a non-minimal length encoding. `maxPayload`
+// guards against oversized frame bombs.
 BERRY_API WsFrameStatus ParseWsFrame(const u8* data, size_t len,
                                      WsFrameView* out,
                                      u64 maxPayload = 16u * 1024 * 1024);
+
+/// The Sec-WebSocket-Accept value for a client key: base64(SHA1(key + GUID)).
+/// Exposed so a test can pin it against RFC6455 §1.3.
+BERRY_API std::string WsAcceptFor(const std::string& key);
 
 struct BERRY_API WsMessage {
   WsOpcode opcode = WsOpcode::Text;
@@ -278,7 +283,6 @@ class BERRY_API WebSocket {
 
  private:
   bool SendFrame(WsOpcode op, const void* payload, size_t len);
-  void HandleCloseFrame(const WsMessage& frame);
 
   /// Transport dispatch: the connection is either a plaintext `TcpSocket` or a
   /// verified `TlsSocket`. One of the two is live at a time; these keep the
@@ -288,13 +292,21 @@ class BERRY_API WebSocket {
   bool StreamWaitReadable(const Deadline& dl);
   void StreamClose();
 
+  /// Reads exactly `n` bytes into `out`, appending. False on error/timeout.
+  bool RecvInto(std::string* out, size_t n, const Deadline& dl);
+
   std::unique_ptr<TcpSocket> sock_;
   std::unique_ptr<TlsSocket> tlsSock_;
   bool tls_ = false;
   std::mutex sendMutex_;
   std::string err_;
   bool open_ = false;
-  u64 frameSeq_ = 0;
+  /// Bytes received after the handshake terminator (and any partial frame),
+  /// carried into the frame reader so a frame that arrived in the same read as
+  /// the 101 response is not lost (bug 43).
+  std::vector<u8> rxBuf_;
+  /// True once we have sent a close frame, so a second Close does not resend.
+  bool closeSent_ = false;
 
   WsOpenCb onOpen_;
   WsMessageCb onMessage_;

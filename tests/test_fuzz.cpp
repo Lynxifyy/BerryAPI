@@ -83,11 +83,20 @@ static void ContractWs() {
   CHECK(ParseWsFrame(empty, 2, &v) == WsFrameStatus::Ok);
   CHECK(v.opcode == 0x1 && v.payloadLen == 0 && v.frameLen == 2);
 
-  // Masked frame: "Hi" with mask key 0x12345678.
+  // A masked server-to-client frame is a protocol error for a client (RFC6455
+  // §5.1): the parser refuses it rather than accepting and unmasking.
   u8 masked[] = {0x81, 0x82, 0x12, 0x34, 0x56, 0x78, 0x3D, 0x66};
-  CHECK(ParseWsFrame(masked, sizeof masked, &v) == WsFrameStatus::Ok);
-  CHECK(v.masked && v.payloadLen == 2);
-  CHECK(v.frameLen == 8);
+  CHECK(ParseWsFrame(masked, sizeof masked, &v) == WsFrameStatus::Invalid);
+
+  // A non-minimal 16-bit length (a value < 126) is refused.
+  u8 nonMinimal[] = {0x81, 126, 0x00, 0x02, 0xAA, 0xBB};
+  CHECK(ParseWsFrame(nonMinimal, sizeof nonMinimal, &v) == WsFrameStatus::Invalid);
+
+  // An unmasked "Hi" frame parses.
+  u8 unmasked[] = {0x81, 0x02, 'H', 'i'};
+  CHECK(ParseWsFrame(unmasked, sizeof unmasked, &v) == WsFrameStatus::Ok);
+  CHECK(!v.masked && v.payloadLen == 2);
+  CHECK(v.frameLen == 4);
 
   // Truncated extended-length header.
   u8 ext126[] = {0x81, 126, 0x01};
@@ -114,9 +123,10 @@ static void ContractWs() {
   CHECK(ParseWsFrame(rsvOp, 2, &v) == WsFrameStatus::Invalid);
   u8 rsvOp2[2] = {0x8B, 0x00};
   CHECK(ParseWsFrame(rsvOp2, 2, &v) == WsFrameStatus::Invalid);
-  // Mask key present but truncated.
+  // A masked frame is refused outright (mask bit set), so the mask key is never
+  // even considered.
   u8 maskCut[3] = {0x81, 0x80, 0x01};
-  CHECK(ParseWsFrame(maskCut, 3, &v) == WsFrameStatus::NeedMore);
+  CHECK(ParseWsFrame(maskCut, 3, &v) == WsFrameStatus::Invalid);
   // Null out pointer.
   CHECK(ParseWsFrame(empty, 2, nullptr) == WsFrameStatus::Invalid);
 }

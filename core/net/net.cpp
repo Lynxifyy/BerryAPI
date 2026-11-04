@@ -3,6 +3,7 @@
 #include "berry/logger.h"
 #include "berry/event.h"
 #include "berry/version.h"
+#include "berry/voice_crypto.h"   // VoiceRandomBytes: the CSPRNG behind WS keys/masks
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -708,6 +709,107 @@ WebSocket::~WebSocket() { Close(); }
 
 static std::string WsBase64(const unsigned char* data, size_t len);
 
+// A compact SHA-1, used only for the RFC6455 handshake accept value. SHA-1 is
+// not a security primitive here: the accept value proves the peer read our key,
+// nothing more.
+namespace {
+
+struct Sha1 {
+  u32 h[5] = {0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u};
+  u64 len = 0;
+  u8 buf[64];
+  size_t bufLen = 0;
+
+  static u32 Rol(u32 v, int n) { return (v << n) | (v >> (32 - n)); }
+
+  void Block(const u8* p) {
+    u32 w[80];
+    for (int i = 0; i < 16; ++i)
+      w[i] = ((u32)p[i * 4] << 24) | ((u32)p[i * 4 + 1] << 16) |
+             ((u32)p[i * 4 + 2] << 8) | (u32)p[i * 4 + 3];
+    for (int i = 16; i < 80; ++i)
+      w[i] = Rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    u32 a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+    for (int i = 0; i < 80; ++i) {
+      u32 f, k;
+      if (i < 20) { f = (b & c) | (~b & d); k = 0x5A827999u; }
+      else if (i < 40) { f = b ^ c ^ d; k = 0x6ED9EBA1u; }
+      else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDCu; }
+      else { f = b ^ c ^ d; k = 0xCA62C1D6u; }
+      u32 tmp = Rol(a, 5) + f + e + k + w[i];
+      e = d; d = c; c = Rol(b, 30); b = a; a = tmp;
+    }
+    h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+  }
+
+  void Update(const u8* p, size_t n) {
+    len += n;
+    while (n) {
+      size_t take = 64 - bufLen;
+      if (take > n) take = n;
+      memcpy(buf + bufLen, p, take);
+      bufLen += take; p += take; n -= take;
+      if (bufLen == 64) { Block(buf); bufLen = 0; }
+    }
+  }
+
+  void Final(u8 out[20]) {
+    u64 bits = len * 8;
+    u8 pad = 0x80;
+    Update(&pad, 1);
+    u8 zero = 0;
+    while (bufLen != 56) Update(&zero, 1);
+    u8 lenb[8];
+    for (int i = 0; i < 8; ++i) lenb[i] = (u8)(bits >> (56 - 8 * i));
+    Update(lenb, 8);
+    for (int i = 0; i < 5; ++i) {
+      out[i * 4] = (u8)(h[i] >> 24);
+      out[i * 4 + 1] = (u8)(h[i] >> 16);
+      out[i * 4 + 2] = (u8)(h[i] >> 8);
+      out[i * 4 + 3] = (u8)h[i];
+    }
+  }
+};
+
+}  // namespace
+
+std::string WsAcceptFor(const std::string& key) {
+  static const char kGuid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+  Sha1 s;
+  s.Update(reinterpret_cast<const u8*>(key.data()), key.size());
+  s.Update(reinterpret_cast<const u8*>(kGuid), sizeof(kGuid) - 1);
+  u8 digest[20];
+  s.Final(digest);
+  return WsBase64(digest, 20);
+}
+
+namespace {
+
+/// A cryptographically secure 4-byte masking key. Returns false when no
+/// CSPRNG is available, so a caller refuses rather than sending a predictable
+/// mask (RFC6455 §10.3 forbids a predictable mask).
+bool WsSecureMask(u8 out[4]) {
+  return VoiceRandomBytes(out, 4);
+}
+
+/// Fills `out` with `n` cryptographically secure bytes.
+bool WsSecureRandom(u8* out, size_t n) { return VoiceRandomBytes(out, n); }
+
+/// A close code that may appear on the wire. 1005 and 1006 are reserved for
+/// local use and must never be sent; 1004 is undefined; a code below 1000 or an
+/// unassigned 1016-2999 code is invalid (bug 45).
+bool ValidCloseCode(int code) {
+  if (code < 1000 || code >= 5000) return false;
+  switch (code) {
+    case 1004: case 1005: case 1006: case 1015:
+      return false;
+    default:
+      return true;
+  }
+}
+
+}  // namespace
+
 bool WebSocket::Connect(const char* url, int timeoutMs) {
   const Deadline deadline = Deadline::After(timeoutMs);
   std::string u = url;
@@ -733,15 +835,53 @@ bool WebSocket::Connect(const char* url, int timeoutMs) {
   std::string authority = slash == std::string::npos ? rest : rest.substr(0, slash);
   std::string path = slash == std::string::npos ? "/" : rest.substr(slash);
 
-  std::string host = authority;
-  u16 port = wantTls ? 443 : 80;
-  size_t colon = authority.rfind(':');
-  if (colon != std::string::npos) {
-    host = authority.substr(0, colon);
-    port = (u16)atoi(authority.substr(colon + 1).c_str());
+  // A control character in the URL would split the request line; refuse it.
+  for (char c : u) {
+    if (c == '\r' || c == '\n' || c == '\0') {
+      err_ = "bad ws url";
+      return false;
+    }
   }
 
+  std::string host = authority;
+  u16 port = wantTls ? 443 : 80;
+  bool explicitPort = false;
+  // A bracketed IPv6 literal keeps its colons; only a colon after the closing
+  // bracket separates the port.
+  if (!authority.empty() && authority[0] == '[') {
+    size_t close = authority.find(']');
+    if (close == std::string::npos) {
+      err_ = "bad ws url";
+      return false;
+    }
+    host = authority.substr(1, close - 1);
+    std::string after = authority.substr(close + 1);
+    if (!after.empty()) {
+      if (after[0] != ':') { err_ = "bad ws url"; return false; }
+      std::string ps = after.substr(1);
+      for (char c : ps) if (!isdigit((unsigned char)c)) { err_ = "bad ws url"; return false; }
+      long p = strtol(ps.c_str(), nullptr, 10);
+      if (p < 1 || p > 65535) { err_ = "bad ws port"; return false; }
+      port = (u16)p;
+      explicitPort = true;
+    }
+  } else {
+    size_t colon = authority.rfind(':');
+    if (colon != std::string::npos) {
+      host = authority.substr(0, colon);
+      std::string ps = authority.substr(colon + 1);
+      for (char c : ps) if (!isdigit((unsigned char)c)) { err_ = "bad ws url"; return false; }
+      long p = strtol(ps.c_str(), nullptr, 10);
+      if (p < 1 || p > 65535) { err_ = "bad ws port"; return false; }
+      port = (u16)p;
+      explicitPort = true;
+    }
+  }
+  if (host.empty()) { err_ = "bad ws url"; return false; }
+
   StreamClose();
+  rxBuf_.clear();
+  closeSent_ = false;
   tls_ = wantTls;
   if (wantTls) {
     tlsSock_.reset(new TlsSocket());
@@ -760,41 +900,91 @@ bool WebSocket::Connect(const char* url, int timeoutMs) {
     }
   }
 
-  // Random-ish key (16 bytes base64). Deterministic is fine for private use,
-  // but we derive from a counter for a fresh handshake each time.
+  // A random 16-byte nonce, base64-encoded, as RFC6455 §4.1 requires. A
+  // predictable key would let a cache-poisoning proxy forge the handshake.
   unsigned char keyBytes[16];
-  for (int i = 0; i < 16; ++i) keyBytes[i] = (unsigned char)((frameSeq_ * 31 + i * 7) & 0xff);
+  if (!WsSecureRandom(keyBytes, sizeof keyBytes)) {
+    err_ = "no csprng";
+    StreamClose();
+    return false;
+  }
   std::string key = WsBase64(keyBytes, 16);
 
+  const bool ipv6 = host.find(':') != std::string::npos;
+  const std::string hostHdr = (ipv6 ? "[" + host + "]" : host) +
+      ((explicitPort || port != (wantTls ? 443 : 80))
+           ? ":" + std::to_string((unsigned)port)
+           : "");
   std::string req =
       "GET " + path + " HTTP/1.1\r\n"
-      "Host: " + host + "\r\n"
+      "Host: " + hostHdr + "\r\n"
       "Upgrade: websocket\r\n"
       "Connection: Upgrade\r\n"
       "Sec-WebSocket-Key: " + key + "\r\n"
       "Sec-WebSocket-Version: 13\r\n"
       "User-Agent: BerryAPI\r\n\r\n";
-  if (StreamSend(req.data(), req.size(), deadline) != (ssize_t)req.size()) return false;
+  if (StreamSend(req.data(), req.size(), deadline) != (ssize_t)req.size()) {
+    err_ = "handshake send failed";
+    StreamClose();
+    return false;
+  }
 
-  // Read handshake response.
+  // Read handshake response, bounded.
   char buf[4096];
   std::string raw;
   while (raw.find("\r\n\r\n") == std::string::npos) {
     ssize_t n = StreamRecv(buf, sizeof buf, deadline);
     if (n <= 0) {
       err_ = "handshake timeout";
+      StreamClose();
       return false;
     }
     raw.append(buf, (size_t)n);
-    if (raw.size() > 65536) return false;
+    if (raw.size() > 65536) {
+      err_ = "handshake too large";
+      StreamClose();
+      return false;
+    }
   }
-  // Verify the 101 Switching Protocols upgrade response.
-  bool upgraded = raw.rfind("HTTP/1.1 101", 0) == 0 ||
-                  raw.find(" 101 ") != std::string::npos;
-  if (!upgraded) {
+  size_t hEnd = raw.find("\r\n\r\n");
+
+  // Strict upgrade check: the status line must be exactly "HTTP/1.1 101 ...",
+  // and the Upgrade and Connection headers must both be present (bug 39).
+  bool ok101 = raw.rfind("HTTP/1.1 101", 0) == 0;
+  std::string head = raw.substr(0, hEnd);
+  bool hasUpgrade = head.find("Upgrade: websocket") != std::string::npos ||
+                    head.find("upgrade: websocket") != std::string::npos;
+  bool hasConnection = head.find("Connection: Upgrade") != std::string::npos ||
+                       head.find("connection: Upgrade") != std::string::npos ||
+                       head.find("connection: upgrade") != std::string::npos;
+  // Sec-WebSocket-Accept must equal base64(SHA1(key + GUID)) (bug 38).
+  std::string wantAccept = WsAcceptFor(key);
+  bool acceptOk = false;
+  {
+    const std::string hdrName = "Sec-WebSocket-Accept:";
+    size_t p = head.find(hdrName);
+    if (p == std::string::npos) p = head.find("sec-websocket-accept:");
+    if (p != std::string::npos) {
+      size_t v = p + hdrName.size();
+      size_t e = head.find("\r\n", v);
+      std::string val = head.substr(v, e == std::string::npos ? std::string::npos : e - v);
+      size_t b = val.find_first_not_of(" \t");
+      size_t en = val.find_last_not_of(" \t\r");
+      if (b != std::string::npos) val = val.substr(b, en - b + 1);
+      acceptOk = (val == wantAccept);
+    }
+  }
+  if (!ok101 || !hasUpgrade || !hasConnection || !acceptOk) {
     err_ = "not upgraded";
+    StreamClose();
     return false;
   }
+
+  // Any bytes after the handshake terminator are the start of the frame
+  // stream; keep them so the first frame is not lost (bug 43).
+  std::string leftover = raw.substr(hEnd + 4);
+  rxBuf_.assign(leftover.begin(), leftover.end());
+
   open_ = true;
   if (onOpen_) onOpen_();
   return true;
@@ -831,15 +1021,46 @@ void WebSocket::StreamClose() {
 void WebSocket::Close(int code, const char* reason) {
   if (!open_) return;
   open_ = false;
-  unsigned char frame[4];
-  frame[0] = 0x88;
-  frame[1] = 0x02;
-  frame[2] = (unsigned char)(code >> 8);
-  frame[3] = (unsigned char)(code & 0xff);
-  const Deadline dl = Deadline::After(1000);
-  if (sock_ || tlsSock_) StreamSend(frame, sizeof frame, dl);
-  if (onClose_) onClose_(code, reason ? reason : "");
+  const char* why = reason ? reason : "";
+
+  // Send a properly masked close frame carrying a validated code and the
+  // reason text, unless the code may not appear on the wire (bug 45).
+  if ((sock_ || tlsSock_) && !closeSent_) {
+    closeSent_ = true;
+    if (ValidCloseCode(code)) {
+      std::string payload;
+      payload.push_back((char)((code >> 8) & 0xff));
+      payload.push_back((char)(code & 0xff));
+      payload.append(why);
+      if (payload.size() > 125) payload.resize(125);   // control frame cap
+      // Reuse SendFrame's masking, but it checks open_; build inline.
+      u8 mask[4];
+      if (WsSecureMask(mask)) {
+        std::vector<u8> frame;
+        frame.push_back(0x88);
+        frame.push_back((u8)(0x80 | payload.size()));
+        frame.push_back(mask[0]); frame.push_back(mask[1]);
+        frame.push_back(mask[2]); frame.push_back(mask[3]);
+        for (size_t i = 0; i < payload.size(); ++i)
+          frame.push_back((u8)payload[i] ^ mask[i % 4]);
+        std::lock_guard<std::mutex> lk(sendMutex_);
+        StreamSend(frame.data(), frame.size(), Deadline::After(1000));
+      }
+    }
+  }
+
+  // Wait briefly for the peer's close echo so the server sees a clean close.
+  const Deadline dl = Deadline::After(500);
+  u8 tmp[64];
+  while (StreamWaitReadable(dl)) {
+    ssize_t n = StreamRecv(tmp, sizeof tmp, dl);
+    if (n <= 0) break;
+    if ((tmp[0] & 0x0f) == 0x08) break;   // a close frame arrived
+  }
+
+  if (onClose_) onClose_(code, why);
   StreamClose();
+  rxBuf_.clear();
 }
 
 bool WebSocket::IsOpen() const { return open_; }
@@ -856,6 +1077,11 @@ bool WebSocket::SendPing() {
 
 bool WebSocket::SendFrame(WsOpcode op, const void* payload, size_t len) {
   if (!open_ || (!sock_ && !tlsSock_)) return false;
+
+  // A fresh, unpredictable masking key per frame, from the CSPRNG (bug 41).
+  u8 mask[4];
+  if (!WsSecureMask(mask)) return false;
+
   std::vector<u8> frame;
   frame.push_back(0x80 | (u8)op);   // FIN + opcode
   size_t n = len;
@@ -867,19 +1093,13 @@ bool WebSocket::SendFrame(WsOpcode op, const void* payload, size_t len) {
     frame.push_back((u8)(0x80 | 127));
     for (int i = 7; i >= 0; --i) frame.push_back((u8)((n >> (8 * i)) & 0xff));
   }
-  // Masking key (client frames must be masked).
-  u32 mask = (u32)(frameSeq_ * 2654435761u) + 0x9e3779b9u;
-  frameSeq_++;
-  frame.push_back((u8)(mask >> 24));
-  frame.push_back((u8)(mask >> 16));
-  frame.push_back((u8)(mask >> 8));
-  frame.push_back((u8)(mask & 0xff));
+  frame.push_back(mask[0]); frame.push_back(mask[1]);
+  frame.push_back(mask[2]); frame.push_back(mask[3]);
   const u8* p = (const u8*)payload;
-  // Mask key is transmitted big-endian (mask>>24 first) per RFC6455; apply it
-  // in the same byte order so the receiver's key[i % 4] decrypts correctly.
-  const u8 key[4] = {(u8)(mask >> 24), (u8)(mask >> 16), (u8)(mask >> 8), (u8)mask};
-  for (size_t i = 0; i < n; ++i) frame.push_back((u8)(p[i] ^ key[i % 4]));
+  for (size_t i = 0; i < n; ++i) frame.push_back((u8)(p[i] ^ mask[i % 4]));
 
+  // The whole send (including the mask draw) is serialized, so two concurrent
+  // SendFrame calls cannot interleave on the wire.
   std::lock_guard<std::mutex> lk(sendMutex_);
   return StreamSend(frame.data(), frame.size(), Deadline::After(5000)) ==
          (ssize_t)frame.size();
@@ -914,21 +1134,25 @@ WsFrameStatus ParseWsFrame(const u8* data, size_t len, WsFrameView* out,
   // before deciding we need more header bytes).
   if (control && (payloadLen == 126 || payloadLen == 127)) return WsFrameStatus::Invalid;
 
+  // A server-to-client frame MUST NOT be masked (RFC6455 §5.1). A masked frame
+  // is a protocol error, not something to accept and unmask (bug 46).
+  if (masked) return WsFrameStatus::Invalid;
+
   size_t off = 2;
   if (payloadLen == 126) {
     if (len < off + 2) return WsFrameStatus::NeedMore;
     payloadLen = ((u64)data[off] << 8) | data[off + 1];
+    // Non-minimal encoding: a value < 126 must have used the 7-bit form.
+    if (payloadLen < 126) return WsFrameStatus::Invalid;
     off += 2;
   } else if (payloadLen == 127) {
     if (len < off + 8) return WsFrameStatus::NeedMore;
     payloadLen = 0;
     for (int i = 0; i < 8; ++i) payloadLen = (payloadLen << 8) | data[off + i];
+    // The most significant bit must be 0, and the value must need 8 bytes.
+    if (payloadLen & 0x8000000000000000ULL) return WsFrameStatus::Invalid;
+    if (payloadLen < 65536) return WsFrameStatus::Invalid;
     off += 8;
-  }
-
-  if (masked) {
-    if (len < off + 4) return WsFrameStatus::NeedMore;
-    off += 4;   // masking key; payload that follows is masked on the wire
   }
 
   // RFC6455: control frames are <=125 bytes and not fragmented.
@@ -950,71 +1174,89 @@ WsFrameStatus ParseWsFrame(const u8* data, size_t len, WsFrameView* out,
   return WsFrameStatus::Ok;
 }
 
+bool WebSocket::RecvInto(std::string* out, size_t n, const Deadline& dl) {
+  while (out->size() < n) {
+    char tmp[4096];
+    size_t want = n - out->size();
+    if (want > sizeof tmp) want = sizeof tmp;
+    ssize_t r = StreamRecv(tmp, want, dl);
+    if (r <= 0) return false;
+    out->append(tmp, (size_t)r);
+  }
+  return true;
+}
+
 void WebSocket::Pump() {
   if (!open_ || (!sock_ && !tlsSock_)) return;
-  // A Pump is a bounded read attempt, not an operation with a deadline; each
-  // partial read is given a short slice so one Pump cannot stall the worker.
+  // A Pump is a bounded read attempt. The carried buffer (rxBuf_) is the single
+  // source of frame bytes, so bytes that arrived with the handshake, or a
+  // partial frame from an earlier Pump, are never lost (bugs 43, 47).
   const Deadline poll = Deadline::After(200);
-  if (!StreamWaitReadable(poll)) return;
-  unsigned char hdr[2];
-  ssize_t hr = StreamRecv(hdr, 2, poll);
-  if (hr < 2) {
-    if (hr == 0) { open_ = false; if (onClose_) onClose_(1006, "eof"); }
+
+  // Read whatever is available into rxBuf_.
+  if (StreamWaitReadable(poll)) {
+    char tmp[8192];
+    ssize_t n = StreamRecv(tmp, sizeof tmp, poll);
+    if (n > 0) {
+      rxBuf_.insert(rxBuf_.end(), (const u8*)tmp, (const u8*)tmp + n);
+    } else if (n == 0) {
+      open_ = false;
+      if (onClose_) onClose_(1006, "eof");
+      return;
+    }
+  }
+  if (rxBuf_.empty()) return;
+
+  WsFrameView view;
+  WsFrameStatus st = ParseWsFrame(rxBuf_.data(), rxBuf_.size(), &view,
+                                  16u * 1024 * 1024);
+  if (st == WsFrameStatus::NeedMore) return;   // keep buffering
+  if (st == WsFrameStatus::Invalid) {
+    // A protocol error from the peer: close with 1002 and stop.
+    err_ = "protocol error";
+    Close(1002, "protocol error");
     return;
   }
-  bool fin = (hdr[0] & 0x80) != 0;
-  u8 opcode = hdr[0] & 0x0f;
-  bool masked = (hdr[1] & 0x80) != 0;
-  u64 len = hdr[1] & 0x7f;
-  const Deadline body = Deadline::After(1000);
-  if (len == 126) {
-    unsigned char ext[2];
-    if (StreamRecv(ext, 2, body) != 2) return;
-    len = ((u64)ext[0] << 8) | ext[1];
-  } else if (len == 127) {
-    unsigned char ext[8];
-    if (StreamRecv(ext, 8, body) != 8) return;
-    len = 0;
-    for (int i = 0; i < 8; ++i) len = (len << 8) | ext[i];
+  if (st == WsFrameStatus::Oversized) {
+    // A frame bomb: close 1009 and drop the buffer so we never desync (bug 47).
+    err_ = "oversized frame";
+    Close(1009, "message too big");
+    return;
   }
-  unsigned char maskKey[4] = {0, 0, 0, 0};
-  if (masked && StreamRecv(maskKey, 4, body) != 4) return;
-  if (len > 16u * 1024 * 1024) return;   // sanity cap
-  std::vector<u8> payload((size_t)len);
-  size_t got = 0;
-  while (got < len) {
-    ssize_t n = StreamRecv(payload.data() + got, (size_t)(len - got), body);
-    if (n <= 0) return;
-    got += (size_t)n;
-  }
-  for (size_t i = 0; i < payload.size(); ++i) payload[i] ^= maskKey[i % 4];
 
-  WsMessage msg{(WsOpcode)opcode, std::move(payload), fin};
-  if (opcode == (u8)WsOpcode::Close) {
+  // A complete frame: consume exactly its bytes.
+  std::vector<u8> payload(view.payload, view.payload + view.payloadLen);
+  rxBuf_.erase(rxBuf_.begin(), rxBuf_.begin() + view.frameLen);
+
+  WsMessage msg{(WsOpcode)view.opcode, std::move(payload), view.fin};
+  if (view.opcode == (u8)WsOpcode::Close) {
     int code = 1000;
     if (msg.payload.size() >= 2) code = (msg.payload[0] << 8) | msg.payload[1];
     std::string reason = msg.payload.size() > 2
         ? std::string((const char*)msg.payload.data() + 2, msg.payload.size() - 2) : "";
-    HandleCloseFrame(msg);
+    // Echo the close (masked) and report it once.
+    if (!closeSent_ && (sock_ || tlsSock_)) {
+      closeSent_ = true;
+      u8 mask[4];
+      if (WsSecureMask(mask)) {
+        u8 reply[6] = {0x88, 0x82, mask[0], mask[1], mask[2], mask[3]};
+        u8 p0 = (u8)((code >> 8) & 0xff) ^ mask[0];
+        u8 p1 = (u8)(code & 0xff) ^ mask[1];
+        reply[4] = p0; reply[5] = p1;
+        StreamSend(reply, sizeof reply, Deadline::After(1000));
+      }
+    }
     open_ = false;
     if (onClose_) onClose_(code, reason);
+    StreamClose();
+    rxBuf_.clear();
     return;
   }
-  if (opcode == (u8)WsOpcode::Ping) {
+  if (view.opcode == (u8)WsOpcode::Ping) {
     SendFrame(WsOpcode::Pong, msg.payload.data(), msg.payload.size());
     return;
   }
   if (onMessage_) onMessage_(msg);
-}
-
-void WebSocket::HandleCloseFrame(const WsMessage& frame) {
-  // Respond with a close echo so the server sees a clean close.
-  unsigned char reply[4] = {0x88, 0x02, 0, 0};
-  if (frame.payload.size() >= 2) {
-    reply[2] = frame.payload[0];
-    reply[3] = frame.payload[1];
-  }
-  if (sock_ || tlsSock_) StreamSend(reply, 4, Deadline::After(1000));
 }
 
 //----------------------------------------------------------------------------

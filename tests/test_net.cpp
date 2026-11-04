@@ -126,6 +126,35 @@ int main() {
     }
   }
 
+  // --- WebSocket handshake verification (bugs 38, 39) ---
+  {
+    // RFC6455 §1.3 vector: the key below must produce the published accept.
+    CHECK(WsAcceptFor("dGhlIHNhbXBsZSBub25jZQ==") ==
+          "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+
+    TinyBadWsServer bad;
+    int bp = bad.Start(18086);
+    CHECK(bp > 0);
+    if (bp > 0) {
+      WebSocket c;
+      // A 101 with the wrong accept must be refused.
+      CHECK(!c.Connect((std::string("ws://127.0.0.1:") + std::to_string(bp)).c_str(), 2000));
+      CHECK(!c.IsOpen());
+      bad.Stop();
+    }
+
+    TinyNoUpgradeWsServer nou;
+    int np = nou.Start(18087);
+    CHECK(np > 0);
+    if (np > 0) {
+      WebSocket c;
+      // A 101 without Upgrade/Connection headers must be refused.
+      CHECK(!c.Connect((std::string("ws://127.0.0.1:") + std::to_string(np)).c_str(), 2000));
+      CHECK(!c.IsOpen());
+      nou.Stop();
+    }
+  }
+
   // --- WebSocket loopback (echo) ---
   TinyWsServer ws;
   int wsPort = ws.Start(18082);

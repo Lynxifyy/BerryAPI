@@ -1,5 +1,6 @@
 #pragma once
 #include "berry/types.h"
+#include "berry/net.h"   // WsAcceptFor: the test WS server computes the accept
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -239,6 +240,45 @@ class TinySlowDripServer final : public TinyTcpAcceptor {
   int dripMs_;
 };
 
+/// A WebSocket server that answers 101 but with a wrong Sec-WebSocket-Accept,
+/// so the client's accept verification (bug 38) can be exercised.
+class TinyBadWsServer final : public TinyTcpAcceptor {
+ protected:
+  void Handle(int conn) override {
+    std::string handshake = RecvUntil(conn, "\r\n\r\n", 4000);
+    if (handshake.empty()) return;
+    std::string resp = "HTTP/1.1 101 Switching Protocols\r\n"
+        "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+        "Sec-WebSocket-Accept: AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH=\r\n\r\n";
+    ::send(conn, resp.data(), resp.size(), MSG_NOSIGNAL);
+  }
+};
+
+/// A WebSocket server that answers 101 with the correct accept but without the
+/// Upgrade/Connection headers, to prove the handshake check is not just the
+/// status line.
+class TinyNoUpgradeWsServer final : public TinyTcpAcceptor {
+ protected:
+  void Handle(int conn) override {
+    std::string handshake = RecvUntil(conn, "\r\n\r\n", 4000);
+    if (handshake.empty()) return;
+    std::string key;
+    const std::string kn = "Sec-WebSocket-Key:";
+    size_t p = handshake.find(kn);
+    if (p != std::string::npos) {
+      size_t v = p + kn.size();
+      size_t e = handshake.find("\r\n", v);
+      key = handshake.substr(v, e - v);
+      size_t b = key.find_first_not_of(" \t");
+      size_t en = key.find_last_not_of(" \t\r");
+      if (b != std::string::npos) key = key.substr(b, en - b + 1);
+    }
+    std::string resp = "HTTP/1.1 101 Switching Protocols\r\n"
+        "Sec-WebSocket-Accept: " + Berry::WsAcceptFor(key) + "\r\n\r\n";
+    ::send(conn, resp.data(), resp.size(), MSG_NOSIGNAL);
+  }
+};
+
 class TinyWsServer final : public TinyTcpAcceptor {
  protected:
   void Handle(int conn) override {
@@ -246,9 +286,23 @@ class TinyWsServer final : public TinyTcpAcceptor {
     std::string handshake = RecvUntil(conn, "\r\n\r\n", 4000);
     if (handshake.find("Upgrade: websocket") == std::string::npos &&
         handshake.find("upgrade: websocket") == std::string::npos) return;
+    // Compute the accept value from the client's key, as RFC6455 §4.2.2
+    // requires; the client now verifies it.
+    std::string key;
+    const std::string kn = "Sec-WebSocket-Key:";
+    size_t p = handshake.find(kn);
+    if (p != std::string::npos) {
+      size_t v = p + kn.size();
+      size_t e = handshake.find("\r\n", v);
+      key = handshake.substr(v, e - v);
+      size_t b = key.find_first_not_of(" \t");
+      size_t en = key.find_last_not_of(" \t\r");
+      if (b != std::string::npos) key = key.substr(b, en - b + 1);
+    }
+    std::string accept = Berry::WsAcceptFor(key);
     std::string resp = "HTTP/1.1 101 Switching Protocols\r\n"
         "Upgrade: websocket\r\nConnection: Upgrade\r\n"
-        "Sec-WebSocket-Accept: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+        "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
     ::send(conn, resp.data(), resp.size(), MSG_NOSIGNAL);
 
     // Read exactly one frame (header + optional ext len + mask + payload).
