@@ -52,6 +52,7 @@ CORE_SRC := \
   core/lifecycle/thread.cpp \
   core/net/net.cpp \
   core/net/inflate.cpp \
+  core/net/netquota.cpp \
   core/net/tls.cpp \
   core/net/ws_client.cpp \
   core/net/cosmetic_sync.cpp \
@@ -233,6 +234,7 @@ TEST_SRC := \
   tests/test_mem.cpp \
   tests/test_metrics.cpp \
   tests/test_inflate.cpp \
+  tests/test_netquota.cpp \
   tests/test_crash.cpp \
   tests/test_configfile.cpp \
   tests/test_timers.cpp \
