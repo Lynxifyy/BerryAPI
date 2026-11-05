@@ -615,6 +615,15 @@ ScriptValue HttpRequestBlocking(ScriptContext& ctx, const std::string& method,
       if (hop == kMaxRedirects) return fail("too many redirects", "too_many_redirects");
       std::string next = ResolveRedirect(current, parsed, loc);
       if (next.empty()) return fail("unresolvable redirect", "bad_redirect");
+      // A redirect must not downgrade https to plaintext (improvement 35): a
+      // hostile or compromised server could otherwise strip TLS mid-chain.
+      Url nextParsed;
+      if (nextParsed.Parse(next) && parsed.scheme == "https" &&
+          nextParsed.scheme != "https") {
+        return fail("redirect downgrades https to http", "refused");
+      }
+      // The per-hop policy check below re-applies to the new URL, so a
+      // cross-origin redirect is validated before it is followed.
       current = next;
       continue;
     }
