@@ -44,7 +44,9 @@ class BERRY_API Gauge {
 /// can read a cheap summary without keeping every sample.
 class BERRY_API Histogram {
  public:
-  static constexpr size_t kBuckets = 16;
+  /// One bucket per bound plus an overflow bucket. `Buckets()` returns exactly
+  /// this many; the array must be this size or the read runs off the end.
+  static constexpr size_t kBuckets = 17;
   /// Bucket upper bounds (inclusive), in the metric's own unit (ms for frame
   /// time). A sample above the last bound lands in the overflow bucket.
   static const f64* Bounds();

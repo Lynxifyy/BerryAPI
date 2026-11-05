@@ -494,6 +494,14 @@ class BERRY_API ScriptHost {
   std::string SerializeState() const;
   bool RestoreState(const std::string& state, ScriptError* err);
 
+  /// The state schema version the script declares by exporting a numeric
+  /// `state_schema` global, or 0 when it declares none (improvement 69). A
+  /// hot reload only hands state across when the outgoing and incoming
+  /// versions match, so a script that changes its state shape bumps the
+  /// version and migrates explicitly in `on_load` instead of being fed an
+  /// incompatible snapshot.
+  int StateSchemaVersion() const;
+
  private:
   ScriptStatus Fail(ScriptStatus status, const ScriptError& err);
   ScriptStatus Drive(ScriptStatus initial, const std::string& hook,
