@@ -151,6 +151,37 @@ struct BERRY_API ScriptLimits {
   /// by default so the budget measures work, not scheduling; the cost is the
   /// per-instruction debug hook, which is acceptable on the script worker.
   bool countInstructions = true;
+  /// The per-frame CPU allowance for the script's own work, in milliseconds
+  /// (improvement 57). A script whose rolling frame time exceeds this gets a
+  /// soft warning before the hard stop. 0 disables the soft warning.
+  u64 frameBudgetMs = 8;
+};
+
+/// A rolling per-script frame CPU quota (improvement 57). The frame hook feeds
+/// it the script's own per-frame time; it warns softly when the rolling mean
+/// crosses the budget and reports whether the script is persistently over, so
+/// the host can throttle it before a hard budget fault.
+class BERRY_API FrameQuota {
+ public:
+  explicit FrameQuota(u64 budgetMs = 8) : budgetMs_(budgetMs) {}
+
+  /// Records one frame's script CPU time (ms). Returns true when the rolling
+  /// mean is over budget and a soft warning is due (at most once a second).
+  bool Record(f32 ms, u64 nowMs);
+
+  f32 MeanMs() const;
+  u64 overBudgetFrames() const { return over_; }
+  u64 budgetMs() const { return budgetMs_; }
+  void Reset();
+
+ private:
+  static constexpr size_t kWindow = 90;   // ~1.5s at 60fps
+  u64 budgetMs_;
+  f32 samples_[kWindow]{};
+  size_t count_ = 0;
+  size_t next_ = 0;
+  u64 over_ = 0;
+  u64 lastWarnMs_ = 0;
 };
 
 //----------------------------------------------------------------------------

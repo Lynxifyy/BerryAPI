@@ -171,6 +171,35 @@ static void TestInstructionBudget() {
   CHECK(vm->InstructionsExecuted() >= 5000);
 }
 
+// The per-script frame CPU quota (improvement 57): a single spike does not
+// warn, a sustained overrun does, and the warning is rate-limited.
+static void TestFrameQuota() {
+  FrameQuota q(8);   // 8ms budget
+  // A single spike: the mean stays under, no warning.
+  CHECK(!q.Record(20.0f, 0));
+  for (int i = 0; i < 30; ++i) CHECK(!q.Record(1.0f, (u64)i * 16));
+  CHECK(q.MeanMs() < 8.0f);
+
+  // Sustained overrun: the mean crosses, a warning is due once.
+  FrameQuota q2(8);
+  bool warned = false;
+  for (int i = 0; i < 90; ++i) {
+    if (q2.Record(12.0f, (u64)i * 16)) warned = true;
+  }
+  CHECK(warned);
+  CHECK(q2.MeanMs() > 8.0f);
+  CHECK(q2.overBudgetFrames() == 90);
+
+  // A zero budget disables the warning.
+  FrameQuota off(0);
+  for (int i = 0; i < 90; ++i) CHECK(!off.Record(1000.0f, (u64)i * 16));
+
+  // Reset clears the window.
+  q2.Reset();
+  CHECK(q2.MeanMs() == 0.0f);
+  CHECK(q2.overBudgetFrames() == 0);
+}
+
 // The per-category memory breakdown (improvement 73) attributes bytes to
 // strings vs tables, and its total matches MemoryUsed.
 static void TestMemoryByCategory() {
@@ -524,6 +553,7 @@ int main() {
   TestVmBasics();
   TestAssemblerErrors();
   TestInstructionBudget();
+  TestFrameQuota();
   TestMemoryByCategory();
   TestMemoryLimit();
   TestTimeslice();

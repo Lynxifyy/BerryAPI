@@ -158,6 +158,42 @@ ScriptError ScriptError::Make(std::string msg, std::string chunk, i32 line) {
 // Status names
 //----------------------------------------------------------------------------
 
+//----------------------------------------------------------------------------
+// FrameQuota (improvement 57)
+//----------------------------------------------------------------------------
+
+bool FrameQuota::Record(f32 ms, u64 nowMs) {
+  samples_[next_] = ms;
+  next_ = (next_ + 1) % kWindow;
+  if (count_ < kWindow) ++count_;
+  if (ms > (f32)budgetMs_) ++over_;
+  // A soft warning only when the ROLLING MEAN is over, so a single spike does
+  // not warn; and at most once a second.
+  if (budgetMs_ == 0 || MeanMs() <= (f32)budgetMs_) return false;
+  if (nowMs - lastWarnMs_ >= 1000) {
+    lastWarnMs_ = nowMs;
+    Log::Warn("script frame budget: mean %.2fms over %llums (script work); "
+              "%llu frames over", MeanMs(), (unsigned long long)budgetMs_,
+              (unsigned long long)over_);
+    return true;
+  }
+  return false;
+}
+
+f32 FrameQuota::MeanMs() const {
+  if (count_ == 0) return 0.0f;
+  f32 sum = 0.0f;
+  for (size_t i = 0; i < count_; ++i) sum += samples_[i];
+  return sum / (f32)count_;
+}
+
+void FrameQuota::Reset() {
+  count_ = 0;
+  next_ = 0;
+  over_ = 0;
+  lastWarnMs_ = 0;
+}
+
 const char* ScriptStatusName(ScriptStatus s) {
   switch (s) {
     case ScriptStatus::Ok: return "ok";
