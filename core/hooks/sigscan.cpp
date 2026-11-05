@@ -827,6 +827,81 @@ bool SigCache::BuildVerified() const {
   return BuildVerifiedLocked();
 }
 
+namespace {
+
+/// Splits "1.20.3" into {1, 20, 3}; a missing component is 0. A non-numeric
+/// component is 0, so a malformed version sorts below any real one (fail
+/// closed: a bad version does not accidentally match a rule).
+void ParseVersion(const std::string& v, int out[3]) {
+  out[0] = out[1] = out[2] = 0;
+  size_t start = 0;
+  int part = 0;
+  while (part < 3 && start <= v.size()) {
+    size_t dot = v.find('.', start);
+    const std::string seg = v.substr(start, dot == std::string::npos
+                                                ? std::string::npos
+                                                : dot - start);
+    int n = 0;
+    for (char c : seg) {
+      if (c < '0' || c > '9') { n = 0; break; }
+      n = n * 10 + (c - '0');
+    }
+    out[part++] = n;
+    if (dot == std::string::npos) break;
+    start = dot + 1;
+  }
+}
+
+int CompareVersion(const std::string& a, const std::string& b) {
+  int pa[3], pb[3];
+  ParseVersion(a, pa);
+  ParseVersion(b, pb);
+  for (int i = 0; i < 3; ++i) {
+    if (pa[i] != pb[i]) return pa[i] < pb[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+}  // namespace
+
+bool SigCache::VersionInRange(const std::string& version,
+                              const std::string& minVersion,
+                              const std::string& maxVersion) {
+  if (version.empty()) {
+    // No game version selected: only a rule with no bounds is eligible.
+    return minVersion.empty() && maxVersion.empty();
+  }
+  if (!minVersion.empty() && CompareVersion(version, minVersion) < 0) return false;
+  if (!maxVersion.empty() && CompareVersion(version, maxVersion) > 0) return false;
+  return true;
+}
+
+void SigCache::SetGameVersion(const std::string& version) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  gameVersion_ = version;
+  // A version change invalidates cached resolutions of versioned rules.
+  for (auto& e : entries_) {
+    if (!e.second.minVersion.empty() || !e.second.maxVersion.empty()) {
+      e.second.state = SigState::Unknown;
+      e.second.results.clear();
+    }
+  }
+}
+
+void SigCache::RegisterVersioned(const std::string& id, const Signature& sig,
+                                 const std::string& minVersion,
+                                 const std::string& maxVersion) {
+  Register(id, sig);
+  std::lock_guard<std::mutex> lk(mutex_);
+  for (auto& e : entries_) {
+    if (e.first == id) {
+      e.second.minVersion = minVersion;
+      e.second.maxVersion = maxVersion;
+      return;
+    }
+  }
+}
+
 void SigCache::Register(const std::string& id, const Signature& sig) {
   std::lock_guard<std::mutex> lk(mutex_);
   SigState initial = gateClosedPermanently_.load() ? SigState::Missing
@@ -839,7 +914,7 @@ void SigCache::Register(const std::string& id, const Signature& sig) {
       return;
     }
   }
-  entries_.emplace_back(id, Entry{sig, {}, initial});
+  entries_.emplace_back(id, Entry{sig, {}, initial, {}, {}});
 }
 
 bool SigCache::Has(const std::string& id) const {
@@ -872,6 +947,13 @@ uptr SigCache::Resolve(const std::string& id, size_t occurrence) {
         return 0;
       }
       if (en.state == SigState::Missing) return 0;
+      // A versioned rule whose range does not contain the selected game version
+      // is Missing (improvement 27): the table carries the rule for other
+      // builds, and the right one is picked automatically.
+      if (!VersionInRange(gameVersion_, en.minVersion, en.maxVersion)) {
+        en.state = SigState::Missing;
+        return 0;
+      }
       // Unknown: resolve now, but only when the build passes the gate.
       if (!BuildVerifiedLocked() || !expectedBuild_.base) {
         en.state = SigState::Missing;

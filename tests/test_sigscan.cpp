@@ -231,6 +231,21 @@ int main() {
     CHECK(BuildLibrary::HashSection(a, 0) == 0);
   }
 
+  // --- version-tagged rules (improvement 27) ---
+  {
+    CHECK(SigCache::VersionInRange("1.20.3", "1.20.0", "1.21.0"));
+    CHECK(SigCache::VersionInRange("1.20.0", "1.20.0", "1.21.0"));   // inclusive
+    CHECK(SigCache::VersionInRange("1.21.0", "1.20.0", "1.21.0"));
+    CHECK(!SigCache::VersionInRange("1.19.9", "1.20.0", "1.21.0"));
+    CHECK(!SigCache::VersionInRange("1.21.1", "1.20.0", "1.21.0"));
+    CHECK(SigCache::VersionInRange("9.9.9", "1.0.0", ""));    // unbounded top
+    CHECK(SigCache::VersionInRange("0.1.0", "", "1.0.0"));    // unbounded bottom
+    CHECK(SigCache::VersionInRange("2.0.0", "", ""));         // fully unbounded
+    // No version selected: only an unbounded rule is eligible (fail closed).
+    CHECK(!SigCache::VersionInRange("", "1.0.0", ""));
+    CHECK(SigCache::VersionInRange("", "", ""));
+  }
+
   // --- SigCache fail-closed lifecycle ---
   // Gate 1: empty expected build (no fingerprint). Every rule is Missing and
   // Resolve() returns 0 — the dependent feature disables itself.

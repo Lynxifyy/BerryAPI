@@ -262,6 +262,21 @@ class BERRY_API SigCache {
   /// Registers a signature. Does not resolve until `Resolve(id)`.
   void Register(const std::string& id, const Signature& sig);
 
+  /// Registers a signature only for a specific game-version range (improvement
+  /// 27): `minVersion`/`maxVersion` are inclusive dotted-version bounds
+  /// ("1.20.0"). A rule whose range does not contain `SetGameVersion`'s value
+  /// resolves to Missing, so a table can carry a rule that only applies to some
+  /// builds and the right one is picked automatically. An empty bound is
+  /// unbounded on that side.
+  void RegisterVersioned(const std::string& id, const Signature& sig,
+                         const std::string& minVersion,
+                         const std::string& maxVersion);
+
+  /// The game version the versioned rules are selected against. Empty disables
+  /// every versioned rule (fail closed) unless it declares no bounds.
+  void SetGameVersion(const std::string& version);
+  const std::string& GameVersion() const { return gameVersion_; }
+
   /// Sets the build fingerprint this signature table was written against.
   /// Rules only resolve to Found when the runtime fingerprint matches.
   /// Pass an empty BuildLibrary to force every rule to Missing (fail closed).
@@ -282,11 +297,20 @@ class BERRY_API SigCache {
   size_t Count() const;
   bool BuildVerified() const;
 
+  /// True when `version` (dotted, e.g. "1.20.0") lies within [min, max], both
+  /// inclusive; an empty bound is unbounded. Exposed for the version-table
+  /// test.
+  static bool VersionInRange(const std::string& version,
+                             const std::string& minVersion,
+                             const std::string& maxVersion);
+
  private:
   struct Entry {
     Signature sig;
     std::vector<uptr> results;
     SigState state = SigState::Unknown;
+    std::string minVersion;   // empty = unbounded
+    std::string maxVersion;
   };
   SigCache() = default;
   bool BuildVerifiedLocked() const;
@@ -296,6 +320,7 @@ class BERRY_API SigCache {
   std::unique_ptr<SigScanner> scanner_;
   u64 scannerGeneration_ = 0;
   BuildLibrary expectedBuild_;
+  std::string gameVersion_;   // selected against for versioned rules
   mutable std::atomic<bool> buildGateOpen_{false};   // fingerprint verified
   std::atomic<bool> gateClosedPermanently_{false};  // empty fingerprint given
   mutable std::mutex mutex_;
