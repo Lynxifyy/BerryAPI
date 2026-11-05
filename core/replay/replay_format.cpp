@@ -291,13 +291,14 @@ const char* ReplayRecordKindName(ReplayRecordKind k) {
     case ReplayRecordKind::PlayerInput: return "player_input";
     case ReplayRecordKind::Event: return "event";
     case ReplayRecordKind::EntityLeave: return "entity_leave";
+    case ReplayRecordKind::RunSeed: return "run_seed";
     case ReplayRecordKind::Count: return "count";
   }
   return "unknown";
 }
 
 bool ReplayRecordKindFromName(const std::string& name, ReplayRecordKind* out) {
-  for (u32 i = 0; i <= (u32)ReplayRecordKind::EntityLeave; ++i) {
+  for (u32 i = 0; i <= (u32)ReplayRecordKind::RunSeed; ++i) {
     const ReplayRecordKind k = (ReplayRecordKind)i;
     if (name == ReplayRecordKindName(k)) { *out = k; return true; }
   }
@@ -343,6 +344,65 @@ ReplayError ReplayFile::AddSection(const ReplaySection& section,
   }
   sections.push_back(section);
   return ReplayError::Ok;
+}
+
+ReplayError ReplayFile::RecordDeterminism(const ReplayDeterminism& d,
+                                          const ReplayLimits& limits) {
+  determinism = d;
+  if (!d.recorded()) return ReplayError::Ok;   // nothing to record
+  // A 24-byte payload: seed(8) + wallClockOriginMs(8) + tickRate(8), big-endian.
+  std::string payload;
+  PutU64(&payload, d.rngSeed);
+  PutU64(&payload, d.wallClockOriginMs);
+  PutU64(&payload, d.tickRate);
+  if (payload.size() > limits.maxPayloadBytes) return ReplayError::TooLarge;
+
+  ReplayRecord rec;
+  rec.tick = sections.empty() ? 0 : sections.front().startTick;
+  rec.kind = ReplayRecordKind::RunSeed;
+  rec.payload = payload;
+
+  // Prepend to the first section so a reader sees it before any record; when
+  // there are no sections, create a small keyframe to hold it.
+  if (sections.empty()) {
+    ReplaySection s;
+    s.kind = ReplaySectionKind::Keyframe;
+    s.startTick = 0;
+    s.endTick = 0;
+    s.records.push_back(rec);
+    return AddSection(s, limits);
+  }
+  if (sections.front().records.size() >= limits.maxRecordsPerSection) {
+    // No room: insert a new leading keyframe for the record. A section must not
+    // start before the previous one ends, so it goes first.
+    ReplaySection s;
+    s.kind = ReplaySectionKind::Keyframe;
+    s.startTick = sections.front().startTick;
+    s.endTick = sections.front().startTick;
+    s.records.push_back(rec);
+    sections.insert(sections.begin(), s);
+    return ReplayError::Ok;
+  }
+  sections.front().records.insert(sections.front().records.begin(), rec);
+  return ReplayError::Ok;
+}
+
+bool ReplayFile::ReadDeterminism() {
+  for (const ReplaySection& s : sections) {
+    for (const ReplayRecord& r : s.records) {
+      if (r.kind != ReplayRecordKind::RunSeed || r.payload.size() < 24) continue;
+      Cursor c{r.payload};
+      u64 seed = 0, origin = 0, rate = 0;
+      if (!c.ReadU64(&seed) || !c.ReadU64(&origin) || !c.ReadU64(&rate)) {
+        continue;
+      }
+      determinism.rngSeed = seed;
+      determinism.wallClockOriginMs = origin;
+      determinism.tickRate = rate;
+      return true;
+    }
+  }
+  return false;
 }
 
 void ReplayFile::RebuildIndex() {

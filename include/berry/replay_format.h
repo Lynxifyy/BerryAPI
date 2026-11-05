@@ -122,6 +122,9 @@ enum class ReplayRecordKind : u32 {
   PlayerInput = 9,   // the local player's own input for a tick
   Event = 10,        // a Berry script/combat event (a timeline marker)
   EntityLeave = 11,  // an entity left the client's view
+  /// The RNG seed + wall-clock origin for deterministic replay (improvement
+  /// 68). Additive: an older reader preserves it as an unknown kind.
+  RunSeed = 12,
   Count,
 };
 
@@ -181,6 +184,24 @@ struct BERRY_API ReplayLimits {
   static ReplayLimits Default() { return ReplayLimits{}; }
 };
 
+/// The inputs a deterministic replay needs beyond the record stream
+/// (improvement 68): the RNG seed and the wall-clock origin. Replaying records
+/// alone is not enough to reproduce a run that read the clock or a random
+/// number, so both are stored with the file. `rngSeed == 0` means "not
+/// recorded" (an older file).
+struct BERRY_API ReplayDeterminism {
+  u64 rngSeed = 0;         // the RNG seed the run used, 0 = unrecorded
+  u64 wallClockOriginMs = 0;  // the wall-clock epoch the tick 0 maps to
+  u64 tickRate = 20;       // ticks per second the run used
+
+  bool operator==(const ReplayDeterminism& o) const {
+    return rngSeed == o.rngSeed && wallClockOriginMs == o.wallClockOriginMs &&
+           tickRate == o.tickRate;
+  }
+  bool operator!=(const ReplayDeterminism& o) const { return !(*this == o); }
+  bool recorded() const { return rngSeed != 0; }
+};
+
 /// A replay: an ordered list of sections plus the seek index over its
 /// keyframes. Built by `ReplayWriter`, read by `ReplayReader`. The in-memory
 /// shape and the on-disk shape are the same, so a load followed by a save is
@@ -190,6 +211,8 @@ class BERRY_API ReplayFile {
   ReplayFile() = default;
 
   ReplayFingerprint fingerprint;
+  /// The determinism inputs recorded with the run (improvement 68).
+  ReplayDeterminism determinism;
   std::vector<ReplaySection> sections;
   /// Rebuilt from `sections` whenever the file is written; read from the file's
   /// own index when one is loaded, so a reader trusts the file's index rather
@@ -212,6 +235,18 @@ class BERRY_API ReplayFile {
   /// Returns the error (Ok on success) and leaves the file untouched on error.
   ReplayError AddSection(const ReplaySection& section,
                          const ReplayLimits& limits = ReplayLimits::Default());
+
+  /// Records the run's determinism inputs as the first section's first record
+  /// (improvement 68), so a replayer can seed its RNG and clock to match. A
+  /// no-op when `d` is unrecorded. Sets `determinism` too, so a file written
+  /// without a section still carries it.
+  ReplayError RecordDeterminism(const ReplayDeterminism& d,
+                                const ReplayLimits& limits = ReplayLimits::Default());
+
+  /// Reads the determinism inputs back out of a loaded file's records, filling
+  /// `determinism`. Returns false when no RunSeed record is present (an older
+  /// file).
+  bool ReadDeterminism();
 
   /// Rebuilds the seek index from `sections`. Called after editing; the writer
   /// calls it again as it lays out blocks.
