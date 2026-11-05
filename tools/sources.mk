@@ -236,6 +236,7 @@ TEST_SRC := \
   tests/test_inflate.cpp \
   tests/test_netquota.cpp \
   tests/test_logger.cpp \
+  tests/test_conn_pool.cpp \
   tests/test_crash.cpp \
   tests/test_configfile.cpp \
   tests/test_timers.cpp \
