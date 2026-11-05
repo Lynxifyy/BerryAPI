@@ -1,5 +1,6 @@
 #pragma once
 #include "berry/export.h"
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -36,7 +37,9 @@ class BERRY_API Log {
   static std::string last_message_;
   static bool capture_;
   static bool silent_;
-  static LogLevel level_;
+  /// Atomic: the level is read on every log call (often off the worker thread)
+  /// while SetLevel writes it, so a plain int was a data race (bug 52).
+  static std::atomic<int> level_;
 };
 
 }  // namespace Berry

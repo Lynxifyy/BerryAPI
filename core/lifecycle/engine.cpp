@@ -6,6 +6,8 @@
 #include "berry/replay_service.h"
 #include "berry/thread.h"
 
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <mutex>
 
@@ -310,35 +312,81 @@ void Engine::OnFrame() {
 // Export entry points
 //----------------------------------------------------------------------------
 
-extern "C" {
-
+// The inject mutex guards the whole lifecycle. The exported entries read it
+// too, so a detach on one thread cannot race an attach on another (bug 48).
 static std::mutex g_injectMutex;
 
-BERRY_API bool BERRY_Inject() {
-  std::lock_guard<std::mutex> lk(g_injectMutex);
-  auto& e = Berry::Engine::Instance();
-  if (!e.Bootstrap()) return false;
-  return e.Attach();
+// Auto-attach coordination. When the ELF constructor schedules an attach on a
+// worker thread (so no hook install runs under the loader lock, bug 49), the
+// first exported call waits for it to finish, so the observable contract is
+// unchanged: once dlopen returns and the host calls BERRY_IsAttached, the
+// attach has completed.
+static std::mutex g_attachMutex;
+static std::condition_variable g_attachCv;
+static bool g_attachScheduled = false;
+static bool g_attachDone = false;
+
+/// Waits (bounded) for a scheduled auto-attach to complete. A no-op when no
+/// auto-attach was scheduled (a host-driven test build).
+static void WaitForAutoAttach() {
+  std::unique_lock<std::mutex> lk(g_attachMutex);
+  if (!g_attachScheduled) return;
+  g_attachCv.wait_for(lk, std::chrono::seconds(30),
+                      []() { return g_attachDone; });
 }
 
-BERRY_API bool BERRY_InjectWithConfig(const BerryConfigC* cfg) {
-  if (!cfg) return BERRY_Inject();   // null config fails safe to defaults
-  std::lock_guard<std::mutex> lk(g_injectMutex);
-  auto& e = Berry::Engine::Instance();
-  if (!e.Bootstrap(*cfg)) return false;
-  return e.Attach();
+extern "C" {
+
+BERRY_API int BERRY_Inject() {
+  // A std::bad_alloc (or any other exception) must not escape a C entry point:
+  // that calls std::terminate. Every exported entry catches and reports a
+  // failure instead (bug 51).
+  try {
+    WaitForAutoAttach();
+    std::lock_guard<std::mutex> lk(g_injectMutex);
+    auto& e = Berry::Engine::Instance();
+    if (!e.Bootstrap()) return 0;
+    return e.Attach() ? 1 : 0;
+  } catch (...) {
+    return 0;
+  }
+}
+
+BERRY_API int BERRY_InjectWithConfig(const BerryConfigC* cfg) {
+  try {
+    if (!cfg) return BERRY_Inject();   // null config fails safe to defaults
+    WaitForAutoAttach();
+    std::lock_guard<std::mutex> lk(g_injectMutex);
+    auto& e = Berry::Engine::Instance();
+    if (!e.Bootstrap(*cfg)) return 0;
+    return e.Attach() ? 1 : 0;
+  } catch (...) {
+    return 0;
+  }
 }
 
 BERRY_API void BERRY_Detach() {
-  std::lock_guard<std::mutex> lk(g_injectMutex);
-  Berry::Engine::Instance().Detach();
+  try {
+    WaitForAutoAttach();
+    std::lock_guard<std::mutex> lk(g_injectMutex);
+    Berry::Engine::Instance().Detach();
+  } catch (...) {
+    // Nothing to report through a void entry; swallowing keeps the ABI safe.
+  }
 }
 
-BERRY_API bool BERRY_IsAttached() {
-  return Berry::Engine::Instance().attached();
+BERRY_API int BERRY_IsAttached() {
+  try {
+    WaitForAutoAttach();
+    std::lock_guard<std::mutex> lk(g_injectMutex);
+    return Berry::Engine::Instance().attached() ? 1 : 0;
+  } catch (...) {
+    return 0;
+  }
 }
 
 BERRY_API const char* BERRY_Version() {
+  // No allocation, no lock: this must always succeed.
   return BERRY_VERSION_STRING;
 }
 
@@ -348,11 +396,61 @@ BERRY_API const char* BERRY_Version() {
 // actual shared library (libBerryAPI.so) that gets dlopen'd. Disabled for
 // host test binaries where main() drives the lifecycle explicitly.
 #if defined(BERRY_BUILD_SHARED) && (defined(__clang__) || defined(__GNUC__))
-__attribute__((constructor))
-static void BerryLibraryInit() {
-  if (!Berry::Engine::Instance().attached()) {
-    Berry::Engine::Instance().Bootstrap();
-    Berry::Engine::Instance().Attach();
+
+#include <cstdlib>
+#include <thread>
+
+namespace {
+
+// The attach runs on a worker thread so no signature scan, hook install or
+// thread creation happens under the dynamic-loader lock (bug 49). The worker
+// takes the inject mutex, so it also cannot race an explicit BERRY_Inject
+// (bug 48). It signals g_attachCv when done so the first exported call can
+// wait for a deterministic result.
+void BerryWorkerAttach() {
+  {
+    try {
+      std::lock_guard<std::mutex> lk(g_injectMutex);
+      auto& e = Berry::Engine::Instance();
+      if (!e.attached()) {
+        if (e.Bootstrap()) e.Attach();
+      }
+    } catch (...) {
+      // A failed background attach leaves the library detached; the host can
+      // still call BERRY_Inject explicitly.
+    }
+  }
+  {
+    std::lock_guard<std::mutex> lk(g_attachMutex);
+    g_attachDone = true;
+  }
+  g_attachCv.notify_all();
+}
+
+// Registered with atexit so a process exit (or, where the loader runs
+// destructors, a dlclose) detaches cleanly: hooks are removed and threads
+// joined before the code they point into is unmapped (bug 50).
+void BerryAtExit() {
+  try {
+    WaitForAutoAttach();
+    std::lock_guard<std::mutex> lk(g_injectMutex);
+    Berry::Engine::Instance().Detach();
+  } catch (...) {
   }
 }
+
+}  // namespace
+
+__attribute__((constructor))
+static void BerryLibraryInit() {
+  // Do NOT attach here; schedule it off the loader lock and record that a
+  // caller must wait for it.
+  {
+    std::lock_guard<std::mutex> lk(g_attachMutex);
+    g_attachScheduled = true;
+  }
+  std::atexit(BerryAtExit);
+  std::thread(BerryWorkerAttach).detach();
+}
+
 #endif
