@@ -368,9 +368,79 @@ int main() {
         }
         CHECK(got.find("tls-pong") != std::string::npos);
         CHECK(got.rfind("HTTP/1.1 200", 0) == 0);
+        // The peer's pin hash is available after a handshake (improvement 42).
+        const std::string spki = s.PeerSpkiSha256();
+        CHECK(spki.size() == 64);
         s.Close();
       }
       tls.Stop();
+    }
+
+    // Certificate pinning (improvement 42): a wrong pin must refuse the
+    // handshake even though the chain and hostname verify; the right pin (the
+    // one observed above) must accept it.
+    {
+      // The loopback TLS server accepts one connection then stops, so each
+      // connect gets a fresh server.
+      std::string goodPin;
+      {
+        berry_test::TinyTlsServer srv;
+        const int p = srv.Start(0);
+        CHECK(p > 0);
+        if (p > 0) {
+          TlsSocket s;
+          Deadline dl = Deadline::After(5000);
+          CHECK(s.Connect("localhost", (u16)p, dl));
+          goodPin = s.PeerSpkiSha256();
+          s.Close();
+          srv.Stop();
+        }
+      }
+      CHECK(goodPin.size() == 64);
+      // A wrong pin is refused (chain + hostname still verify, so this proves
+      // the pin is what refused it).
+      {
+        TlsSocket::SetPin("localhost", {"00" + std::string(62, '0')});
+        berry_test::TinyTlsServer srv;
+        const int p = srv.Start(0);
+        CHECK(p > 0);
+        if (p > 0) {
+          TlsSocket s;
+          Deadline dl = Deadline::After(5000);
+          CHECK(!s.Connect("localhost", (u16)p, dl));
+          CHECK(!s.valid());
+          srv.Stop();
+        }
+      }
+      // The right pin is accepted.
+      {
+        TlsSocket::SetPin("localhost", {goodPin});
+        berry_test::TinyTlsServer srv;
+        const int p = srv.Start(0);
+        CHECK(p > 0);
+        if (p > 0) {
+          TlsSocket s;
+          Deadline dl = Deadline::After(5000);
+          CHECK(s.Connect("localhost", (u16)p, dl));
+          s.Close();
+          srv.Stop();
+        }
+      }
+      // Clearing the pin falls back to normal verification.
+      TlsSocket::ClearPins();
+      CHECK(TlsSocket::Pins("localhost").empty());
+      {
+        berry_test::TinyTlsServer srv;
+        const int p = srv.Start(0);
+        CHECK(p > 0);
+        if (p > 0) {
+          TlsSocket s;
+          Deadline dl = Deadline::After(5000);
+          CHECK(s.Connect("localhost", (u16)p, dl));
+          s.Close();
+          srv.Stop();
+        }
+      }
     }
 
     // A handshake to a name the certificate is NOT for must fail: hostname

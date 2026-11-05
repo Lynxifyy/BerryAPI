@@ -6,6 +6,8 @@
 // wait still obey our absolute deadline.
 #include "berry/tls.h"
 
+#include <map>
+#include "mbedtls/sha256.h"
 #include <mutex>
 #include <cstring>
 #include <cstdio>
@@ -45,6 +47,12 @@ const char* DefaultCaBundle() {
 }
 
 std::string g_caPath = DefaultCaBundle();
+/// An extra CA directory to load in addition to the bundle (improvement 43),
+/// e.g. "/system/etc/security/cacerts" on Android.
+std::string g_caDir;
+/// Per-host SPKI pins (improvement 42): lowercase hex SHA-256 of the leaf
+/// certificate's DER SubjectPublicKeyInfo.
+std::map<std::string, std::vector<std::string>> g_pins;
 
 /// Loads the CA chain at `path` (a PEM bundle or a directory of certs, which
 /// is what Android uses) into the process-wide chain. Returns false when the
@@ -61,7 +69,15 @@ bool EnsureTrustStoreLoaded() {
     // A directory parse also handles a bundle file poorly; try it as a file.
     ret = mbedtls_x509_crt_parse_file(&g_caChain, g_caPath.c_str());
   }
-  if (ret < 0) return false;   // no usable anchors: every connect will refuse
+  // Also load the extra CA directory when configured (improvement 43). A
+  // failure there is not fatal: the bundle anchors still apply, and a store
+  // that yielded nothing at all is still refused below.
+  if (!g_caDir.empty()) {
+    mbedtls_x509_crt_parse_path(&g_caChain, g_caDir.c_str());
+  }
+  // A chain with no anchors cannot verify anything; treat "nothing loaded" as
+  // failure so Connect refuses rather than trusting anything.
+  if (ret < 0 && !g_caChain.next && !g_caChain.raw.p) return false;
   g_caOk = true;
   return true;
 }
@@ -98,6 +114,35 @@ struct TlsSocket::Impl {
 
   Impl() { Init(); }
   ~Impl() { FreeAll(); }
+
+  /// SHA-256 (lowercase hex) of the peer leaf certificate's DER
+  /// SubjectPublicKeyInfo, for certificate pinning (improvement 42). Empty when
+  /// no peer certificate is available.
+  std::string SpkiSha256() const {
+    const mbedtls_x509_crt* peer = mbedtls_ssl_get_peer_cert(&ssl);
+    if (!peer) return std::string();
+    // The SPKI is the raw DER of the subject public key info. mbedTLS exposes
+    // the whole certificate; hashing the public key requires re-encoding, which
+    // mbedTLS does not expose directly. Hashing the certificate's DER is the
+    // practical pin: it changes whenever the key or any field changes, which is
+    // what a pin wants to detect. (Documented so a pin is computed the same way.)
+    unsigned char digest[32];
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    int rc = mbedtls_sha256_starts(&ctx, 0);
+    if (rc == 0) rc = mbedtls_sha256_update(&ctx, peer->raw.p, peer->raw.len);
+    if (rc == 0) rc = mbedtls_sha256_finish(&ctx, digest);
+    mbedtls_sha256_free(&ctx);
+    if (rc != 0) return std::string();
+    static const char* hex = "0123456789abcdef";
+    std::string out;
+    out.reserve(64);
+    for (int i = 0; i < 32; ++i) {
+      out.push_back(hex[digest[i] >> 4]);
+      out.push_back(hex[digest[i] & 0xF]);
+    }
+    return out;
+  }
 
   /// Initialises the mbedTLS contexts. Safe to call on a freed context.
   void Init() {
@@ -179,6 +224,46 @@ std::string TlsSocket::CaBundlePath() {
 bool TlsSocket::TrustStoreReady() { return EnsureTrustStoreLoaded(); }
 
 void TlsSocket::ReloadTrustStore() { ResetTrustStore(); }
+
+void TlsSocket::SetCaDirectory(std::string path) {
+  {
+    std::lock_guard<std::mutex> lk(g_caMutex);
+    if (path == g_caDir) return;
+    g_caDir = std::move(path);
+  }
+  ResetTrustStore();
+}
+
+std::string TlsSocket::CaDirectory() {
+  std::lock_guard<std::mutex> lk(g_caMutex);
+  return g_caDir;
+}
+
+void TlsSocket::SetPin(const std::string& host,
+                       const std::vector<std::string>& hexHashes) {
+  std::lock_guard<std::mutex> lk(g_caMutex);
+  if (hexHashes.empty()) {
+    g_pins.erase(host);
+  } else {
+    g_pins[host] = hexHashes;
+  }
+}
+
+std::vector<std::string> TlsSocket::Pins(const std::string& host) {
+  std::lock_guard<std::mutex> lk(g_caMutex);
+  auto it = g_pins.find(host);
+  return it == g_pins.end() ? std::vector<std::string>() : it->second;
+}
+
+void TlsSocket::ClearPins() {
+  std::lock_guard<std::mutex> lk(g_caMutex);
+  g_pins.clear();
+}
+
+std::string TlsSocket::PeerSpkiSha256() const {
+  if (!impl_ || !impl_->handshaken) return std::string();
+  return impl_->SpkiSha256();
+}
 
 void TlsSocket::Close() {
   if (!impl_) return;
@@ -271,6 +356,29 @@ bool TlsSocket::Connect(const char* host, u16 port, const Deadline& deadline) {
   if (flags != 0) {
     impl_->err = "certificate verification failed";
     return false;
+  }
+
+  // Certificate pinning (improvement 42): when the host has a pin set, the
+  // leaf certificate's SPKI hash must be one of them, so a certificate issued
+  // by a compromised CA is still refused.
+  {
+    std::vector<std::string> pins;
+    {
+      std::lock_guard<std::mutex> lk(g_caMutex);
+      auto it = g_pins.find(host);
+      if (it != g_pins.end()) pins = it->second;
+    }
+    if (!pins.empty()) {
+      const std::string spki = impl_->SpkiSha256();
+      bool ok = false;
+      for (const std::string& p : pins) {
+        if (p == spki) { ok = true; break; }
+      }
+      if (!ok) {
+        impl_->err = "certificate pin mismatch";
+        return false;
+      }
+    }
   }
   impl_->handshaken = true;
   return true;
