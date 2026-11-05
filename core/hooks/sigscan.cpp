@@ -618,15 +618,17 @@ uptr DecodeAdrp(u32 insn, uptr pc) {
   return (uptr)((i64)page + (imm << 12));
 }
 
-uptr ResolveAdrpAdd(uptr pc, u32 rdTarget) {
-  // Detects: adrp Xd, page  /  add Xd, Xd, #lo12
+uptr ResolveAdrpAdd(uptr pc, u32 rdTarget, size_t maxInsns) {
+  // Detects: adrp Xd, page  /  add Xd, Xd, #lo12. `maxInsns` bounds the read to
+  // the caller's span so the look-ahead never runs off the end of a buffer.
+  if (maxInsns == 0) return 0;
   u32 insn = *reinterpret_cast<const u32*>(pc);
   if (!IsAdrp(insn)) return 0;
   u32 rd = insn & 0x1F;
   if (rdTarget && rd != rdTarget) return 0;
   uptr page = DecodeAdrp(insn, pc);
   // look ahead for add Xd, Xd, #imm
-  for (size_t i = 1; i < 8; ++i) {
+  for (size_t i = 1; i < 8 && i < maxInsns; ++i) {
     u32 next = *reinterpret_cast<const u32*>(pc + i * 4);
     // add imm: 0x91000000 | Rn<<5 | Rd  (sf=1)
     if ((next & 0xFF800000U) == 0x91000000U && ((next >> 5) & 0x1F) == rd &&
@@ -654,7 +656,8 @@ std::vector<uptr> FindAdrpXrefs(uptr moduleBase, size_t moduleSize, uptr target,
     u32 insn = code[i];
     if (!IsAdrp(insn)) continue;   // adrp (any immlo)
     uptr pc = moduleBase + i * 4;
-    uptr resolved = ResolveAdrpAddForward(pc, insn & 0x1F);
+    // Bound the look-ahead to the instructions actually left in the module.
+    uptr resolved = ResolveAdrpAdd(pc, insn & 0x1F, count - i);
     if (resolved == target) out.push_back(pc);
   }
   return out;

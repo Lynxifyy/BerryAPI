@@ -140,8 +140,13 @@ int main() {
     CHECK(arm64::DecodeAddImm(addPlain) == 1);
 
     // A page with no matching add resolves to 0, not the bare page (bug 29).
+    // The look-ahead is bounded by maxInsns so it cannot read past the buffer.
     std::vector<u32> code = {0x90000000u, 0x00000000u};   // adrp; nop
-    CHECK(arm64::ResolveAdrpAdd((uptr)code.data(), 0) == 0);
+    CHECK(arm64::ResolveAdrpAdd((uptr)code.data(), 0, code.size()) == 0);
+    // A real adrp; add pair resolves; the add is `add x0, x0, #0x123`.
+    std::vector<u32> pair = {0x90000000u, 0x91000000u | (0x123u << 10)};
+    CHECK(arm64::ResolveAdrpAdd((uptr)pair.data(), 0, pair.size()) ==
+          (arm64::DecodeAdrp(0x90000000u, (uptr)pair.data()) + 0x123));
 
     // FindAdrpXrefs on a tiny buffer must not read past the end.
     u32 tiny[1] = {0x90000000u};

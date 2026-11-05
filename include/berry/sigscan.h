@@ -201,7 +201,10 @@ inline uptr DecodeAddImm(u32 insn) {
 inline u32 InsnOpcode(u32 insn) { return insn & 0x7C000000U; }
 
 /// Follows `adrp; add` sequence at `pc`, returning the resolved 64-bit address.
-BERRY_API uptr ResolveAdrpAdd(uptr pc, u32 rdTarget);
+/// `maxInsns` bounds how many instructions may be read from `pc` (the caller's
+/// remaining span), so the look-ahead never reads past the end of a buffer
+/// (bug 29). Pass the number of whole instructions available at `pc`.
+BERRY_API uptr ResolveAdrpAdd(uptr pc, u32 rdTarget, size_t maxInsns = 8);
 /// Scans forward from `pc` for `add Xd, Xd, #imm12` for the adrp's register.
 /// Returns the resolved address, or 0 on failure.
 BERRY_API uptr ResolveAdrpAddForward(uptr adrpPc, u32 rd);
