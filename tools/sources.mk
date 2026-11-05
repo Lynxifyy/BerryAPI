@@ -13,6 +13,7 @@
 CORE_SRC := \
   core/client/client.cpp \
   core/events/event.cpp \
+  core/events/metrics.cpp \
   core/hooks/sigscan.cpp \
   core/hooks/backend_shim.cpp \
   core/hooks/x86_length.cpp \
@@ -45,6 +46,7 @@ CORE_SRC := \
   core/modules/governor.cpp \
   core/modules/governor_c.cpp \
   core/lifecycle/engine.cpp \
+  core/lifecycle/crash.cpp \
   core/lifecycle/thread.cpp \
   core/net/net.cpp \
   core/net/tls.cpp \
@@ -224,6 +226,8 @@ TEST_SRC := \
   tests/test_x86_length.cpp \
   tests/test_hooks.cpp \
   tests/test_mem.cpp \
+  tests/test_metrics.cpp \
+  tests/test_crash.cpp \
   tests/test_thread.cpp \
   tests/test_fuzz.cpp \
   tests/test_manifest.cpp \
