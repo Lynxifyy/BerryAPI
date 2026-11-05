@@ -79,6 +79,12 @@ jobs:
           cppcheck --error-exitcode=1 --enable=warning,performance \
             --suppress=missingIncludeSystem --inline-suppr \
             -Iinclude core util 2>&1 | tail -50
+      - name: Strict warning baseline (-Wshadow -Wconversion)
+        run: make check-warnings
+      - name: Script lint/format pack (.luaurc)
+        run: make lint-scripts
+      - name: Script examples run (docs verified in CI)
+        run: make check-examples
 
   provenance:
     name: provenance + SBOM

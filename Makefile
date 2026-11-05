@@ -152,7 +152,7 @@ check-samples: samples/sample_hitmarker.o
 	@echo "== samples compile OK =="
 	@rm -f samples/sample_hitmarker.o
 
-test: idl-check check-signer check-sigpack-signer check-sources check-android-sources check-mbedtls check-run check-sigcheck check-warnings check-examples $(TEST_BINS) build/$(SHARED_NAME) check-samples
+test: idl-check check-signer check-sigpack-signer check-sources check-android-sources check-mbedtls check-run check-sigcheck check-warnings check-werror check-examples $(TEST_BINS) build/$(SHARED_NAME) check-samples
 	@for b in $(TEST_BINS); do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
@@ -418,6 +418,30 @@ check-warnings:
 	  if [ -n "$$out" ]; then echo "check-warnings: $$f"; echo "$$out"; fail=1; fi; \
 	done; \
 	[ $$fail -eq 0 ] && echo "== warning baseline clean ==" || exit 1
+
+# -Werror over the first-party files whose warning baseline is clean
+# (improvement 98). Vendored code and the few files still carrying a third-party
+# header warning are excluded; this is the gate that keeps a new warning from
+# landing in the files already clean.
+.PHONY: check-werror
+check-werror:
+	@fail=0; \
+	for f in core/hooks/backend_shim.cpp core/hooks/x86_length.cpp \
+	         core/hooks/sigscan.cpp core/hooks/hook_chain.cpp \
+	         core/net/net.cpp core/net/inflate.cpp core/net/netquota.cpp \
+	         core/net/room_token.cpp core/net/lan_transport.cpp \
+	         core/net/tls.cpp core/events/metrics.cpp \
+	         core/lifecycle/crash.cpp core/lifecycle/configfile.cpp \
+	         core/script/async.cpp core/script/timers.cpp util/logger.cpp \
+	         util/mem.cpp; do \
+	  $(CXX) -std=c++17 -Wall -Wextra -Wshadow -Wconversion -Werror -fsyntax-only \
+	    -Iinclude -Ithird_party/ed25519 -Ithird_party/mbedtls/include \
+	    -DMBEDTLS_CONFIG_FILE='"mbedtls/mbedtls_config.h"' -Ithird_party/lz4/lib \
+	    -Ithird_party/luau/Common/include -Ithird_party/luau/Ast/include \
+	    -Ithird_party/luau/Compiler/include -Ithird_party/luau/VM/include "$$f" \
+	    || { echo "check-werror: $$f"; fail=1; }; \
+	done; \
+	[ $$fail -eq 0 ] && echo "== -Werror clean ==" || exit 1
 
 # Every example in examples/*.luau is a runnable berry-run test suite, so CI
 # proves the documentation still works (improvement 76).
