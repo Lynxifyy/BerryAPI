@@ -152,7 +152,7 @@ check-samples: samples/sample_hitmarker.o
 	@echo "== samples compile OK =="
 	@rm -f samples/sample_hitmarker.o
 
-test: idl-check check-signer check-sigpack-signer check-sources check-android-sources check-mbedtls check-run check-sigcheck $(TEST_BINS) build/$(SHARED_NAME) check-samples
+test: idl-check check-signer check-sigpack-signer check-sources check-android-sources check-mbedtls check-run check-sigcheck check-examples $(TEST_BINS) build/$(SHARED_NAME) check-samples
 	@for b in $(TEST_BINS); do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
@@ -398,6 +398,17 @@ sbom:
 # tool is present; a machine without them skips rather than failing. The .luaurc
 # itself is always validated (it must be valid JSON), so a typo in the config is
 # caught even without the tools.
+# Every example in examples/*.luau is a runnable berry-run test suite, so CI
+# proves the documentation still works (improvement 76).
+.PHONY: check-examples
+check-examples: build/berry-run
+	@for f in examples/*.luau; do \
+	  [ -e "$$f" ] || continue; \
+	  echo "-- $$f --"; \
+	  ./build/berry-run test "$$f" || { echo "check-examples: $$f failed"; exit 1; }; \
+	done
+	@echo "== examples OK =="
+
 .PHONY: lint-scripts
 lint-scripts:
 	@python3 -c "import json,sys; json.load(open('.luaurc')); print('== .luaurc is valid JSON ==')"
