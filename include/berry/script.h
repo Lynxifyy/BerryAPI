@@ -137,12 +137,20 @@ const char* ScriptStatusName(ScriptStatus s);
 //----------------------------------------------------------------------------
 
 struct BERRY_API ScriptLimits {
-  /// Maximum VM instructions a single hook invocation may execute.
+  /// Maximum VM instructions a single hook invocation may execute. With
+  /// `countInstructions` this is a real instruction count (Luau single-step);
+  /// otherwise it is a safepoint count (bug 61).
   u64 instructionBudget = 200000;
   /// Maximum VM-managed bytes (strings + state) a script may hold.
   size_t memoryLimitBytes = 8u * 1024 * 1024;
-  /// Wall-clock guard for native calls inside one invocation.
+  /// Wall-clock guard for native calls inside one invocation. The time spent
+  /// inside native bindings is charged against this too, so a blocking native
+  /// call cannot hide behind a cheap safepoint count (bug 61).
   u64 wallClockMs = 100;
+  /// Count real VM instructions (Luau single-step) rather than safepoints. On
+  /// by default so the budget measures work, not scheduling; the cost is the
+  /// per-instruction debug hook, which is acceptable on the script worker.
+  bool countInstructions = true;
 };
 
 //----------------------------------------------------------------------------
@@ -324,7 +332,12 @@ class BERRY_API IScriptVm {
   virtual void SetBindings(const ScriptBindings* bindings) = 0;
   virtual void SetContext(ScriptContext* ctx) = 0;
 
+  /// Real VM instructions executed in the current invocation (or the safepoint
+  /// count when `countInstructions` is off).
   virtual u64 InstructionsExecuted() const = 0;
+  /// Safepoints the VM has reached this invocation. Kept distinct from the
+  /// instruction count so the two cannot be confused (bug 61).
+  virtual u64 SafepointsExecuted() const { return 0; }
   virtual size_t MemoryUsed() const = 0;
   /// Resets the per-invocation instruction counter.
   virtual void ResetInstructionCount() = 0;

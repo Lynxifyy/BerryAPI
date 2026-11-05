@@ -127,6 +127,31 @@ static void TestLuauInstructionBudget() {
   CHECK(vm->Call("spin", {}, &ret, &err) == ScriptStatus::BudgetExceeded);
   CHECK(err.occurred);
   CHECK(vm->InstructionsExecuted() >= 5000);
+  // The instruction count is real work, distinct from the safepoint count
+  // (bug 61): a tight `while true do end` loop reaches a great many
+  // instructions but far fewer safepoints, so the two must not be equal.
+  CHECK(vm->SafepointsExecuted() < vm->InstructionsExecuted());
+}
+
+// A script that does real work but no loop/call safepoints must still be
+// bounded by the instruction budget, which is what the old safepoint counter
+// could not do (bug 61).
+static void TestLuauCountsStraightLineWork() {
+  auto vm = Luau();
+  ScriptError err;
+  // A long chain of arithmetic in one basic block: few or no safepoints.
+  std::string src = "return { work = function()\n  local x = 0\n";
+  for (int i = 0; i < 4000; ++i) src += "  x = x + 1\n";
+  src += "  return x\nend }\n";
+  CHECK(vm->Load(src.c_str(), "straight", &err));
+  ScriptLimits lim;
+  lim.instructionBudget = 500;
+  lim.wallClockMs = 100000;
+  lim.countInstructions = true;
+  vm->SetLimits(lim);
+  std::vector<ScriptValue> ret;
+  CHECK(vm->Call("work", {}, &ret, &err) == ScriptStatus::BudgetExceeded);
+  CHECK(vm->InstructionsExecuted() >= 500);
 }
 
 static void TestLuauTimeout() {
@@ -305,6 +330,7 @@ int main() {
   TestLuauRuntimeError();
   TestLuauUnknownFunction();
   TestLuauInstructionBudget();
+  TestLuauCountsStraightLineWork();
   TestLuauTimeout();
   TestLuauMemoryLimit();
   TestLuauSandbox();

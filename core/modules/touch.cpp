@@ -3,6 +3,7 @@
 
 #include "berry/event.h"
 #include "berry/render.h"
+#include "berry/math.h"
 
 #include <algorithm>
 #include <cctype>
@@ -12,8 +13,6 @@
 namespace Berry {
 
 namespace {
-
-constexpr f32 kPi = 3.14159265358979f;
 
 /// The single channel every recognised gesture is published on. A script
 /// filters by the gesture kind in the payload.

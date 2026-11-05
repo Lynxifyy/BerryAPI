@@ -7,6 +7,12 @@
 
 namespace Berry {
 
+// Pi as a defined constant, not M_PI: M_PI is not standard C++ (it is missing
+// under strict C++17 on some toolchains) and is a double, which promotes the
+// whole expression and trips -Wfloat-conversion in every TU that includes this
+// header (bug 60).
+constexpr f32 kPi = 3.14159265358979323846f;
+
 //----------------------------------------------------------------------------
 // Vec3 / Vec2 / Vec4 — tiny, allocation-free arithmetic.
 //----------------------------------------------------------------------------
@@ -81,8 +87,8 @@ struct BERRY_API Vec3 {
   }
 
   Vec3 Angle() const {  // pitch / yaw in degrees (Minecraft convention)
-    f32 pitch = -std::asin(y / std::max(Length(), 1e-6f)) * 180.0f / M_PI;
-    f32 yaw   = std::atan2(-x, z) * 180.0f / M_PI;
+    f32 pitch = -std::asin(y / std::max(Length(), 1e-6f)) * 180.0f / kPi;
+    f32 yaw   = std::atan2(-x, z) * 180.0f / kPi;
     return Vec3(pitch, yaw, 0);
   }
 };
