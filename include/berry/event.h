@@ -158,6 +158,13 @@ class BERRY_API Profiler {
   /// profiler over.
   void FlameReset();
 
+  /// The aggregated call tree as Chrome trace-event JSON (improvement 58), so a
+  /// profile opens in chrome://tracing or Perfetto. The events are the span
+  /// stats as complete ("X") events with a synthetic timestamp derived from
+  /// each span's cumulative time; it is a summary trace, not a per-frame one,
+  /// which is what a "what is expensive" question needs.
+  std::string ExportChromeTrace() const;
+
   void SetEnabled(bool e) { enabled_ = e; }
   bool enabled() const { return enabled_; }
 

@@ -76,6 +76,7 @@ CORE_SRC := \
   core/script/loader.cpp \
   core/script/pack.cpp \
   core/script/async.cpp \
+  core/script/timers.cpp \
   core/script/script_bus.cpp \
   core/script/url.cpp \
   core/script/api_bindings.cpp \
@@ -230,6 +231,7 @@ TEST_SRC := \
   tests/test_metrics.cpp \
   tests/test_crash.cpp \
   tests/test_configfile.cpp \
+  tests/test_timers.cpp \
   tests/test_thread.cpp \
   tests/test_fuzz.cpp \
   tests/test_manifest.cpp \
