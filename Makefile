@@ -369,6 +369,29 @@ check-signer:
 check-sigpack-signer:
 	@python3 tools/check-sigpack-signer.py
 
+# libFuzzer targets (improvement 97). Needs clang; on a machine without it this
+# is a no-op, so `make fuzz` never breaks the host build. The targets share the
+# pure parsers the deterministic tests already cover.
+.PHONY: fuzz
+fuzz:
+	@if command -v clang++ >/dev/null 2>&1; then \
+	  clang++ -std=c++17 -g -O1 -fsanitize=fuzzer,address,undefined \
+	    -Iinclude -Ithird_party/ed25519 -Ithird_party/mbedtls/include \
+	    -DMBEDTLS_CONFIG_FILE='"mbedtls/mbedtls_config.h"' -Ithird_party/lz4/lib \
+	    -Ithird_party/luau/Common/include -Ithird_party/luau/Ast/include \
+	    -Ithird_party/luau/Compiler/include -Ithird_party/luau/VM/include \
+	    fuzz/fuzz_targets.cpp $(CORE_OBJ) -o build/berry_fuzz \
+	    && ./build/berry_fuzz -max_total_time=60 -rss_limit_mb=2048 \
+	  || echo "fuzz: clang++ not available; skipped"; \
+	else \
+	  echo "fuzz: clang++ not available; skipped"; \
+	fi
+
+# A CycloneDX SBOM (improvement 100).
+.PHONY: sbom
+sbom:
+	@python3 tools/gen-sbom.py > build/sbom.cdx.json && echo "== wrote build/sbom.cdx.json =="
+
 # Every .cpp under core/ and util/ must be in tools/sources.mk, so the host
 # build and the Android build cannot silently drift apart.
 .PHONY: check-sources

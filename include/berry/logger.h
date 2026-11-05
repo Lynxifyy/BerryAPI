@@ -31,6 +31,21 @@ class BERRY_API Log {
   /// print. Default off; a device build never sets it.
   static void SetSilent(bool silent);
 
+  /// Per-module level override (improvement 90). `module` is the tag the caller
+  /// passes to `LogTagged` (e.g. "net", "script"). A level of `LogLevel::Trace`
+  /// is the most verbose; set a module's level higher to quiet it without
+  /// quieting the rest. Returns the module's effective level.
+  static void SetModuleLevel(const std::string& module, LogLevel level);
+  static LogLevel ModuleLevel(const std::string& module);
+  static void ClearModuleLevels();
+
+  /// Logs with a module tag, applying the module's own level (or the global
+  /// one) and a per-module rate limit so a hot loop cannot flood the sink
+  /// (improvement 90). `maxPerSecond` of 0 disables the limit for the call.
+  static void LogTagged(LogLevel level, const char* module, int maxPerSecond,
+                        const char* fmt, ...)
+      __attribute__((format(printf, 4, 5)));
+
  private:
   static void VFormat(LogLevel level, const char* fmt, va_list args);
   static std::mutex mutex_;

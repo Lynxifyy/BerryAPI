@@ -1,6 +1,9 @@
 #include "berry/logger.h"
+#include "berry/types.h"
+#include <chrono>
 #include <cstdarg>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -16,6 +19,70 @@ std::string Log::last_message_;
 bool Log::capture_ = false;
 bool Log::silent_ = false;
 std::atomic<int> Log::level_{(int)LogLevel::Info};
+
+namespace {
+
+// Per-module level overrides and rate-limit state (improvement 90). Guarded by
+// Log's mutex so a concurrent SetModuleLevel cannot race a read.
+struct ModuleState {
+  int level = -1;                 // -1 = no override
+  u64 windowStartMs = 0;
+  u32 emittedThisSecond = 0;
+};
+std::map<std::string, ModuleState> g_moduleState;
+
+u64 SteadyMs() {
+  using namespace std::chrono;
+  return (u64)duration_cast<milliseconds>(steady_clock::now().time_since_epoch())
+      .count();
+}
+
+}  // namespace
+
+void Log::SetModuleLevel(const std::string& module, LogLevel level) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  g_moduleState[module].level = (int)level;
+}
+
+LogLevel Log::ModuleLevel(const std::string& module) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  auto it = g_moduleState.find(module);
+  if (it != g_moduleState.end() && it->second.level >= 0) {
+    return (LogLevel)it->second.level;
+  }
+  return GetLevel();
+}
+
+void Log::ClearModuleLevels() {
+  std::lock_guard<std::mutex> lk(mutex_);
+  g_moduleState.clear();
+}
+
+void Log::LogTagged(LogLevel level, const char* module, int maxPerSecond,
+                    const char* fmt, ...) {
+  const std::string mod = module ? module : "";
+  // Resolve the effective level and, if a rate limit applies, decide whether
+  // this call is allowed. All under the lock; the sink itself runs outside it.
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto& st = g_moduleState[mod];
+    const int effective = st.level >= 0 ? st.level : level_.load();
+    if ((int)level < effective) return;
+    if (maxPerSecond > 0) {
+      const u64 now = SteadyMs();
+      if (now - st.windowStartMs >= 1000) {
+        st.windowStartMs = now;
+        st.emittedThisSecond = 0;
+      }
+      if (st.emittedThisSecond >= (u32)maxPerSecond) return;   // dropped
+      ++st.emittedThisSecond;
+    }
+  }
+  va_list args;
+  va_start(args, fmt);
+  VFormat(level, fmt, args);
+  va_end(args);
+}
 
 void Log::SetLevel(LogLevel level) { level_.store((int)level); }
 LogLevel Log::GetLevel() { return (LogLevel)level_.load(); }
