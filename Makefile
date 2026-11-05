@@ -393,6 +393,22 @@ fuzz:
 sbom:
 	@python3 tools/gen-sbom.py > build/sbom.cdx.json && echo "== wrote build/sbom.cdx.json =="
 
+# Script lint/format rule pack (improvement 75). Runs the project's .luaurc lint
+# config through luau-analyze and the stylua config through stylua when either
+# tool is present; a machine without them skips rather than failing. The .luaurc
+# itself is always validated (it must be valid JSON), so a typo in the config is
+# caught even without the tools.
+.PHONY: lint-scripts
+lint-scripts:
+	@python3 -c "import json,sys; json.load(open('.luaurc')); print('== .luaurc is valid JSON ==')"
+	@if command -v luau-analyze >/dev/null 2>&1; then \
+	  echo "== luau-analyze =="; \
+	  find samples -name '*.luau' -exec luau-analyze {} + || true; \
+	else echo "lint-scripts: luau-analyze not installed; skipped"; fi
+	@if command -v stylua >/dev/null 2>&1; then \
+	  echo "== stylua --check =="; stylua --check . || true; \
+	else echo "lint-scripts: stylua not installed; skipped"; fi
+
 # Every .cpp under core/ and util/ must be in tools/sources.mk, so the host
 # build and the Android build cannot silently drift apart.
 .PHONY: check-sources

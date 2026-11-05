@@ -277,6 +277,14 @@ static void TestFilterAndCap() {
   opts.maxTests = 2;
   const ScriptTestReport capped = runner.Run(kSuite, "suite", opts);
   CHECK(capped.total() == 2);
+  // Coverage view (improvement 74): the discovered set is the whole suite, and
+  // the tests the cap left unrun are reported.
+  CHECK(capped.discovered.size() == all.discovered.size());
+  CHECK(capped.unrun().size() == capped.discovered.size() - 2);
+  CHECK(capped.covered() < 1.0);
+  // An unfiltered, uncapped run covers every discovered test.
+  CHECK(all.covered() == 1.0);
+  CHECK(all.unrun().empty());
 }
 
 static void TestAsyncSuspendIsFailure() {
