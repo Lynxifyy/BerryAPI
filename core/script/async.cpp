@@ -73,8 +73,64 @@ u64 TaskScheduler::Suspend(const std::string& script, const std::string& reason,
   t.timeoutTick = timeoutTick;
   t.timeoutMs = timeoutMs;
   t.createdAtMs = nowMs;
+  // Join the script's current open scope, so cancelling the scope tears down
+  // every await the entry point started (improvement 72).
+  for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
+    if (it->open && it->script == script) { t.scope = it->id; break; }
+  }
   tasks_.push_back(std::move(t));
   return tasks_.back().id;
+}
+
+u64 TaskScheduler::OpenScope(const std::string& script) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  Scope s;
+  s.id = nextScopeId_++;
+  s.script = script;
+  s.open = true;
+  scopes_.push_back(s);
+  return s.id;
+}
+
+u64 TaskScheduler::CurrentScope(const std::string& script) const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
+    if (it->open && it->script == script) return it->id;
+  }
+  return 0;
+}
+
+size_t TaskScheduler::CancelScope(u64 scope) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  size_t cancelled = 0;
+  for (auto it = tasks_.begin(); it != tasks_.end();) {
+    if (it->scope == scope) {
+      ++cancelled;
+      it = tasks_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  for (auto& s : scopes_) {
+    if (s.id == scope) s.open = false;
+  }
+  return cancelled;
+}
+
+void TaskScheduler::CloseScope(u64 scope) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  for (auto& s : scopes_) {
+    if (s.id == scope) s.open = false;
+  }
+}
+
+size_t TaskScheduler::CountInScope(u64 scope) const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  size_t n = 0;
+  for (const auto& t : tasks_) {
+    if (t.scope == scope) ++n;
+  }
+  return n;
 }
 
 std::vector<AsyncTask> TaskScheduler::Poll(GameTick currentTick, u64 nowMs) {
@@ -217,7 +273,9 @@ size_t TaskScheduler::CountInState(TaskState state) const {
 void TaskScheduler::Clear() {
   std::lock_guard<std::mutex> lk(mutex_);
   tasks_.clear();
+  scopes_.clear();
   nextId_ = 1;
+  nextScopeId_ = 1;
 }
 
 //----------------------------------------------------------------------------

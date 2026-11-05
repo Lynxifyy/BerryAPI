@@ -402,6 +402,46 @@ static void TestTimeoutCombinatorResumes() {
   TaskScheduler::Instance().Clear();
 }
 
+// A structured scope groups the tasks a script started while it was open, and
+// cancelling the scope cancels all of them at once (improvement 72).
+static void TestStructuredScopes() {
+  TaskScheduler::Instance().Clear();
+  auto& sched = TaskScheduler::Instance();
+
+  u64 scope = sched.OpenScope("s1");
+  CHECK(scope != 0);
+  CHECK(sched.CurrentScope("s1") == scope);
+  CHECK(sched.CurrentScope("other") == 0);
+
+  // Two tasks suspended while the scope is open join it.
+  sched.Suspend("s1", "a", [](ScriptValue*) { return false; }, 0);
+  sched.Suspend("s1", "b", [](ScriptValue*) { return false; }, 0);
+  CHECK(sched.CountInScope(scope) == 2);
+  CHECK(sched.Pending() == 2);
+
+  // A task for another script is not in the scope.
+  sched.Suspend("s2", "c", [](ScriptValue*) { return false; }, 0);
+  CHECK(sched.CountInScope(scope) == 2);
+
+  // Cancelling the scope drops its two tasks and closes it.
+  CHECK(sched.CancelScope(scope) == 2);
+  CHECK(sched.Pending() == 1);   // the s2 task survives
+  CHECK(sched.CurrentScope("s1") == 0);
+
+  // A new task after the scope closed does not join it.
+  sched.Suspend("s1", "d", [](ScriptValue*) { return false; }, 0);
+  CHECK(sched.CountInScope(scope) == 0);
+
+  // Closing a scope without cancelling keeps its tasks.
+  u64 scope2 = sched.OpenScope("s1");
+  sched.Suspend("s1", "e", [](ScriptValue*) { return false; }, 0);
+  sched.CloseScope(scope2);
+  CHECK(sched.CountInScope(scope2) == 1);
+  CHECK(sched.CurrentScope("s1") == 0);
+
+  TaskScheduler::Instance().Clear();
+}
+
 int main() {
   TestSchedulerBasics();
   TestSchedulerTimeout();
@@ -415,6 +455,7 @@ int main() {
   TestWaitWithoutClock();
   TestCombinatorBindings();
   TestTimeoutCombinatorResumes();
+  TestStructuredScopes();
   if (g_fail == 0) printf("test_async: ALL OK\n");
   return g_fail;
 }

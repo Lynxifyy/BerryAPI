@@ -56,6 +56,10 @@ const char* TaskStateName(TaskState s);
 struct BERRY_API AsyncTask {
   u64 id = 0;
   std::string script;
+  /// The structured scope the task belongs to (improvement 72). A scope groups
+  /// tasks that must all be cancelled together (e.g. every await a script
+  /// started from one entry point). 0 = no scope.
+  u64 scope = 0;
   std::string reason;                 // "wait(20)", "events.once(hit)", …
   std::function<bool(ScriptValue* out)> ready;  // returns true when complete
   ScriptValue result;
@@ -93,6 +97,21 @@ class BERRY_API TaskScheduler {
   /// Cancels every task for a script. Returns how many were cancelled.
   size_t CancelScript(const std::string& script);
 
+  /// Opens a structured scope (improvement 72) and returns its id. A task
+  /// suspended while a scope is current joins it; cancelling the scope cancels
+  /// every task in it, so a script that starts work from one entry point can
+  /// tear the whole group down at once (e.g. on unload).
+  u64 OpenScope(const std::string& script);
+  /// Cancels every task in `scope` and closes it. Returns how many were
+  /// cancelled.
+  size_t CancelScope(u64 scope);
+  /// The scope the most recently opened (unclosed) scope for `script` is, or 0.
+  u64 CurrentScope(const std::string& script) const;
+  /// Closes `scope` without cancelling (a scope that finished normally).
+  void CloseScope(u64 scope);
+  /// Tasks currently in `scope`.
+  size_t CountInScope(u64 scope) const;
+
   bool Find(u64 id, AsyncTask* out) const;
   size_t Pending() const;
   /// Count of tasks in a given state (diagnostics).
@@ -101,9 +120,16 @@ class BERRY_API TaskScheduler {
 
  private:
   TaskScheduler() = default;
+  struct Scope {
+    u64 id = 0;
+    std::string script;
+    bool open = true;
+  };
   mutable std::mutex mutex_;
   std::vector<AsyncTask> tasks_;
+  std::vector<Scope> scopes_;
   u64 nextId_ = 1;
+  u64 nextScopeId_ = 1;
 };
 
 //----------------------------------------------------------------------------
