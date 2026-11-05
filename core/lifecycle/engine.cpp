@@ -5,6 +5,7 @@
 #include "berry/session_recorder.h"
 #include "berry/replay_service.h"
 #include "berry/thread.h"
+#include "berry/crash.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -147,6 +148,25 @@ bool Engine::Bootstrap(const BerryConfigC& cfg) {
   ApplyConfig(internal);
   Log::Info("BerryAPI v%s bootstrapped (abi %u)", BERRY_VERSION_STRING,
             (unsigned)BERRY_ABI_VERSION);
+
+  // Safe mode (improvement 88): install the crash handler and consult the
+  // consecutive-startup-crash counter. A prior crash loop forces safe mode, so
+  // hooks and scripts stay off until the host clears it. The handler is
+  // installed once; the counter is only advisory.
+  if (!CrashHandlerInstalled()) {
+    InstallCrashHandler({});
+  }
+  const int priorCrashes = BeginStartup();
+  if (priorCrashes >= 2) {
+    Log::Warn("BerryAPI: %d consecutive startup crashes; entering safe mode "
+              "(hooks and scripts disabled)", priorCrashes);
+    ForceSafeMode(true);
+  }
+  if (SafeModeForced()) {
+    internal.autoAttachModules = false;
+    internal.enableClient = false;
+  }
+
   // Register core signatures used by module seams. The combat/render/world
   // modules register their own per-version tables; engine here just resolves
   // the local runtime symbol the modules need.
@@ -231,6 +251,9 @@ bool Engine::Attach() {
     }
   }
   attached_.store(true);
+  // A successful attach clears the consecutive-crash counter, so the safe-mode
+  // gate only trips on a real crash loop (improvement 88).
+  MarkStartupHealthy();
   Log::Info("BerryAPI attached (%zu modules)", Modules().Count());
   return true;
 }

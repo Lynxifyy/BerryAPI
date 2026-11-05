@@ -47,6 +47,7 @@ CORE_SRC := \
   core/modules/governor_c.cpp \
   core/lifecycle/engine.cpp \
   core/lifecycle/crash.cpp \
+  core/lifecycle/configfile.cpp \
   core/lifecycle/thread.cpp \
   core/net/net.cpp \
   core/net/tls.cpp \
@@ -228,6 +229,7 @@ TEST_SRC := \
   tests/test_mem.cpp \
   tests/test_metrics.cpp \
   tests/test_crash.cpp \
+  tests/test_configfile.cpp \
   tests/test_thread.cpp \
   tests/test_fuzz.cpp \
   tests/test_manifest.cpp \

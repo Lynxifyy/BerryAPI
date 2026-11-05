@@ -33,6 +33,9 @@ BERRY_API bool InstallCrashHandler(const CrashHandlerConfig& cfg = {});
 /// The path the last report would be (or was) written to.
 BERRY_API const std::string& CrashReportPath();
 
+/// True when the crash handler is installed.
+BERRY_API bool CrashHandlerInstalled();
+
 /// Records that a startup began, and returns how many consecutive starts have
 /// crashed without a matching success. A nonzero result means the previous
 /// start(s) did not reach `MarkStartupHealthy`, so the caller should boot in

@@ -138,6 +138,8 @@ bool InstallCrashHandler(const CrashHandlerConfig& cfg) {
 
 const std::string& CrashReportPath() { return g_reportPath; }
 
+bool CrashHandlerInstalled() { return g_installed.load(); }
+
 int BeginStartup() {
   const std::string cp = CounterPath();
   int count = 0;

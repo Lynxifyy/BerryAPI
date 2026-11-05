@@ -1,5 +1,7 @@
 // Adaptive FPS governor. See include/berry/perf.h.
 #include "berry/perf.h"
+#include "berry/logger.h"
+#include "berry/event.h"
 
 #include <algorithm>
 #include <cmath>
@@ -418,6 +420,41 @@ GovernorAction PerformanceGovernor::OnThermal(ThermalState state) {
   // The ceiling change alone does not restore quality; the normal OnFrame
   // feedback does that gradually.
   return GovernorAction::None;
+}
+
+
+//----------------------------------------------------------------------------
+// FrameBudget (improvement 92)
+//----------------------------------------------------------------------------
+
+FrameBudget::FrameBudget(const char* name, f32 budgetMs)
+    : name_(name ? name : "?"), budgetMs_(budgetMs) {}
+
+bool FrameBudget::Record(f32 ms) {
+  samples_[next_] = ms;
+  next_ = (next_ + 1) % kWindow;
+  if (count_ < kWindow) ++count_;
+  const bool over = ms > budgetMs_;
+  if (!over) return false;
+  ++overruns_;
+  // Warn at most once per second, so a persistently slow subsystem does not
+  // flood the log; the metric always counts every overrun.
+  const u64 now = NowMs();
+  if (now - lastWarnMs_ >= 1000) {
+    lastWarnMs_ = now;
+    Log::Warn("frame budget: %s overran (%.2fms > %.2fms, mean %.2fms, %llu "
+              "overruns)",
+              name_, ms, budgetMs_, Mean(),
+              (unsigned long long)overruns_);
+  }
+  return true;
+}
+
+f32 FrameBudget::Mean() const {
+  if (count_ == 0) return 0.0f;
+  f32 sum = 0.0f;
+  for (size_t i = 0; i < count_; ++i) sum += samples_[i];
+  return sum / (f32)count_;
 }
 
 }  // namespace Berry
