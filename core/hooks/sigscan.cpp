@@ -1,6 +1,7 @@
 #include "berry/sigscan.h"
 #include "berry/logger.h"
 #include "berry/manifest.h"   // crypto::Sha256Hex for the integrity fingerprint
+#include "../script/json_min.h"   // offset-cache parse
 #include <atomic>
 #include <cctype>
 #include <csignal>
@@ -399,6 +400,23 @@ bool ProcessImages::FindSection(uptr moduleBase, const char* sectionName,
   return false;
 }
 
+std::vector<u8> ProcessImages::ReadModuleBytes(const std::string& path,
+                                               u64* outOffset) {
+  if (outOffset) *outOffset = 0;
+  std::vector<u8> out;
+  if (path.empty()) return out;
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return out;
+  f.seekg(0, std::ios::end);
+  const std::streamoff len = f.tellg();
+  if (len <= 0) return out;
+  f.seekg(0, std::ios::beg);
+  out.resize((size_t)len);
+  f.read(reinterpret_cast<char*>(out.data()), len);
+  if (f.gcount() < len) out.clear();
+  return out;
+}
+
 //----------------------------------------------------------------------------
 // SigScanner
 //----------------------------------------------------------------------------
@@ -436,22 +454,67 @@ void ScanRange(const MemRange& r, const Signature& sig, OnHit onHit) {
   if (plen == 0 || plen > n) return;
   const size_t limit = n - plen + 1;
   const int anchor = AnchorIndex(sig);
-  if (anchor < 0) {
+
+  if (anchor >= 0) {
+    // A full-byte anchor: memchr skips in one libc call (fastest).
+    const u8 anchorMask =
+        (size_t)anchor < sig.wild.size() ? sig.wild[(size_t)anchor] : 0xFF;
+    const u8 anchorByte = sig.bytes[(size_t)anchor];
+    if (anchorMask == 0xFF) {
+      size_t i = 0;
+      while (i < limit) {
+        const u8* hit = (const u8*)memchr(base + i + anchor, anchorByte,
+                                          limit - i);
+        if (!hit) return;
+        i = (size_t)(hit - base) - (size_t)anchor;
+        if (sig.Match(base + i) && onHit(r.base + i)) return;
+        ++i;
+      }
+      return;
+    }
+  }
+
+  // No fully-fixed anchor: Horspool skipping on the last fixed byte
+  // (improvement 17). Build a shift table: for a byte b, how far to slide when
+  // the window's last fixed position mismatches. A half-fixed byte is compared
+  // under its mask.
+  int last = -1;
+  u8 lastMask = 0, lastByte = 0;
+  for (size_t k = 0; k < plen; ++k) {
+    const u8 m = k < sig.wild.size() ? sig.wild[k]
+                                     : (u8)(sig.mask[k] ? 0xFF : 0x00);
+    if (m != 0) { last = (int)k; lastMask = m; lastByte = sig.bytes[k]; }
+  }
+  if (last < 0) {
+    // Every byte is a wildcard: nothing to skip on; a linear walk is the only
+    // exact option.
     for (size_t i = 0; i < limit; ++i) {
       if (sig.Match(base + i) && onHit(r.base + i)) return;
     }
     return;
   }
-  const u8 anchorMask =
-      (size_t)anchor < sig.wild.size() ? sig.wild[(size_t)anchor] : 0xFF;
-  const u8 anchorByte = sig.bytes[(size_t)anchor];
+  // shift[b] = distance to move when the byte at `last` is b.
+  int shift[256];
+  for (int b = 0; b < 256; ++b) shift[b] = (int)plen;
+  for (size_t k = 0; k < plen; ++k) {
+    const u8 m = k < sig.wild.size() ? sig.wild[k]
+                                     : (u8)(sig.mask[k] ? 0xFF : 0x00);
+    if (m == 0xFF) shift[sig.bytes[k]] = (int)(plen - 1 - k);
+  }
+  // A zero shift would stall the scan; clamp to 1 (never needed for a genuine
+  // mismatch, but cheap insurance).
+  for (int b = 0; b < 256; ++b) {
+    if (shift[b] < 1) shift[b] = 1;
+  }
+  // The last fixed position may be half-fixed; when it is, the shift for the
+  // masked value is what we can prove, so fall back to a step of 1 for bytes
+  // that do not match its mask.
   size_t i = 0;
   while (i < limit) {
-    if (anchorMask == 0xFF) {
-      const u8* hit = (const u8*)memchr(base + i + anchor, anchorByte,
-                                        limit - i);
-      if (!hit) return;
-      i = (size_t)(hit - base) - (size_t)anchor;
+    const u8 win = base[i + (size_t)last];
+    if ((win & lastMask) != (lastByte & lastMask)) {
+      i += (size_t)shift[win];
+      continue;
     }
     if (sig.Match(base + i) && onHit(r.base + i)) return;
     ++i;
@@ -927,6 +990,79 @@ bool SigCache::Has(const std::string& id) const {
 size_t SigCache::Count() const {
   std::lock_guard<std::mutex> lk(mutex_);
   return entries_.size();
+}
+
+size_t SigCache::LoadOffsetCache(const std::string& json) {
+  if (json.empty()) return 0;
+  detail::json::Value root;
+  if (!detail::json::Parse(json, &root) || !root.IsObject()) return 0;
+  const detail::json::Value* buildId = root.Get("build_id");
+  std::lock_guard<std::mutex> lk(mutex_);
+  // A cache for another build is ignored outright: adopting it could resolve a
+  // rule to an address in the wrong binary.
+  if (!buildId || !buildId->IsString() ||
+      expectedBuild_.buildId.empty() ||
+      buildId->str != expectedBuild_.buildId) {
+    return 0;
+  }
+  const detail::json::Value* offsets = root.Get("offsets");
+  if (!offsets || !offsets->IsObject()) return 0;
+  // Resolve offsets against the LIVE module base: the offset is ASLR-stable,
+  // the absolute address is not, so the base must come from this process.
+  const uptr liveBase = ProcessImages::MainModuleBase(expectedBuild_.name.c_str());
+  if (liveBase == 0) return 0;
+  size_t adopted = 0;
+  for (const auto& kv : offsets->object) {
+    if (!kv.second.IsNumber()) continue;
+    const uptr off = (uptr)(u64)kv.second.number;
+    for (auto& e : entries_) {
+      if (e.first != kv.first) continue;
+      // Cache the relative offset as a single pseudo-result; Resolve adds the
+      // module base back. Only adopt when the rule is still Unknown.
+      if (e.second.state == SigState::Found) break;
+      e.second.results.assign(1, liveBase + off);
+      e.second.state = SigState::Found;
+      ++adopted;
+      break;
+    }
+  }
+  return adopted;
+}
+
+std::string SigCache::SaveOffsetCache() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  std::string out = "{\"build_id\":\"";
+  out += expectedBuild_.buildId;
+  out += "\",\"offsets\":{";
+  bool first = true;
+  for (const auto& e : entries_) {
+    if (e.second.state != SigState::Found || e.second.results.empty()) continue;
+    if (!first) out += ",";
+    first = false;
+    // Store the module-relative offset (result - base) so the cache survives
+    // ASLR: the absolute address changes every launch, the offset does not.
+    const uptr base = expectedBuild_.base;
+    const uptr off = e.second.results[0] >= base ? e.second.results[0] - base
+                                                 : e.second.results[0];
+    out += "\"" + e.first + "\":" + std::to_string((unsigned long long)off);
+  }
+  out += "}}";
+  return out;
+}
+
+size_t SigCache::LoadOffsetCacheFile(const std::string& path) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return 0;   // a missing cache is not an error
+  std::string body((std::istreambuf_iterator<char>(f)),
+                   std::istreambuf_iterator<char>());
+  return LoadOffsetCache(body);
+}
+
+bool SigCache::SaveOffsetCacheFile(const std::string& path) const {
+  std::ofstream f(path, std::ios::binary | std::ios::trunc);
+  if (!f) return false;
+  f << SaveOffsetCache();
+  return f.good();
 }
 
 uptr SigCache::ResolveAndRegister(const std::string& id, const Signature& sig) {

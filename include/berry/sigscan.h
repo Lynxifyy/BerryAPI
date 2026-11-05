@@ -92,6 +92,12 @@ class BERRY_API ProcessImages {
   /// Loads an ELF section (e.g. .text) by reading the mapped file; used as a
   /// fallback if the in-memory layout is disturbed by runtime patching.
   static bool FindSection(uptr moduleBase, const char* sectionName, uptr* addr, size_t* size);
+
+  /// Reads the bytes of a module from its backing file (improvement 32). An
+  /// execute-only mapping cannot be read directly, so a scan over it uses the
+  /// on-disk copy instead. Returns an empty vector when the file cannot be
+  /// read. `outOffset` is the file offset the returned bytes start at.
+  static std::vector<u8> ReadModuleBytes(const std::string& path, u64* outOffset);
 };
 
 //----------------------------------------------------------------------------
@@ -281,6 +287,20 @@ class BERRY_API SigCache {
   /// Rules only resolve to Found when the runtime fingerprint matches.
   /// Pass an empty BuildLibrary to force every rule to Missing (fail closed).
   void SetExpectedBuild(const BuildLibrary& build);
+
+  /// Loads a resolution cache written by `SaveOffsetCache` (improvement 19):
+  /// rule id -> module-relative offset, keyed by the expected build-id. A
+  /// warm start then resolves every rule to an address without scanning. A
+  /// cache whose build-id does not match the expected build is ignored, so a
+  /// stale cache can never resolve a rule against the wrong build. Returns how
+  /// many entries were adopted.
+  size_t LoadOffsetCache(const std::string& json);
+  /// Serializes the resolved rules as {buildId, offsets:{id: offset}}. Rules
+  /// that are not resolved are omitted.
+  std::string SaveOffsetCache() const;
+  /// Loads/saves the cache from a file. A missing file is not an error.
+  size_t LoadOffsetCacheFile(const std::string& path);
+  bool SaveOffsetCacheFile(const std::string& path) const;
 
   /// Resolves a registered signature to an absolute address (cached).
   /// Returns 0 when the build is not verified (state will be Missing).

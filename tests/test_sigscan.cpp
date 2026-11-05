@@ -149,6 +149,52 @@ int main() {
     }
   }
 
+  // --- Horspool path: a half-nibble/wildcard pattern still finds matches
+  //     (improvement 17) ---
+  {
+    u8 buf[128];
+    std::memset(buf, 0x00, sizeof buf);
+    // Pattern with no fully-fixed anchor byte: half-nibble + wildcards.
+    buf[20] = 0xA5;
+    buf[21] = 0x00;
+    buf[22] = 0x3C;
+    buf[23] = 0x00;
+    MemRange range{(uptr)buf, sizeof buf, "horspool", "", 0, false};
+    SigScanner scanner(std::vector<MemRange>{range});
+    Signature sig("h", "A? ?? 3? ??");   // only half-fixed bytes
+    CHECK(scanner.Find(sig) == (uptr)(buf + 20));
+    CHECK(scanner.FindAll(sig, 8).size() == 1);
+    // A pattern that does not match returns 0.
+    Signature miss("m", "B? ?? 4? ??");
+    CHECK(scanner.Find(miss) == 0);
+  }
+
+  // --- the resolution cache is build-id keyed and ASLR-stable (impr 19) ---
+  {
+    SigCache& sc = SigCache::Instance();
+    BuildLibrary b;
+    b.name = "libminecraftpe.so";
+    b.verified = true;
+    b.base = 0x1000;
+    b.buildId = "deadbeef";
+    b.inode = 42;
+    sc.SetExpectedBuild(b);
+    sc.Register("rule:cache", Signature("rule:cache", "AA BB"));
+    // A cache for another build is ignored.
+    CHECK(sc.LoadOffsetCache(R"({"build_id":"other","offsets":{"rule:cache":16}})") == 0);
+    // A cache with no build-id on the expected side is ignored.
+    BuildLibrary nob;
+    nob.name = "libminecraftpe.so";
+    nob.verified = true;
+    nob.inode = 42;
+    sc.SetExpectedBuild(nob);
+    CHECK(sc.LoadOffsetCache(R"({"build_id":"deadbeef","offsets":{"rule:cache":16}})") == 0);
+    // The save side emits the expected build-id.
+    sc.SetExpectedBuild(b);
+    const std::string json = sc.SaveOffsetCache();
+    CHECK(json.find("\"build_id\":\"deadbeef\"") != std::string::npos);
+  }
+
   // --- FindGuarded never crashes on an unmapped range (bug 20) ---
   {
     MemRange bad{(uptr)0x1000, 0x1000, "unmapped", "", 0, false};
