@@ -83,6 +83,7 @@ CORE_SRC := \
   core/script/timers.cpp \
   core/script/require.cpp \
   core/script/bytecode_cache.cpp \
+  core/script/secret_store.cpp \
   core/script/script_bus.cpp \
   core/script/url.cpp \
   core/script/api_bindings.cpp \
@@ -243,6 +244,7 @@ TEST_SRC := \
   tests/test_require.cpp \
   tests/test_debug_endpoint.cpp \
   tests/test_bytecode_cache.cpp \
+  tests/test_secret_store.cpp \
   tests/test_crash.cpp \
   tests/test_configfile.cpp \
   tests/test_timers.cpp \
