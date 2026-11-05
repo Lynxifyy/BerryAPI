@@ -47,6 +47,19 @@ struct BERRY_API Deadline {
   int remainingMs() const;
 };
 
+/// An address family for Happy-Eyeballs ordering (improvement 45).
+enum class AddrFamily : u8 { V4 = 0, V6 = 1 };
+
+/// Orders a host's resolved addresses for a dual-stack connect (RFC 8305): IPv6
+/// addresses first, then IPv4, each family in the order the resolver returned.
+/// Interleaving a single IPv6 ahead of the IPv4s is the practical behaviour: a
+/// host with working IPv6 is reached over it, and a host without one falls back
+/// to IPv4 after the first attempt fails, without serialising every AAAA
+/// address first. Exposed (and pure) so the ordering is testable without a
+/// network. Returns the indices into `families` in connect order.
+BERRY_API std::vector<size_t> HappyEyeballsOrder(
+    const std::vector<AddrFamily>& families);
+
 class BERRY_API TcpSocket {
  public:
   TcpSocket();

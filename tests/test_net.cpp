@@ -47,6 +47,25 @@ int main() {
     server.Stop();
   }
 
+  // --- Happy Eyeballs candidate ordering (improvement 45) ---
+  {
+    using AF = AddrFamily;
+    // All IPv4: order preserved.
+    auto a = HappyEyeballsOrder({AF::V4, AF::V4, AF::V4});
+    CHECK(a.size() == 3 && a[0] == 0 && a[1] == 1 && a[2] == 2);
+    // IPv6 present: the first IPv6 leads, then all IPv4, then remaining IPv6.
+    auto b = HappyEyeballsOrder({AF::V4, AF::V6, AF::V4, AF::V6});
+    CHECK(b.size() == 4);
+    CHECK(b[0] == 1);                 // first IPv6 leads
+    CHECK(b[1] == 0 && b[2] == 2);    // then the IPv4s in order
+    CHECK(b[3] == 3);                 // then the remaining IPv6
+    // IPv6 only.
+    auto c = HappyEyeballsOrder({AF::V6, AF::V6});
+    CHECK(c.size() == 2 && c[0] == 0 && c[1] == 1);
+    // Empty.
+    CHECK(HappyEyeballsOrder({}).empty());
+  }
+
   // --- HTTP authority parsing (bugs 32-35) ---
   {
     // IPv6 literal: the bracketed address is the host and the trailing port is

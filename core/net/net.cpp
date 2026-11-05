@@ -24,6 +24,32 @@
 namespace Berry {
 
 //----------------------------------------------------------------------------
+// Happy Eyeballs ordering (improvement 45)
+//----------------------------------------------------------------------------
+
+std::vector<size_t> HappyEyeballsOrder(const std::vector<AddrFamily>& families) {
+  // IPv6 first, then IPv4, but interleave: one IPv6, then all IPv4s, then the
+  // remaining IPv6s. This reaches an IPv6-capable host immediately and an
+  // IPv4-only host after a single failed attempt, rather than waiting on every
+  // AAAA address first.
+  std::vector<size_t> v6, v4;
+  for (size_t i = 0; i < families.size(); ++i) {
+    if (families[i] == AddrFamily::V6) v6.push_back(i);
+    else v4.push_back(i);
+  }
+  std::vector<size_t> out;
+  out.reserve(families.size());
+  if (!v6.empty()) {
+    out.push_back(v6[0]);
+    for (size_t i : v4) out.push_back(i);
+    for (size_t k = 1; k < v6.size(); ++k) out.push_back(v6[k]);
+  } else {
+    for (size_t i : v4) out.push_back(i);
+  }
+  return out;
+}
+
+//----------------------------------------------------------------------------
 // Deadline
 //----------------------------------------------------------------------------
 
@@ -83,8 +109,25 @@ bool TcpSocket::Connect(const char* host, u16 port, const Deadline& deadline) {
     return false;
   }
 
+  // Happy Eyeballs ordering (improvement 45): try one IPv6 candidate first,
+  // then the IPv4 candidates, then the rest of the IPv6 ones, so a dual-stack
+  // host is reached quickly and an IPv4-only host is not stalled behind every
+  // AAAA address.
+  std::vector<addrinfo*> ordered;
+  for (addrinfo* ai = res; ai; ai = ai->ai_next) ordered.push_back(ai);
+  {
+    std::vector<AddrFamily> fams;
+    fams.reserve(ordered.size());
+    for (addrinfo* ai : ordered) {
+      fams.push_back(ai->ai_family == AF_INET6 ? AddrFamily::V6 : AddrFamily::V4);
+    }
+    std::vector<addrinfo*> reordered;
+    for (size_t idx : HappyEyeballsOrder(fams)) reordered.push_back(ordered[idx]);
+    ordered.swap(reordered);
+  }
+
   int lastErr = 0;
-  for (addrinfo* ai = res; ai; ai = ai->ai_next) {
+  for (addrinfo* ai : ordered) {
     // The deadline bounds the WHOLE connect, across every candidate address, so
     // a host with many A/AAAA records cannot multiply the wait.
     if (deadline.expired()) { lastErr = ETIMEDOUT; break; }
