@@ -80,6 +80,7 @@ CORE_SRC := \
   core/script/pack.cpp \
   core/script/async.cpp \
   core/script/timers.cpp \
+  core/script/require.cpp \
   core/script/script_bus.cpp \
   core/script/url.cpp \
   core/script/api_bindings.cpp \
@@ -237,6 +238,7 @@ TEST_SRC := \
   tests/test_netquota.cpp \
   tests/test_logger.cpp \
   tests/test_conn_pool.cpp \
+  tests/test_require.cpp \
   tests/test_crash.cpp \
   tests/test_configfile.cpp \
   tests/test_timers.cpp \
