@@ -60,6 +60,20 @@ enum class AddrFamily : u8 { V4 = 0, V6 = 1 };
 BERRY_API std::vector<size_t> HappyEyeballsOrder(
     const std::vector<AddrFamily>& families);
 
+/// A forward proxy (improvement 44). The transport opens a TCP connection to the
+/// proxy and then tunnels to the target through it.
+struct BERRY_API ProxyConfig {
+  enum class Kind : u8 { None = 0, HttpConnect, Socks5 };
+  Kind kind = Kind::None;
+  std::string host;   // the proxy host
+  u16 port = 0;       // the proxy port
+  /// Optional SOCKS5 username/password (RFC 1929). Both must be set to use it.
+  std::string username;
+  std::string password;
+
+  bool configured() const { return kind != Kind::None && !host.empty() && port != 0; }
+};
+
 class BERRY_API TcpSocket {
  public:
   TcpSocket();
@@ -70,6 +84,13 @@ class BERRY_API TcpSocket {
   /// As `Connect`, but the connect (including every candidate address) is
   /// bounded by the deadline rather than by a fresh per-address timeout.
   bool Connect(const char* host, u16 port, const Deadline& deadline);
+
+  /// Connects to `host:port` through `proxy` (improvement 44): opens the proxy
+  /// connection, then an HTTP CONNECT or SOCKS5 tunnel to the target. A
+  /// malformed or refused proxy handshake fails closed. A `Kind::None` proxy is
+  /// equivalent to a direct `Connect`.
+  bool ConnectVia(const ProxyConfig& proxy, const char* host, u16 port,
+                  const Deadline& deadline);
   ssize_t Send(const void* data, size_t len);
   /// Sends the whole buffer, bounded by `deadline`. Returns the byte count, -1
   /// on error, or -2 when the deadline passed before everything was sent. A

@@ -47,6 +47,35 @@ int main() {
     server.Stop();
   }
 
+  // --- SOCKS5 proxy tunnel (improvement 44) ---
+  {
+    TinySocks5Server socks;
+    int sp = socks.Start(18089);
+    CHECK(sp > 0);
+    if (sp > 0) {
+      TcpSocket s;
+      ProxyConfig proxy;
+      proxy.kind = ProxyConfig::Kind::Socks5;
+      proxy.host = "127.0.0.1";
+      proxy.port = (u16)sp;
+      Deadline dl = Deadline::After(3000);
+      CHECK(s.ConnectVia(proxy, "example.com", 80, dl));
+      CHECK(s.fd() >= 0);
+      // The echo proves the tunnel is open end to end.
+      const char* msg = "through-the-proxy";
+      CHECK(s.SendAll(msg, strlen(msg), dl) == (ssize_t)strlen(msg));
+      char back[64] = {0};
+      ssize_t got = s.Recv(back, sizeof back - 1, dl);
+      CHECK(got == (ssize_t)strlen(msg));
+      CHECK(std::string(back, (size_t)got) == msg);
+      s.Close();
+      socks.Stop();
+    }
+    // A Kind::None proxy is a direct connect.
+    ProxyConfig none;
+    CHECK(!none.configured());
+  }
+
   // --- Happy Eyeballs candidate ordering (improvement 45) ---
   {
     using AF = AddrFamily;

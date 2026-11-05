@@ -513,3 +513,39 @@ class TinyJsonRpcServer final : public TinyTcpAcceptor {
     return s.substr(p, e - p);
   }
 };
+
+//----------------------------------------------------------------------------
+// A minimal SOCKS5 server (no auth) for the proxy test (improvement 44). It
+// completes the greeting + CONNECT handshake and then acts as a TCP echo for
+// the tunnelled bytes, so a client can prove the tunnel is open end to end.
+//----------------------------------------------------------------------------
+class TinySocks5Server final : public TinyTcpAcceptor {
+ protected:
+  void Handle(int conn) override {
+    // Greeting: ver, nmethods, methods...
+    unsigned char hdr[2];
+    if (::recv(conn, hdr, 2, MSG_WAITALL) != 2 || hdr[0] != 0x05) return;
+    std::string methods((size_t)hdr[1], '\0');
+    if (!methods.empty() && ::recv(conn, &methods[0], methods.size(), MSG_WAITALL) != (ssize_t)methods.size()) return;
+    unsigned char sel[2] = {0x05, 0x00};   // no auth
+    if (::send(conn, sel, 2, MSG_NOSIGNAL) != 2) return;
+
+    // Request: ver, cmd, rsv, atyp, addr, port
+    unsigned char req[4];
+    if (::recv(conn, req, 4, MSG_WAITALL) != 4 || req[0] != 0x05) return;
+    size_t addrLen = req[3] == 0x01 ? 4 : (req[3] == 0x04 ? 16 : 0);
+    if (addrLen == 0) return;
+    std::string drain((size_t)addrLen + 2, '\0');
+    if (::recv(conn, &drain[0], drain.size(), MSG_WAITALL) != (ssize_t)drain.size()) return;
+    // Reply: success, bound address 0.0.0.0:0.
+    unsigned char rep[10] = {0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0};
+    if (::send(conn, rep, sizeof rep, MSG_NOSIGNAL) != (ssize_t)sizeof rep) return;
+    // Echo the tunnelled bytes back.
+    char buf[512];
+    for (;;) {
+      ssize_t n = ::recv(conn, buf, sizeof buf, 0);
+      if (n <= 0) break;
+      if (::send(conn, buf, (size_t)n, MSG_NOSIGNAL) != n) break;
+    }
+  }
+};

@@ -179,6 +179,128 @@ bool TcpSocket::Connect(const char* host, u16 port, const Deadline& deadline) {
   return false;
 }
 
+bool TcpSocket::ConnectVia(const ProxyConfig& proxy, const char* host, u16 port,
+                           const Deadline& deadline) {
+  if (!proxy.configured()) return Connect(host, port, deadline);
+
+  // 1. Connect to the proxy itself (no proxy-of-a-proxy).
+  if (!Connect(proxy.host.c_str(), proxy.port, deadline)) return false;
+
+  if (proxy.kind == ProxyConfig::Kind::HttpConnect) {
+    // "CONNECT host:port HTTP/1.1" with a Host header.
+    std::string req = "CONNECT " + std::string(host) + ":" +
+                      std::to_string((unsigned)port) + " HTTP/1.1\r\n"
+                      "Host: " + host + ":" + std::to_string((unsigned)port) +
+                      "\r\n\r\n";
+    if (SendAll(req.data(), req.size(), deadline) != (ssize_t)req.size()) {
+      err_ = "proxy CONNECT send failed";
+      Close();
+      return false;
+    }
+    // Read the status line; a 2xx means the tunnel is open.
+    std::string head;
+    char buf[512];
+    while (head.find("\r\n\r\n") == std::string::npos) {
+      ssize_t n = Recv(buf, sizeof buf, deadline);
+      if (n <= 0) { err_ = "proxy CONNECT no response"; Close(); return false; }
+      head.append(buf, (size_t)n);
+      if (head.size() > 8192) { err_ = "proxy CONNECT response too large"; Close(); return false; }
+    }
+    if (head.rfind("HTTP/1.", 0) != 0 || head.size() < 12 ||
+        head[9] != '2') {
+      err_ = "proxy CONNECT refused";
+      Close();
+      return false;
+    }
+    // Bytes after the terminator are the start of the tunnelled stream; for a
+    // CONNECT there should be none, so any are discarded (the caller starts a
+    // fresh protocol over the tunnel).
+    return true;
+  }
+
+  if (proxy.kind == ProxyConfig::Kind::Socks5) {
+    // Greeting: version 5, one method (no-auth, or username/password).
+    const bool useAuth = !proxy.username.empty() && !proxy.password.empty();
+    std::string greet;
+    greet.push_back((char)0x05);
+    greet.push_back((char)(useAuth ? 2 : 1));
+    greet.push_back((char)0x00);
+    if (useAuth) greet.push_back((char)0x02);
+    if (SendAll(greet.data(), greet.size(), deadline) != (ssize_t)greet.size()) {
+      err_ = "socks5 greeting failed"; Close(); return false;
+    }
+    unsigned char sel[2] = {0, 0};
+    if (Recv(sel, 2, deadline) != 2 || sel[0] != 0x05) {
+      err_ = "socks5 bad method reply"; Close(); return false;
+    }
+    if (sel[1] == 0x02) {
+      // Username/password sub-negotiation (RFC 1929).
+      std::string auth;
+      auth.push_back((char)0x01);
+      auth.push_back((char)proxy.username.size());
+      auth += proxy.username;
+      auth.push_back((char)proxy.password.size());
+      auth += proxy.password;
+      if (SendAll(auth.data(), auth.size(), deadline) != (ssize_t)auth.size()) {
+        err_ = "socks5 auth send failed"; Close(); return false;
+      }
+      unsigned char ar[2] = {0, 0};
+      if (Recv(ar, 2, deadline) != 2 || ar[1] != 0x00) {
+        err_ = "socks5 auth refused"; Close(); return false;
+      }
+    } else if (sel[1] != 0x00) {
+      err_ = "socks5 no acceptable method"; Close(); return false;
+    }
+    // CONNECT request. Resolve the host to an address here (an address type of
+    // domain name is also valid, but an address keeps the request small).
+    std::string req;
+    req.push_back((char)0x05);
+    req.push_back((char)0x01);   // CONNECT
+    req.push_back((char)0x00);   // reserved
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* res = nullptr;
+    if (getaddrinfo(host, nullptr, &hints, &res) != 0 || !res) {
+      err_ = "socks5 resolve failed"; Close(); return false;
+    }
+    if (res->ai_family == AF_INET) {
+      req.push_back((char)0x01);
+      const sockaddr_in* in = (const sockaddr_in*)res->ai_addr;
+      req.append((const char*)&in->sin_addr, 4);
+    } else {
+      req.push_back((char)0x04);
+      const sockaddr_in6* in6 = (const sockaddr_in6*)res->ai_addr;
+      req.append((const char*)&in6->sin6_addr, 16);
+    }
+    freeaddrinfo(res);
+    req.push_back((char)((port >> 8) & 0xff));
+    req.push_back((char)(port & 0xff));
+    if (SendAll(req.data(), req.size(), deadline) != (ssize_t)req.size()) {
+      err_ = "socks5 connect send failed"; Close(); return false;
+    }
+    // Reply: ver, rep, rsv, atyp, addr, port. A non-zero rep is a refusal.
+    unsigned char rep[4] = {0, 0, 0, 0};
+    if (Recv(rep, 4, deadline) != 4 || rep[0] != 0x05) {
+      err_ = "socks5 bad connect reply"; Close(); return false;
+    }
+    if (rep[1] != 0x00) {
+      err_ = "socks5 connect refused"; Close(); return false;
+    }
+    size_t addrLen = rep[3] == 0x01 ? 4 : (rep[3] == 0x04 ? 16 : 0);
+    if (addrLen == 0) { err_ = "socks5 bad address type"; Close(); return false; }
+    unsigned char drain[16 + 2];
+    if (Recv(drain, addrLen + 2, deadline) != (ssize_t)(addrLen + 2)) {
+      err_ = "socks5 short bind reply"; Close(); return false;
+    }
+    return true;
+  }
+
+  err_ = "unknown proxy kind";
+  Close();
+  return false;
+}
+
 ssize_t TcpSocket::Send(const void* data, size_t len) {
   if (fd_ < 0) return -1;
   return ::send(fd_, data, len, MSG_NOSIGNAL);
