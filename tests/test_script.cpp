@@ -171,6 +171,33 @@ static void TestInstructionBudget() {
   CHECK(vm->InstructionsExecuted() >= 5000);
 }
 
+// The per-binding profiler (improvement 58) records a call tally and exposes a
+// Chrome trace.
+static void TestBindingProfiler() {
+  BindingProfiler& p = BindingProfiler::Instance();
+  p.Reset();
+  p.SetEnabled(true);
+  p.Record("render.draw_text", 100);
+  p.Record("render.draw_text", 200);
+  p.Record("world.block_at", 50);
+  auto snap = p.Snapshot();
+  CHECK(snap.size() == 2);
+  CHECK(snap[0].name == "render.draw_text");   // most total time first
+  CHECK(snap[0].calls == 2);
+  CHECK(snap[0].totalUs == 300);
+  CHECK(snap[0].maxUs == 200);
+  CHECK(snap[1].name == "world.block_at");
+  const std::string trace = p.ExportChromeTrace();
+  CHECK(trace.find("render.draw_text") != std::string::npos);
+  CHECK(trace.find("\"ph\":\"X\"") != std::string::npos);
+  // Disabled: no recording.
+  p.SetEnabled(false);
+  p.Record("x", 999);
+  CHECK(p.Snapshot().size() == 2);
+  p.Reset();
+  CHECK(p.Snapshot().empty());
+}
+
 // The per-script frame CPU quota (improvement 57): a single spike does not
 // warn, a sustained overrun does, and the warning is rate-limited.
 static void TestFrameQuota() {
@@ -553,6 +580,7 @@ int main() {
   TestVmBasics();
   TestAssemblerErrors();
   TestInstructionBudget();
+  TestBindingProfiler();
   TestFrameQuota();
   TestMemoryByCategory();
   TestMemoryLimit();

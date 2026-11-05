@@ -233,6 +233,37 @@ class BERRY_API ScriptBindings {
   std::vector<std::pair<std::string, Entry>> entries_;
 };
 
+/// A per-binding profiler (improvement 58). Every native call goes through
+/// `ScriptBindings::Invoke`, which times the call here, so this is a calls /
+/// microseconds tally per binding with no second instrumentation point. Off by
+/// default; a host turns it on for a profiling session.
+class BERRY_API BindingProfiler {
+ public:
+  struct BindingStat {
+    std::string name;
+    u64 calls = 0;
+    u64 totalUs = 0;
+    u64 maxUs = 0;
+  };
+  static BindingProfiler& Instance();
+
+  void SetEnabled(bool e) { enabled_.store(e); }
+  bool enabled() const { return enabled_.load(); }
+
+  void Record(const std::string& name, u64 micros);
+  /// The stats, most total time first.
+  std::vector<BindingStat> Snapshot() const;
+  void Reset();
+  /// A Chrome trace-event JSON of the per-binding totals (improvement 58).
+  std::string ExportChromeTrace() const;
+
+ private:
+  BindingProfiler() = default;
+  std::atomic<bool> enabled_{false};
+  mutable std::mutex mutex_;
+  std::map<std::string, BindingStat> stats_;
+};
+
 /// Execution context handed to native bindings: which script is running, what
 /// it was granted, and the yield channel the async layer uses.
 class BERRY_API ScriptContext {
