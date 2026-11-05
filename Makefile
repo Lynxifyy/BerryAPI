@@ -152,7 +152,7 @@ check-samples: samples/sample_hitmarker.o
 	@echo "== samples compile OK =="
 	@rm -f samples/sample_hitmarker.o
 
-test: idl-check check-signer check-sigpack-signer check-sources check-android-sources check-mbedtls check-run check-sigcheck check-examples $(TEST_BINS) build/$(SHARED_NAME) check-samples
+test: idl-check check-signer check-sigpack-signer check-sources check-android-sources check-mbedtls check-run check-sigcheck check-warnings check-examples $(TEST_BINS) build/$(SHARED_NAME) check-samples
 	@for b in $(TEST_BINS); do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
@@ -398,6 +398,27 @@ sbom:
 # tool is present; a machine without them skips rather than failing. The .luaurc
 # itself is always validated (it must be valid JSON), so a typo in the config is
 # caught even without the tools.
+# A strict warning pass over first-party code (improvement 98): -Wshadow and
+# -Wconversion catch real bugs (a shadowed name, a narrowing conversion) that
+# the default flag set hides. Vendored code is excluded (it is not ours to
+# change). A clean pass is the baseline; a new warning fails.
+.PHONY: check-warnings
+check-warnings:
+	@fail=0; \
+	for f in core/hooks/*.cpp core/net/net.cpp core/net/room_token.cpp \
+	         core/net/lan_transport.cpp core/script/async.cpp core/script/timers.cpp \
+	         core/events/metrics.cpp core/lifecycle/crash.cpp \
+	         core/lifecycle/configfile.cpp util/*.cpp; do \
+	  out=$$($(CXX) -std=c++17 -Wall -Wextra -Wshadow -Wconversion -fsyntax-only \
+	    -Iinclude -Ithird_party/ed25519 -Ithird_party/mbedtls/include \
+	    -DMBEDTLS_CONFIG_FILE='"mbedtls/mbedtls_config.h"' -Ithird_party/lz4/lib \
+	    -Ithird_party/luau/Common/include -Ithird_party/luau/Ast/include \
+	    -Ithird_party/luau/Compiler/include -Ithird_party/luau/VM/include "$$f" 2>&1 \
+	    | grep -E "warning:" || true); \
+	  if [ -n "$$out" ]; then echo "check-warnings: $$f"; echo "$$out"; fail=1; fi; \
+	done; \
+	[ $$fail -eq 0 ] && echo "== warning baseline clean ==" || exit 1
+
 # Every example in examples/*.luau is a runnable berry-run test suite, so CI
 # proves the documentation still works (improvement 76).
 .PHONY: check-examples

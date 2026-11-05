@@ -29,7 +29,8 @@ using page_t  = uintptr_t;
 
 template <typename T>
 using TS = std::shared_ptr<T>;
-using String  = std::string;
+// (No `String` alias: it shadowed ScriptValue::Type::String and every call site
+// uses std::string directly, so it was a warning-generator with no user.)
 
 // GameTick = one simulation step (20/s by default).
 using GameTick = i64;
