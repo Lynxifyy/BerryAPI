@@ -74,6 +74,19 @@ struct BERRY_API ConfigFile {
   /// a small, explicit allow-list is honoured, so the environment cannot inject
   /// an arbitrary key (improvement 89). Returns the number applied.
   int ApplyEnvOverrides();
+
+  /// Re-reads `path` only when its modification time has advanced since the
+  /// last `Load`/`LoadIfChanged` (improvement 89 hot reload). Returns true when
+  /// the file was (re)read, and sets `changed` to whether the parsed content
+  /// differs from the previous one. A missing file is not an error.
+  bool LoadIfChanged(const std::string& path, bool* changed,
+                     std::string* error = nullptr);
+
+ private:
+  /// The mtime of the last successful load, for LoadIfChanged.
+  long long lastMtimeNs_ = 0;
+  /// The raw text of the last load, so a change can be detected by content.
+  std::string lastText_;
 };
 
 }  // namespace Berry

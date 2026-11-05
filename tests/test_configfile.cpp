@@ -103,6 +103,39 @@ int main() {
     unsetenv("BERRY_BOGUS");
   }
 
+  // Hot reload: LoadIfChanged re-reads only when the content changed
+  // (improvement 89).
+  {
+    const std::string path = "/tmp/berry_reload_config.json";
+    remove(path.c_str());
+    ConfigFile cfg;
+    bool changed = false;
+    CHECK(cfg.LoadIfChanged(path, &changed));   // missing is not an error
+    CHECK(!changed);
+
+    FILE* f = fopen(path.c_str(), "w");
+    CHECK(f != nullptr);
+    if (f) { fputs("{\"log_level\":\"info\"}", f); fclose(f); }
+    CHECK(cfg.LoadIfChanged(path, &changed));
+    CHECK(changed);
+    CHECK(cfg.logLevel == "info");
+    // No change: the second call reports no change.
+    changed = true;
+    CHECK(cfg.LoadIfChanged(path, &changed));
+    CHECK(!changed);
+    // A content change is picked up.
+    f = fopen(path.c_str(), "w");
+    if (f) { fputs("{\"log_level\":\"debug\"}", f); fclose(f); }
+    CHECK(cfg.LoadIfChanged(path, &changed));
+    CHECK(changed);
+    CHECK(cfg.logLevel == "debug");
+    // An invalid change is refused and the previous value is kept.
+    f = fopen(path.c_str(), "w");
+    if (f) { fputs("{\"bogus\":1}", f); fclose(f); }
+    CHECK(!cfg.LoadIfChanged(path, &changed, nullptr));
+    remove(path.c_str());
+  }
+
   if (g_fail == 0) printf("test_configfile: ALL OK\n");
   return g_fail;
 }

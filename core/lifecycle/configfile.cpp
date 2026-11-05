@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <sys/stat.h>
 
 namespace Berry {
 
@@ -134,7 +135,45 @@ bool ConfigFile::Load(const std::string& path, std::string* error) {
   }
   std::ostringstream ss;
   ss << f.rdbuf();
-  return Parse(ss.str(), error);
+  const std::string text = ss.str();
+  bool ok = Parse(text, error);
+  if (ok) {
+    lastText_ = text;
+    struct stat st{};
+    if (::stat(path.c_str(), &st) == 0) {
+      lastMtimeNs_ = (long long)st.st_mtim.tv_sec * 1000000000LL +
+                     st.st_mtim.tv_nsec;
+    }
+  }
+  return ok;
+}
+
+bool ConfigFile::LoadIfChanged(const std::string& path, bool* changed,
+                               std::string* error) {
+  if (changed) *changed = false;
+  struct stat st{};
+  if (::stat(path.c_str(), &st) != 0) {
+    // A missing file is not an error; a config file is optional.
+    return true;
+  }
+  const long long mtime = (long long)st.st_mtim.tv_sec * 1000000000LL +
+                          st.st_mtim.tv_nsec;
+  // mtime is only a cheap hint (a coarse filesystem may not advance it between
+  // two writes in the same second), so the content is compared too.
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return true;
+  std::ostringstream ss;
+  ss << f.rdbuf();
+  const std::string text = ss.str();
+  if (text == lastText_) {
+    lastMtimeNs_ = mtime;   // mtime advanced but content is the same
+    return true;
+  }
+  if (!Parse(text, error)) return false;
+  lastText_ = text;
+  lastMtimeNs_ = mtime;
+  if (changed) *changed = true;
+  return true;
 }
 
 namespace {
