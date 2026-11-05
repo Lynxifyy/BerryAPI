@@ -16,6 +16,7 @@ CORE_SRC := \
   core/events/metrics.cpp \
   core/hooks/sigscan.cpp \
   core/hooks/backend_shim.cpp \
+  core/hooks/hook_chain.cpp \
   core/hooks/x86_length.cpp \
   core/modules/module.cpp \
   core/modules/combat.cpp \
@@ -227,6 +228,7 @@ TEST_SRC := \
   tests/test_sigscan.cpp \
   tests/test_x86_length.cpp \
   tests/test_hooks.cpp \
+  tests/test_hook_chain.cpp \
   tests/test_mem.cpp \
   tests/test_metrics.cpp \
   tests/test_crash.cpp \
