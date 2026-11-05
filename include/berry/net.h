@@ -213,6 +213,17 @@ class BERRY_API HttpRequest {
 
   HttpResponse Do();
 
+  /// Streams the response body in chunks through `onChunk` instead of buffering
+  /// it whole (improvement 37), for a large download that should not be held in
+  /// memory. `onChunk(data, len)` is called for each read; returning false
+  /// aborts the transfer. `maxBodyBytes` still bounds the TOTAL bytes, so a
+  /// streaming caller cannot be made to read forever. The returned response has
+  /// an empty `body` (the bytes went to the callback) and the same status and
+  /// headers as `Do()`. A Content-Encoding is NOT decoded here (a chunk boundary
+  /// may split a compressed stream), so a streaming caller must ask for
+  /// `Accept-Encoding: identity` if it needs the raw entity.
+  HttpResponse DoStreaming(const std::function<bool(const char*, size_t)>& onChunk);
+
   /// True when the URL carried a character that must never appear in a request
   /// line or a header value (CR, LF or NUL). Such a URL is refused outright so
   /// it can never become a request-splitting injection (bug 32).

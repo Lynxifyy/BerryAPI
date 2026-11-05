@@ -207,6 +207,13 @@ class TinyFramingServer final : public TinyTcpAcceptor {
              "Content-Encoding: gzip\r\n"
              "Content-Length: " + std::to_string(body.size()) + "\r\n"
              "Connection: close\r\n\r\n" + body;
+    } else if (req.rfind("GET /big", 0) == 0) {
+      // A 256 KiB body, so a streaming client with a smaller cap is truncated.
+      std::string big(256u * 1024, 'y');
+      resp = "HTTP/1.1 200 OK\r\n"
+             "Content-Type: application/octet-stream\r\n"
+             "Content-Length: " + std::to_string(big.size()) + "\r\n"
+             "Connection: close\r\n\r\n" + big;
     } else if (req.rfind("GET /badstatus", 0) == 0) {
       resp = "HTTP/1.1 XX OK\r\nContent-Length: 0\r\n\r\n";
     } else {

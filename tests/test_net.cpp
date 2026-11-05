@@ -50,7 +50,7 @@ int main() {
   // --- SOCKS5 proxy tunnel (improvement 44) ---
   {
     TinySocks5Server socks;
-    int sp = socks.Start(18089);
+    int sp = socks.Start(18090);
     CHECK(sp > 0);
     if (sp > 0) {
       TcpSocket s;
@@ -177,6 +177,41 @@ int main() {
       CHECK(gzr.status == 200);
       CHECK(gzr.body == "hello gzip");
       CHECK(!gzr.encodingFailed);
+
+      // A streaming request delivers the body in chunks and does not buffer it
+      // (improvement 37).
+      {
+        HttpRequest st((base + "/big").c_str());
+        st.MaxBodyBytes(64 * 1024);
+        std::string streamed;
+        int chunks = 0;
+        HttpResponse sr = st.DoStreaming([&](const char* d, size_t n) {
+          ++chunks;
+          streamed.append(d, n);
+          return true;
+        });
+        CHECK(sr.status == 200);
+        CHECK(sr.body.empty());              // the bytes went to the callback
+        CHECK(!streamed.empty());
+        CHECK(chunks >= 1);
+        // /big is 256 KiB; the 64 KiB cap means no more than that is delivered.
+        CHECK(streamed.size() <= 64 * 1024);
+        CHECK(sr.truncated || streamed.size() == 64 * 1024);
+      }
+
+      // An aborting callback stops the transfer early.
+      {
+        HttpRequest st((base + "/big").c_str());
+        st.MaxBodyBytes(256 * 1024);
+        size_t delivered = 0;
+        HttpResponse sr = st.DoStreaming([&](const char*, size_t n) {
+          delivered += n;
+          return false;   // stop after the first chunk
+        });
+        CHECK(sr.status == 200);
+        CHECK(delivered > 0);
+        CHECK(delivered <= 256 * 1024);
+      }
       fs.Stop();
     }
   }

@@ -612,6 +612,128 @@ HttpRequest& HttpRequest::Header(const char* name, const char* value) {
   return *this;
 }
 
+HttpResponse HttpRequest::DoStreaming(
+    const std::function<bool(const char*, size_t)>& onChunk) {
+  HttpResponse resp;
+  if (!onChunk) return Do();   // no callback: behave as a buffered request
+  if (malformed_ || badScheme_) {
+    resp.status = 0;
+    resp.reason = malformed_ ? "malformed request URL"
+                             : "unsupported scheme (TLS not available)";
+    return resp;
+  }
+  const Deadline deadline = Deadline::After(timeoutMs_);
+
+  TcpSocket sock;
+  TlsSocket tls;
+  if (tls_) {
+    if (!tls.Connect(host_.c_str(), port_, deadline)) {
+      resp.status = 0; resp.reason = "tls connect failed: " + tls.LastError();
+      return resp;
+    }
+  } else if (!sock.Connect(host_.c_str(), port_, deadline)) {
+    resp.status = 0; resp.reason = "connect error";
+    return resp;
+  }
+
+  const bool ipv6 = host_.find(':') != std::string::npos;
+  const std::string hostHdr = (ipv6 ? "[" + host_ + "]" : host_) +
+      ((explicitPort_ || port_ != (tls_ ? 443 : 80))
+           ? ":" + std::to_string((unsigned)port_) : "");
+  std::string req = method_ + " " + path_ + " HTTP/1.1\r\n"
+      "Host: " + hostHdr + "\r\n"
+      "User-Agent: BerryAPI/" BERRY_VERSION_STRING "\r\n"
+      // A streaming caller gets the raw entity, so no compression is requested.
+      "Accept-Encoding: identity\r\n"
+      "Connection: close\r\n";
+  if (!body_.empty() || method_ == "POST" || method_ == "PUT" ||
+      method_ == "PATCH") {
+    char lenBuf[32];
+    snprintf(lenBuf, sizeof lenBuf, "%zu", body_.size());
+    req += std::string("Content-Length: ") + lenBuf + "\r\n";
+  }
+  for (auto& h : headers_) {
+    std::string lower = h.first;
+    for (char& c : lower) c = (char)tolower((unsigned char)c);
+    if (lower == "host" || lower == "content-length" ||
+        lower == "connection" || lower == "transfer-encoding" ||
+        lower == "accept-encoding") {
+      continue;
+    }
+    req += h.first + ": " + h.second + "\r\n";
+  }
+  req += "\r\n";
+  req += body_;
+  const ssize_t sent = tls_ ? tls.Send(req.data(), req.size(), deadline)
+                            : sock.SendAll(req.data(), req.size(), deadline);
+  if (sent != (ssize_t)req.size()) {
+    resp.status = 0; resp.reason = "send failed";
+    return resp;
+  }
+
+  // Read until the header terminator, then stream the rest.
+  std::string head;
+  char buf[8192];
+  while (head.find("\r\n\r\n") == std::string::npos) {
+    ssize_t n = tls_ ? tls.Recv(buf, sizeof buf, deadline)
+                     : sock.Recv(buf, sizeof buf, deadline);
+    if (n <= 0) { resp.status = 0; resp.reason = "no HTTP headers"; return resp; }
+    head.append(buf, (size_t)n);
+    if (head.size() > 64 * 1024) { resp.status = 0; resp.reason = "headers too large"; return resp; }
+  }
+  const size_t hEnd = head.find("\r\n\r\n");
+  // Parse the status line strictly (same rules as Do()).
+  {
+    const std::string first = head.substr(0, head.find("\r\n"));
+    if (first.rfind("HTTP/1.", 0) == 0 && first.size() >= 12 &&
+        isdigit((unsigned char)first[9]) && first[8] == ' ') {
+      resp.status = (first[9] - '0') * 100 + (first[10] - '0') * 10 +
+                    (first[11] - '0');
+    } else {
+      resp.status = 0; resp.reason = "bad HTTP status line";
+      return resp;
+    }
+    std::istringstream hs(head.substr(0, hEnd));
+    std::string line;
+    std::getline(hs, line);   // skip the status line
+    while (std::getline(hs, line)) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      size_t colon = line.find(':');
+      if (colon == std::string::npos) continue;
+      std::string v = line.substr(colon + 1);
+      size_t b = v.find_first_not_of(" \t");
+      resp.headers.emplace_back(line.substr(0, colon),
+                                b == std::string::npos ? std::string() : v.substr(b));
+    }
+  }
+
+  // Any body bytes already read with the headers go to the callback first.
+  size_t total = 0;
+  if (hEnd + 4 < head.size()) {
+    const size_t extra = head.size() - (hEnd + 4);
+    if (extra > maxBodyBytes_) { resp.truncated = true; }
+    else { total += extra; if (!onChunk(head.data() + hEnd + 4, extra)) return resp; }
+  }
+  for (;;) {
+    ssize_t n = tls_ ? tls.Recv(buf, sizeof buf, deadline)
+                     : sock.Recv(buf, sizeof buf, deadline);
+    if (n < 0) {
+      if (n == -2) resp.truncated = true;
+      break;
+    }
+    if (n == 0) break;
+    if (total + (size_t)n > maxBodyBytes_) {
+      const size_t take = maxBodyBytes_ - total;
+      if (take) onChunk(buf, take);
+      resp.truncated = true;
+      break;
+    }
+    total += (size_t)n;
+    if (!onChunk(buf, (size_t)n)) break;   // caller aborted
+  }
+  return resp;
+}
+
 HttpResponse HttpRequest::Do() {
   HttpResponse resp;
   if (malformed_) {
