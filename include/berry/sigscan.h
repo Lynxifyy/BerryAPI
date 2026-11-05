@@ -160,6 +160,19 @@ class BERRY_API SigScanner {
   /// hit (improvement 31). Falls back to a serial scan for a single range.
   uptr FindParallel(const Signature& sig, size_t workers) const;
 
+  /// Scans every range ONCE for all of `sigs` at the same time (improvement
+  /// 16), instead of one pass per signature. On return `hits[i]` is the first
+  /// address of `sigs[i]`, or 0. This is the whole-table resolve: N signatures
+  /// cost one walk of memory rather than N.
+  ///
+  /// Implementation: the scan is anchored on each signature's fixed prefix
+  /// byte, so the inner loop advances through the shared stream once and
+  /// checks the candidate set that could start at each position. It is exact
+  /// (no false negatives); a wildcard-only signature falls back to a linear
+  /// check at every position, which is correct if slower.
+  void FindAllMulti(const std::vector<Signature>& sigs,
+                    std::vector<uptr>* hits) const;
+
   /// The ranges this scanner was built over (a copy), so a caller can scan
   /// without holding a lock on the cache.
   const std::vector<MemRange>& ranges() const { return ranges_; }

@@ -114,6 +114,41 @@ int main() {
     CHECK(diff == 1);   // 0x44 ^ 0x45 = one bit
   }
 
+  // --- multi-pattern single-pass scan (improvement 16) ---
+  {
+    u8 buf[128];
+    std::memset(buf, 0x90, sizeof buf);
+    const u8 p1[4] = {0x11, 0x22, 0x33, 0x44};
+    const u8 p2[3] = {0xAA, 0xBB, 0xCC};
+    const u8 p3[2] = {0xDE, 0xAD};
+    std::memcpy(buf + 10, p1, 4);
+    std::memcpy(buf + 40, p2, 3);
+    std::memcpy(buf + 70, p3, 2);
+    MemRange range{(uptr)buf, sizeof buf, "multi", "", 0, false};
+    SigScanner scanner(std::vector<MemRange>{range});
+
+    std::vector<Signature> sigs = {
+        Signature("a", "11 22 33 44"),
+        Signature("b", "AA BB CC"),
+        Signature("c", "DE AD"),
+        Signature("missing", "77 88 99"),
+        Signature("wild", "?? ?? ??"),   // wildcard-only: matches at offset 0
+    };
+    std::vector<uptr> hits;
+    scanner.FindAllMulti(sigs, &hits);
+    CHECK(hits.size() == 5);
+    CHECK(hits[0] == (uptr)(buf + 10));
+    CHECK(hits[1] == (uptr)(buf + 40));
+    CHECK(hits[2] == (uptr)(buf + 70));
+    CHECK(hits[3] == 0);                 // not present
+    CHECK(hits[4] == (uptr)buf);         // wildcard matches the first position
+
+    // Cross-check against the single-signature scanner: same answers.
+    for (size_t i = 0; i < 4; ++i) {
+      CHECK(scanner.Find(sigs[i]) == hits[i]);
+    }
+  }
+
   // --- FindGuarded never crashes on an unmapped range (bug 20) ---
   {
     MemRange bad{(uptr)0x1000, 0x1000, "unmapped", "", 0, false};

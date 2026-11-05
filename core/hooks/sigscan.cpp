@@ -578,6 +578,59 @@ uptr SigScanner::FindGuarded(const Signature& sig) const {
   return result;
 }
 
+void SigScanner::FindAllMulti(const std::vector<Signature>& sigs,
+                              std::vector<uptr>* hits) const {
+  hits->assign(sigs.size(), 0);
+  if (sigs.empty()) return;
+
+  // Group signatures by the byte value of their anchor (the first fully fixed
+  // byte, or the first byte otherwise). At each position in the stream we look
+  // up the group whose anchor byte matches and only test those, so the whole
+  // table costs one pass plus the tests of matching groups.
+  struct Anchor {
+    size_t sigIndex;
+    size_t offset;   // where the anchor sits inside the pattern
+  };
+  std::vector<std::vector<Anchor>> byByte(256);
+  std::vector<size_t> noAnchor;   // wildcard-only signatures
+  std::vector<size_t> pending;    // still-unresolved signature indices
+  for (size_t i = 0; i < sigs.size(); ++i) {
+    if (sigs[i].bytes.empty()) continue;
+    const int a = AnchorIndex(sigs[i]);
+    if (a < 0) {
+      noAnchor.push_back(i);
+      continue;
+    }
+    byByte[sigs[i].bytes[(size_t)a]].push_back({i, (size_t)a});
+  }
+
+  for (const MemRange& r : ranges_) {
+    const u8* base = reinterpret_cast<const u8*>(r.base);
+    const size_t n = r.size;
+    if (n == 0) continue;
+    for (size_t pos = 0; pos < n; ++pos) {
+      const u8 b = base[pos];
+      auto& group = byByte[b];
+      for (const Anchor& a : group) {
+        if ((*hits)[a.sigIndex] != 0) continue;
+        if (pos < a.offset) continue;   // the pattern would start before base
+        const size_t start = pos - a.offset;
+        if (start + sigs[a.sigIndex].bytes.size() > n) continue;
+        if (sigs[a.sigIndex].Match(base + start)) {
+          (*hits)[a.sigIndex] = r.base + start;
+        }
+      }
+      // Wildcard-only signatures have no anchor; test them at every position.
+      for (size_t si : noAnchor) {
+        if ((*hits)[si] != 0) continue;
+        if (pos + sigs[si].bytes.size() > n) continue;
+        if (sigs[si].Match(base + pos)) (*hits)[si] = r.base + pos;
+      }
+    }
+  }
+  (void)pending;
+}
+
 uptr SigScanner::FindParallel(const Signature& sig, size_t workers) const {
   if (ranges_.empty()) return 0;
   if (ranges_.size() == 1 || workers <= 1) return Find(sig);
