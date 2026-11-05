@@ -125,15 +125,26 @@ class Function:
 
 
 class Event:
-    def __init__(self, name, params, doc, module):
+    def __init__(self, name, params, doc, module, since=None):
         self.name = name
         self.params = params
         self.doc = doc
         self.module = module
+        # The script-API version the payload schema was introduced in
+        # (improvement 66). A consumer checks it before decoding a payload.
+        self.since = since
 
     @property
     def channel(self):
         return self.name
+
+    @property
+    def payload_schema(self):
+        """A stable, machine-readable name for the payload shape, so a consumer
+        can branch on it rather than parse the doc string."""
+        return "%s(%s)" % (self.name,
+                           ", ".join("%s:%s" % (p.name, p.type)
+                                     for p in self.params))
 
 
 class Module:
@@ -252,13 +263,15 @@ def parse(text):
             elif line.startswith("event "):
                 if current is None:
                     raise IdlError("event outside a module")
-                ev = _parse_event(line, current, pending_doc)
+                ev = _parse_event(line, current, pending_doc, pending_since)
                 if ev.channel in seen_events:
                     raise IdlError("duplicate event %s" % ev.channel)
                 seen_events.add(ev.channel)
                 current.events.append(ev)
                 pending_doc = None
                 pending_deprecated = None
+                pending_since = None
+                pending_removed = None
             else:
                 raise IdlError("unrecognised declaration: %r" % line)
         except IdlError as exc:
@@ -290,7 +303,7 @@ def _parse_fn(line, module, doc, cap, deprecated=None, since=None, removed=None)
                     module.name, deprecated, since, removed)
 
 
-def _parse_event(line, module, doc):
+def _parse_event(line, module, doc, since=None):
     m = re.match(r"event\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*$", line)
     if not m:
         raise IdlError("bad event declaration: %r" % line)
@@ -303,7 +316,7 @@ def _parse_event(line, module, doc):
         pname, ptype = pname.strip(), ptype.strip()
         _check_type(ptype, "event %s" % name)
         params.append(Param(pname, ptype))
-    return Event(name, params, doc or "", module.name)
+    return Event(name, params, doc or "", module.name, since)
 
 
 def _capability_enum(cap):
@@ -444,7 +457,7 @@ def emit_cpp(api_version, modules):
     events = []
     for mod in modules:
         for ev in mod.events:
-            events.append((ev.name, mod.name, len(ev.params)))
+            events.append((ev.name, mod.name, len(ev.params), ev.payload_schema))
     out.append("// Event channel declared in the IDL. A declared channel is")
     out.append("// bridged from the engine bus by the script bus; a script may")
     out.append("// also subscribe to and publish its own channels, which are")
@@ -454,12 +467,13 @@ def emit_cpp(api_version, modules):
     out.append("  const char* name;")
     out.append("  const char* module;")
     out.append("  int arity;")
+    out.append("  const char* payload_schema;")
     out.append("};")
     out.append("")
     out.append("inline const EventSpec* EventSpecs() {")
     out.append("  static const EventSpec kEvents[] = {")
-    for name, module, arity in events:
-        out.append("      {\"%s\", \"%s\", %d}," % (name, module, arity))
+    for name, module, arity, schema in events:
+        out.append("      {\"%s\", \"%s\", %d, \"%s\"}," % (name, module, arity, schema))
     out.append("  };")
     out.append("  return kEvents;")
     out.append("}")

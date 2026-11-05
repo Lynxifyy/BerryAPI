@@ -1176,26 +1176,27 @@ struct EventSpec {
   const char* name;
   const char* module;
   int arity;
+  const char* payload_schema;
 };
 
 inline const EventSpec* EventSpecs() {
   static const EventSpec kEvents[] = {
-      {"hit", "Events", 1},
-      {"kill", "Events", 1},
-      {"tick_count", "Events", 1},
-      {"entityEntered", "Events", 1},
-      {"entityLeft", "Events", 1},
-      {"entityUpdated", "Events", 1},
-      {"blockChanged", "Events", 1},
-      {"entityHurt", "Events", 1},
-      {"entityDeath", "Events", 1},
-      {"entitySpawn", "Events", 1},
-      {"combatPredicted", "Events", 1},
-      {"combatConfirmed", "Events", 1},
-      {"combatMissed", "Events", 1},
-      {"radialSelected", "Events", 1},
-      {"crystalAdvice", "Events", 1},
-      {"touchGesture", "Touch", 1},
+      {"hit", "Events", 1, "hit(damage:number)"},
+      {"kill", "Events", 1, "kill(victim:string)"},
+      {"tick_count", "Events", 1, "tick_count(count:number)"},
+      {"entityEntered", "Events", 1, "entityEntered(entity:string)"},
+      {"entityLeft", "Events", 1, "entityLeft(entity:string)"},
+      {"entityUpdated", "Events", 1, "entityUpdated(entity:string)"},
+      {"blockChanged", "Events", 1, "blockChanged(change:string)"},
+      {"entityHurt", "Events", 1, "entityHurt(entity:string)"},
+      {"entityDeath", "Events", 1, "entityDeath(entity:string)"},
+      {"entitySpawn", "Events", 1, "entitySpawn(entity:string)"},
+      {"combatPredicted", "Events", 1, "combatPredicted(hit:string)"},
+      {"combatConfirmed", "Events", 1, "combatConfirmed(hit:string)"},
+      {"combatMissed", "Events", 1, "combatMissed(hit:string)"},
+      {"radialSelected", "Events", 1, "radialSelected(label:string)"},
+      {"crystalAdvice", "Events", 1, "crystalAdvice(placement:string)"},
+      {"touchGesture", "Touch", 1, "touchGesture(gesture:string)"},
   };
   return kEvents;
 }
