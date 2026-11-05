@@ -7,6 +7,7 @@
 #include "berry/hooks.h"
 
 #include <cstdio>
+#include <stdexcept>
 #include <memory>
 #include <vector>
 
@@ -115,6 +116,45 @@ int main() {
     CHECK(AddFn(2, 3) == 7 && MulFn(2, 3) == 7);
     g.RemoveAll();
     CHECK(AddFn(2, 3) == 5 && MulFn(2, 3) == 6);
+  }
+
+  // --- per-handler counters and fault auto-disable (improvement 9) ---
+  {
+    HookChain<int (*)(int, int)> chain(backend, (void*)&AddFn, "stats");
+    CHECK(chain.installed());
+    // A handler that throws on its first call, then a good one after it.
+    CHECK(chain.Add("flaky", [](HookChain<int (*)(int, int)>::Next next, int a, int b) -> int {
+      if (a == 99) throw std::runtime_error("boom");
+      return next(a, b);
+    }));
+    HookHandlerOptions hi; hi.priority = 10;
+    CHECK(chain.Add("count", [](HookChain<int (*)(int, int)>::Next next, int a, int b) {
+      return next(a, b);
+    }, hi));
+    CHECK(AddFn(1, 1) == 2);
+    // The fault is caught, the call still completes via the original.
+    CHECK(AddFn(99, 1) == 100);
+    auto st = chain.stats();
+    CHECK(st.size() == 2);
+    // The flaky handler recorded one fault and is now disabled.
+    bool sawFlaky = false, sawCount = false;
+    for (const auto& h : st) {
+      if (h.name == "flaky") { sawFlaky = true; CHECK(h.faults == 1); CHECK(h.disabled); }
+      if (h.name == "count") { sawCount = true; CHECK(h.calls >= 2); CHECK(!h.disabled); }
+    }
+    CHECK(sawFlaky && sawCount);
+    // A disabled handler is skipped, so a later call does not fault again.
+    CHECK(AddFn(99, 1) == 100);
+    for (const auto& h : chain.stats()) {
+      if (h.name == "flaky") CHECK(h.faults == 1);   // not re-run
+    }
+    // Re-enabling lets it run (and fault) again.
+    CHECK(chain.Reenable("flaky"));
+    CHECK(AddFn(99, 1) == 100);
+    for (const auto& h : chain.stats()) {
+      if (h.name == "flaky") CHECK(h.faults == 2);
+    }
+    chain.Remove();
   }
 
   // --- the chain cap is enforced ---

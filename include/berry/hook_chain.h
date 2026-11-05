@@ -20,6 +20,7 @@
 #include "berry/hooks.h"
 #include "berry/types.h"
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -142,6 +143,7 @@ class HookChain<R (*)(A...)> : public detail::ChainTyped<R, A...> {
     e.name = name.empty() ? opts.name : name;
     e.priority = opts.priority;
     e.fn = std::move(fn);
+    e.stats.name = e.name;
     // Insert keeping descending priority, stable on ties (registration order).
     auto it = handlers_.begin();
     while (it != handlers_.end() && it->priority >= e.priority) ++it;
@@ -169,6 +171,34 @@ class HookChain<R (*)(A...)> : public detail::ChainTyped<R, A...> {
   /// The trampoline, so a handler can call the original directly.
   Fn original() const { return original_; }
 
+  /// Per-handler accounting (improvement 9).
+  struct HandlerStats {
+    std::string name;
+    u64 calls = 0;
+    u64 faults = 0;       // exceptions the handler threw
+    u64 totalUs = 0;      // cumulative microseconds spent in the handler
+    bool disabled = false;  // auto-disabled after a fault
+  };
+  std::vector<HandlerStats> stats() const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    std::vector<HandlerStats> out;
+    out.reserve(handlers_.size());
+    for (const auto& h : handlers_) out.push_back(h.stats);
+    return out;
+  }
+  /// Re-enables a handler that a fault auto-disabled. Returns true when it was
+  /// disabled.
+  bool Reenable(const std::string& name) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    for (auto& h : handlers_) {
+      if (h.name == name && h.stats.disabled) {
+        h.stats.disabled = false;
+        return true;
+      }
+    }
+    return false;
+  }
+
   /// Calls the original through the trampoline (a safe `callOriginal`).
   R callOriginal(A... args) { return original_(std::forward<A>(args)...); }
 
@@ -188,17 +218,36 @@ class HookChain<R (*)(A...)> : public detail::ChainTyped<R, A...> {
 
   // The dispatcher entry point (detail::ChainTyped).
   R Invoke(A... args) override {
-    std::vector<HandlerEntry> snapshot;
+    // Snapshot the handler list; each handler is wrapped so its counters are
+    // updated and a fault disables it (improvement 9). A disabled handler is
+    // skipped entirely, so a broken handler cannot fault every call.
+    std::vector<std::pair<size_t, Handler>> ordered;
     {
       std::lock_guard<std::mutex> lk(mutex_);
-      snapshot = handlers_;
+      for (size_t i = 0; i < handlers_.size(); ++i) {
+        if (handlers_[i].stats.disabled) continue;
+        ordered.emplace_back(i, handlers_[i].fn);
+      }
     }
-    // Build the onion: the last (lowest-priority) handler calls the original.
     Next next = [this](A... a) { return original_(std::forward<A>(a)...); };
-    for (auto it = snapshot.rbegin(); it != snapshot.rend(); ++it) {
-      Handler h = it->fn;
+    for (auto it = ordered.rbegin(); it != ordered.rend(); ++it) {
+      const size_t idx = it->first;
+      Handler h = it->second;
       Next prev = next;
-      next = [h, prev](A... a) { return h(prev, std::forward<A>(a)...); };
+      next = [this, idx, h, prev](A... a) -> R {
+        const u64 t0 = NowUs();
+        try {
+          R r = h(prev, std::forward<A>(a)...);
+          RecordHandler(idx, t0, /*fault=*/false);
+          return r;
+        } catch (...) {
+          RecordHandler(idx, t0, /*fault=*/true);
+          // A faulting handler is auto-disabled; the call falls through to the
+          // rest of the chain (and ultimately the original) so the game keeps
+          // running.
+          return prev(std::forward<A>(a)...);
+        }
+      };
     }
     return next(std::forward<A>(args)...);
   }
@@ -206,10 +255,30 @@ class HookChain<R (*)(A...)> : public detail::ChainTyped<R, A...> {
   static constexpr size_t kMaxHandlers = 16;
 
  private:
+  static u64 NowUs() {
+    using namespace std::chrono;
+    return (u64)duration_cast<microseconds>(
+               steady_clock::now().time_since_epoch()).count();
+  }
+
+  /// Updates a handler's counters under the lock; a fault marks it disabled.
+  void RecordHandler(size_t idx, u64 startUs, bool fault) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (idx >= handlers_.size()) return;
+    HandlerStats& st = handlers_[idx].stats;
+    ++st.calls;
+    st.totalUs += NowUs() - startUs;
+    if (fault) {
+      ++st.faults;
+      st.disabled = true;   // auto-disable a handler that throws
+    }
+  }
+
   struct HandlerEntry {
     std::string name;
     int priority = 0;
     Handler fn;
+    HandlerStats stats;
   };
   IHook* backend_ = nullptr;
   void* target_ = nullptr;
