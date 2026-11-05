@@ -1462,7 +1462,9 @@ WsFrameStatus ParseWsFrame(const u8* data, size_t len, WsFrameView* out,
   } else if (payloadLen == 127) {
     if (len < off + 8) return WsFrameStatus::NeedMore;
     payloadLen = 0;
-    for (int i = 0; i < 8; ++i) payloadLen = (payloadLen << 8) | data[off + i];
+    for (size_t i = 0; i < 8; ++i) {
+      payloadLen = (payloadLen << 8) | (u64)data[off + i];
+    }
     // The most significant bit must be 0, and the value must need 8 bytes.
     if (payloadLen & 0x8000000000000000ULL) return WsFrameStatus::Invalid;
     if (payloadLen < 65536) return WsFrameStatus::Invalid;
@@ -1557,7 +1559,8 @@ void WebSocket::Pump() {
 
   // A complete frame: consume exactly its bytes.
   std::vector<u8> payload(view.payload, view.payload + view.payloadLen);
-  rxBuf_.erase(rxBuf_.begin(), rxBuf_.begin() + view.frameLen);
+  rxBuf_.erase(rxBuf_.begin(),
+               rxBuf_.begin() + static_cast<std::ptrdiff_t>(view.frameLen));
 
   WsMessage msg{(WsOpcode)view.opcode, std::move(payload), view.fin};
   if (view.opcode == (u8)WsOpcode::Close) {
@@ -1640,7 +1643,7 @@ static std::string WsBase64(const unsigned char* d, size_t n) {
   std::string out;
   int i = 0;
   while (i + 3 <= (int)n) {
-    u32 v = (d[i] << 16) | (d[i + 1] << 8) | d[i + 2];
+    u32 v = ((u32)d[i] << 16) | ((u32)d[i + 1] << 8) | (u32)d[i + 2];
     out += kBase64[(v >> 18) & 63];
     out += kBase64[(v >> 12) & 63];
     out += kBase64[(v >> 6) & 63];
@@ -1649,12 +1652,12 @@ static std::string WsBase64(const unsigned char* d, size_t n) {
   }
   int rem = (int)n - i;
   if (rem == 1) {
-    u32 v = d[i] << 16;
+    u32 v = (u32)d[i] << 16;
     out += kBase64[(v >> 18) & 63];
     out += kBase64[(v >> 12) & 63];
     out += "==";
   } else if (rem == 2) {
-    u32 v = (d[i] << 16) | (d[i + 1] << 8);
+    u32 v = ((u32)d[i] << 16) | ((u32)d[i + 1] << 8);
     out += kBase64[(v >> 18) & 63];
     out += kBase64[(v >> 12) & 63];
     out += kBase64[(v >> 6) & 63];

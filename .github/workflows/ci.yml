@@ -45,19 +45,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y g++-aarch64-linux-gnu qemu-user-static
-      - name: Cross-build the portable tests
-        run: |
-          make -j"$(nproc)" CXX=aarch64-linux-gnu-g++ \
-            CXXFLAGS="-std=c++17 -Wall -Wextra -O2 -g -Iinclude -Ithird_party/ed25519 \
-              -Ithird_party/mbedtls/include -DMBEDTLS_CONFIG_FILE='\"mbedtls/mbedtls_config.h\"' \
-              -Ithird_party/lz4/lib -Ithird_party/luau/Common/include -Ithird_party/luau/Ast/include \
-              -Ithird_party/luau/Compiler/include -Ithird_party/luau/VM/include" \
-            $(patsubst tests/%.cpp,build/test_%,$(shell grep -o 'tests/test_[a-z_]*\.cpp' tools/sources.mk))
+      # The Makefile target cross-compiles both the C++ and the vendored C, so
+      # every object is arm64. (Overriding only CXX here left the C objects
+      # host-format and the link failed with "file in wrong format".)
+      - name: Cross-build the portable suites
+        run: make arm64-portable-tests
       - name: Run the arm64 decode + parser tests under qemu
         run: |
           for b in build/test_test_sigscan build/test_test_x86_length \
-                   build/test_test_url build/test_test_metrics build/test_test_crash; do
-            [ -x "$b" ] && qemu-aarch64-static -L /usr/aarch64-linux-gnu "$b" "$b" || true
+                   build/test_test_url build/test_test_metrics \
+                   build/test_test_inflate build/test_test_netquota \
+                   build/test_test_conn_pool build/test_test_require; do
+            echo "-- $b --"
+            qemu-aarch64-static -L /usr/aarch64-linux-gnu "$b" "$b" || exit 1
           done
 
   static-analysis:

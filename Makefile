@@ -166,9 +166,18 @@ test: idl-check check-signer check-sigpack-signer check-sources check-android-so
 # Sanitizer build: ASan+UBSan host tests. Everything is built into its own
 # directory so it never collides with the normal build/, and every binary runs
 # with leak + stack checks enabled.
+# `-fno-sanitize=function`: UBSan's function sanitizer (clang only) reads a type
+# descriptor 8 bytes BEFORE an indirect-call target. The shim backend's
+# trampolines are JIT pages with no such descriptor, so the check reads the page
+# before the pool and faults. The check is a C++-type-confusion detector, not a
+# memory-safety one, and this library calls raw machine code by design, so it is
+# disabled for the sanitizer build. gcc has no equivalent, which is why the g++
+# job passed without it.
+# The flag is clang-only (gcc rejects the name), so add it only for clang.
+SAN_FUNCTION_FLAG := $(if $(findstring clang,$(CXX)),-fno-sanitize=function,)
 SAN_CXXFLAGS := -std=c++17 -Wall -Wextra -O1 -g -Iinclude -Ithird_party/ed25519 $(MBEDTLS_INCLUDES) $(LZ4_INCLUDES) $(LUAU_INCLUDES) \
                 -DBERRY_THREAD_ASSERT \
-                -fsanitize=address,undefined -fno-omit-frame-pointer
+                -fsanitize=address,undefined $(SAN_FUNCTION_FLAG) -fno-omit-frame-pointer
 SAN_LDFLAGS  := -pthread -fsanitize=address,undefined
 SAN_TEST_OBJ := $(patsubst tests/%.cpp,build/san/tests/%.o,$(TEST_SRC))
 SAN_BINS     := $(patsubst tests/%.cpp,build/san/test_%,$(TEST_SRC))
@@ -398,6 +407,22 @@ sbom:
 # tool is present; a machine without them skips rather than failing. The .luaurc
 # itself is always validated (it must be valid JSON), so a typo in the config is
 # caught even without the tools.
+# Cross-build a few portable suites for arm64 and run them under qemu-user in
+# CI (improvement 96), so the arm64 decode paths are exercised on a real arm64
+# ABI. The cross compiler is passed in so the vendored C is cross-built too:
+# overriding only CXX leaves the C objects host-format and the link then fails
+# with "file in wrong format". Run from a clean tree (CI checks out fresh), or
+# the host objects are reused.
+ARM64_CXX ?= aarch64-linux-gnu-g++
+ARM64_CC  ?= aarch64-linux-gnu-gcc
+ARM64_TEST_BINS := build/test_test_sigscan build/test_test_x86_length \
+                   build/test_test_url build/test_test_metrics \
+                   build/test_test_inflate build/test_test_netquota \
+                   build/test_test_conn_pool build/test_test_require
+.PHONY: arm64-portable-tests
+arm64-portable-tests:
+	$(MAKE) -j"$(shell nproc)" CXX=$(ARM64_CXX) CC=$(ARM64_CC) $(ARM64_TEST_BINS)
+
 # A strict warning pass over first-party code (improvement 98): -Wshadow and
 # -Wconversion catch real bugs (a shadowed name, a narrowing conversion) that
 # the default flag set hides. Vendored code is excluded (it is not ours to
@@ -409,7 +434,7 @@ check-warnings:
 	         core/net/lan_transport.cpp core/script/async.cpp core/script/timers.cpp \
 	         core/events/metrics.cpp core/lifecycle/crash.cpp \
 	         core/lifecycle/configfile.cpp util/*.cpp; do \
-	  out=$$($(CXX) -std=c++17 -Wall -Wextra -Wshadow -Wconversion -fsyntax-only \
+	  out=$$($(CXX) -std=c++17 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion -fsyntax-only \
 	    -Iinclude -Ithird_party/ed25519 -Ithird_party/mbedtls/include \
 	    -DMBEDTLS_CONFIG_FILE='"mbedtls/mbedtls_config.h"' -Ithird_party/lz4/lib \
 	    -Ithird_party/luau/Common/include -Ithird_party/luau/Ast/include \
@@ -434,7 +459,7 @@ check-werror:
 	         core/lifecycle/crash.cpp core/lifecycle/configfile.cpp \
 	         core/script/async.cpp core/script/timers.cpp util/logger.cpp \
 	         util/mem.cpp; do \
-	  $(CXX) -std=c++17 -Wall -Wextra -Wshadow -Wconversion -Werror -fsyntax-only \
+	  $(CXX) -std=c++17 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion -Werror -fsyntax-only \
 	    -Iinclude -Ithird_party/ed25519 -Ithird_party/mbedtls/include \
 	    -DMBEDTLS_CONFIG_FILE='"mbedtls/mbedtls_config.h"' -Ithird_party/lz4/lib \
 	    -Ithird_party/luau/Common/include -Ithird_party/luau/Ast/include \

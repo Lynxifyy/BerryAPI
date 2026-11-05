@@ -69,7 +69,9 @@ struct Huff {
       if (!b->Need(1)) return -1;
       code |= (int)b->Get(1);
       const int c = count[len];
-      if (code - first < c) return symbol[index + (code - first)];
+      if (code - first < c) {
+        return symbol[(size_t)index + (size_t)(code - first)];
+      }
       index += c;
       first = (first + c) << 1;
       code <<= 1;
