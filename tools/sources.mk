@@ -85,6 +85,7 @@ CORE_SRC := \
   core/script/bytecode_cache.cpp \
   core/script/secret_store.cpp \
   core/script/consent.cpp \
+  core/script/secure_buffer.cpp \
   core/script/script_bus.cpp \
   core/script/url.cpp \
   core/script/api_bindings.cpp \
@@ -247,6 +248,7 @@ TEST_SRC := \
   tests/test_bytecode_cache.cpp \
   tests/test_secret_store.cpp \
   tests/test_consent.cpp \
+  tests/test_secure_buffer.cpp \
   tests/test_crash.cpp \
   tests/test_configfile.cpp \
   tests/test_timers.cpp \
