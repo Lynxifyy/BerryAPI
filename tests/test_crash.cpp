@@ -6,6 +6,7 @@
 
 #include "berry/crash.h"
 
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -47,13 +48,14 @@ int main() {
     pid_t pid = fork();
     CHECK(pid >= 0);
     if (pid == 0) {
-      // Child: install the handler and crash.
+      // Child: install the handler and take a real SIGSEGV. `raise` delivers
+      // the signal to this process (exercising the handler end to end) without
+      // an actual invalid access, so UBSan does not flag the test itself.
       CrashHandlerConfig cfg;
       cfg.reportPath = report;
       InstallCrashHandler(cfg);
-      volatile int* p = nullptr;
-      *p = 42;   // SIGSEGV
-      _exit(0);  // not reached
+      raise(SIGSEGV);
+      _exit(0);  // not reached: the handler re-raises and the process dies
     }
     int status = 0;
     waitpid(pid, &status, 0);
