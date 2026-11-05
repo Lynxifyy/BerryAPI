@@ -87,9 +87,30 @@ MODULE_BINDING_PREFIX = {
 
 
 class Param:
-    def __init__(self, name, typ):
+    def __init__(self, name, typ, lo=None, hi=None, maxlen=None):
         self.name = name
         self.type = typ
+        # Optional constraints (improvement 78): a numeric range and/or a
+        # maximum length for a string. The generator emits a validator so a
+        # hand-written range check can disappear.
+        self.lo = lo
+        self.hi = hi
+        self.maxlen = maxlen
+
+    def constraint_cpp(self):
+        """A C++ expression that is true when the value is acceptable, or None
+        when the parameter is unconstrained. `v` is the bound variable."""
+        if self.type == "number":
+            parts = []
+            if self.lo is not None:
+                parts.append("v >= %s" % self.lo)
+            if self.hi is not None:
+                parts.append("v <= %s" % self.hi)
+            if parts:
+                return " && ".join(parts)
+        if self.type == "string" and self.maxlen is not None:
+            return "v.size() <= %d" % self.maxlen
+        return None
 
     def cpp(self):
         return TYPE_MAP[self.type][0]
@@ -162,12 +183,14 @@ class Module:
 
 
 def _split_types(text):
-    """Split a parameter list on commas that are not inside < > or ( )."""
+    """Split a parameter list on commas that are not inside < >, ( ) or [ ].
+    Brackets matter because a numeric range constraint contains a comma
+    (`number[0,64]`), which must not split the parameter list."""
     out, depth, cur = [], 0, ""
     for ch in text:
-        if ch in "<(":
+        if ch in "<([":
             depth += 1
-        elif ch in ">)":
+        elif ch in ">)]":
             depth -= 1
         if ch == "," and depth == 0:
             out.append(cur)
@@ -182,6 +205,30 @@ def _split_types(text):
 def _check_type(typ, where):
     if typ not in TYPE_MAP:
         raise IdlError("unknown type %r in %s" % (typ, where))
+
+
+# A parameter may carry a constraint: `x: number[lo,hi]` for a numeric range and
+# `s: string<maxlen>` for a maximum length (improvement 78). Parsed here so the
+# generator can emit a validator and the constraint lives with the type.
+_CONSTRAINT_RE = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_]*)\s*"
+    r"(?:\[\s*(-?[0-9.]+)?\s*,\s*(-?[0-9.]+)?\s*\]|<(\d+)>)?$")
+
+
+def _parse_param(pname, ptype, where):
+    m = _CONSTRAINT_RE.match(ptype.strip())
+    if not m:
+        raise IdlError("bad parameter type %r in %s" % (ptype, where))
+    base, lo, hi, maxlen = m.group(1), m.group(2), m.group(3), m.group(4)
+    _check_type(base, where)
+    if (lo is not None or hi is not None) and base != "number":
+        raise IdlError("a range constraint is only valid on a number in %s" % where)
+    if maxlen is not None and base != "string":
+        raise IdlError("a length constraint is only valid on a string in %s" % where)
+    return Param(pname, base,
+                 float(lo) if lo is not None else None,
+                 float(hi) if hi is not None else None,
+                 int(maxlen) if maxlen is not None else None)
 
 
 def parse(text):
@@ -296,8 +343,7 @@ def _parse_fn(line, module, doc, cap, deprecated=None, since=None, removed=None)
             raise IdlError("parameter %r needs a type" % arg)
         pname, ptype = arg.split(":", 1)
         pname, ptype = pname.strip(), ptype.strip()
-        _check_type(ptype, "fn %s" % name)
-        params.append(Param(pname, ptype))
+        params.append(_parse_param(pname, ptype, "fn %s" % name))
     _check_type(ret, "fn %s return" % name)
     return Function(name, params, ret, cap or module.capability, doc or "",
                     module.name, deprecated, since, removed)
@@ -314,8 +360,7 @@ def _parse_event(line, module, doc, since=None):
             raise IdlError("event parameter %r needs a type" % arg)
         pname, ptype = arg.split(":", 1)
         pname, ptype = pname.strip(), ptype.strip()
-        _check_type(ptype, "event %s" % name)
-        params.append(Param(pname, ptype))
+        params.append(_parse_param(pname, ptype, "event %s" % name))
     return Event(name, params, doc or "", module.name, since)
 
 
@@ -356,8 +401,10 @@ def emit_cpp(api_version, modules):
            "#include \"berry/export.h\"",
            "#include \"berry/types.h\"",
            "#include \"berry/manifest.h\"",
+           "#include \"berry/script.h\"",   # ScriptValue for the arg validator
            "",
            "#include <string>",
+           "#include <vector>",
            "",
            "namespace Berry {",
            "namespace api {",
@@ -422,6 +469,52 @@ def emit_cpp(api_version, modules):
     out.append("inline bool IsBindingDeprecated(const std::string& name) {")
     out.append("  const BindingSpec* spec = FindBindingSpec(name);")
     out.append("  return spec != nullptr && spec->deprecated != nullptr;")
+    out.append("}")
+    out.append("")
+
+    # Generated argument validation (improvement 78): a per-binding predicate
+    # over the ScriptValue argument list, derived from the IDL's constraints, so
+    # a hand-written range/length check can be deleted. A binding with no
+    # constrained parameter gets no entry (always valid).
+    constrained = []
+    for mod in modules:
+        for fn in mod.functions:
+            checks = []
+            for i, p in enumerate(fn.params):
+                expr = p.constraint_cpp()
+                if expr:
+                    checks.append((i, p, expr))
+            if checks:
+                constrained.append((fn.binding, checks))
+    out.append("/// True when `args` satisfies every constraint the IDL declares for")
+    out.append("/// `name` (numeric ranges and string length caps). A binding with no")
+    out.append("/// constraints, or an unknown name, is accepted (the capability gate,")
+    out.append("/// not this, is what refuses an unknown binding).")
+    out.append("inline bool ValidateBindingArgs(const std::string& name,")
+    out.append("                                const std::vector<ScriptValue>& args) {")
+    if not constrained:
+        out.append("  (void)name; (void)args;")
+        out.append("  return true;")
+    else:
+        for binding, checks in constrained:
+            out.append("  if (name == \"%s\") {" % binding)
+            for i, p, expr in checks:
+                if p.type == "number":
+                    out.append("    if (args.size() > %d) {" % i)
+                    out.append("      if (!args[%d].IsNumber()) return false;" % i)
+                    out.append("      const f64 v = args[%d].AsNumber();" % i)
+                    out.append("      if (!(%s)) return false;" % expr)
+                    out.append("    }")
+                else:   # string length
+                    out.append("    if (args.size() > %d) {" % i)
+                    out.append("      if (!args[%d].IsString()) return false;" % i)
+                    out.append("      const std::string& v = args[%d].AsString();" % i)
+                    out.append("      if (!(%s)) return false;" % expr)
+                    out.append("    }")
+            out.append("    return true;")
+            out.append("  }")
+        out.append("  (void)args;")
+        out.append("  return true;")
     out.append("}")
     out.append("")
     # Per-module name lists, useful for docs/tests.

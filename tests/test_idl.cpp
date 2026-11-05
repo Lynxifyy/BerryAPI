@@ -57,6 +57,28 @@ static void TestSpecTableWellFormed() {
   }
 }
 
+// Generated argument validation (improvement 78): the IDL constraints become a
+// predicate over the argument list.
+static void TestArgValidation() {
+  // combat_state.set_max_reach takes number[0,64].
+  CHECK(api::ValidateBindingArgs("combat_state.set_max_reach", {ScriptValue::Num(10)}));
+  CHECK(!api::ValidateBindingArgs("combat_state.set_max_reach", {ScriptValue::Num(100)}));
+  CHECK(!api::ValidateBindingArgs("combat_state.set_max_reach", {ScriptValue::Num(-1)}));
+  CHECK(!api::ValidateBindingArgs("combat_state.set_max_reach", {ScriptValue::Str("x")}));
+  // render.set_zoom takes number[0.1,10].
+  CHECK(api::ValidateBindingArgs("render.set_zoom", {ScriptValue::Num(1.0)}));
+  CHECK(!api::ValidateBindingArgs("render.set_zoom", {ScriptValue::Num(0.05)}));
+  // audio.set_volume takes number[0,1].
+  CHECK(api::ValidateBindingArgs("audio.set_volume", {ScriptValue::Num(0.5)}));
+  CHECK(!api::ValidateBindingArgs("audio.set_volume", {ScriptValue::Num(2)}));
+  // An unconstrained binding, or an unknown name, is accepted (the capability
+  // gate refuses an unknown binding, not this).
+  CHECK(api::ValidateBindingArgs("combat.recent_kills", {}));
+  CHECK(api::ValidateBindingArgs("does.not_exist", {ScriptValue::Num(9999)}));
+  // A missing argument is not a validation failure (arity is the gate's job).
+  CHECK(api::ValidateBindingArgs("audio.set_volume", {}));
+}
+
 static void TestLookupByName() {
   CHECK(api::FindBindingSpec("combat.recent_kills") != nullptr);
   CHECK(api::FindBindingSpec("render.draw_text") != nullptr);
@@ -168,6 +190,7 @@ static void TestDeprecationTable() {
 
 int main() {
   TestSpecTableWellFormed();
+  TestArgValidation();
   TestLookupByName();
   TestModuleTablesAgree();
   TestCapabilityNamesResolve();

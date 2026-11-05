@@ -4,8 +4,10 @@
 #include "berry/export.h"
 #include "berry/types.h"
 #include "berry/manifest.h"
+#include "berry/script.h"
 
 #include <string>
+#include <vector>
 
 namespace Berry {
 namespace api {
@@ -551,6 +553,40 @@ inline const BindingSpec* FindBindingSpec(const std::string& name) {
 inline bool IsBindingDeprecated(const std::string& name) {
   const BindingSpec* spec = FindBindingSpec(name);
   return spec != nullptr && spec->deprecated != nullptr;
+}
+
+/// True when `args` satisfies every constraint the IDL declares for
+/// `name` (numeric ranges and string length caps). A binding with no
+/// constraints, or an unknown name, is accepted (the capability gate,
+/// not this, is what refuses an unknown binding).
+inline bool ValidateBindingArgs(const std::string& name,
+                                const std::vector<ScriptValue>& args) {
+  if (name == "combat_state.set_max_reach") {
+    if (args.size() > 0) {
+      if (!args[0].IsNumber()) return false;
+      const f64 v = args[0].AsNumber();
+      if (!(v >= 0.0 && v <= 64.0)) return false;
+    }
+    return true;
+  }
+  if (name == "render.set_zoom") {
+    if (args.size() > 0) {
+      if (!args[0].IsNumber()) return false;
+      const f64 v = args[0].AsNumber();
+      if (!(v >= 0.1 && v <= 10.0)) return false;
+    }
+    return true;
+  }
+  if (name == "audio.set_volume") {
+    if (args.size() > 0) {
+      if (!args[0].IsNumber()) return false;
+      const f64 v = args[0].AsNumber();
+      if (!(v >= 0.0 && v <= 1.0)) return false;
+    }
+    return true;
+  }
+  (void)args;
+  return true;
 }
 
 /// Canonical binding names grouped by module.
