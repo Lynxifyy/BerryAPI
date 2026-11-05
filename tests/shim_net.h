@@ -289,6 +289,49 @@ class TinyNoUpgradeWsServer final : public TinyTcpAcceptor {
   }
 };
 
+/// A WebSocket server that answers the handshake and then sends one text
+/// message split across two frames (a FIN=0 text frame and a FIN=1 continuation
+/// with no mask), so the client's fragmentation reassembly can be exercised
+/// (improvement 51).
+class TinyWsFragmentServer final : public TinyTcpAcceptor {
+ protected:
+  void Handle(int conn) override {
+    std::string handshake = RecvUntil(conn, "\r\n\r\n", 4000);
+    if (handshake.empty()) return;
+    std::string key;
+    const std::string kn = "Sec-WebSocket-Key:";
+    size_t p = handshake.find(kn);
+    if (p != std::string::npos) {
+      size_t v = p + kn.size();
+      size_t e = handshake.find("\r\n", v);
+      key = handshake.substr(v, e - v);
+      size_t b = key.find_first_not_of(" \t");
+      size_t en = key.find_last_not_of(" \t\r");
+      if (b != std::string::npos) key = key.substr(b, en - b + 1);
+    }
+    std::string resp = "HTTP/1.1 101 Switching Protocols\r\n"
+        "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+        "Sec-WebSocket-Accept: " + Berry::WsAcceptFor(key) + "\r\n\r\n";
+    ::send(conn, resp.data(), resp.size(), MSG_NOSIGNAL);
+
+    // "hello " (FIN=0, text) then "world" (FIN=1, continuation), unmasked.
+    const char* part1 = "hello ";
+    const char* part2 = "world";
+    std::string f1;
+    f1.push_back((char)0x01);            // FIN=0, opcode=1 (text)
+    f1.push_back((char)strlen(part1));
+    f1 += part1;
+    std::string f2;
+    f2.push_back((char)0x80);            // FIN=1, opcode=0 (continuation)
+    f2.push_back((char)strlen(part2));
+    f2 += part2;
+    ::send(conn, f1.data(), f1.size(), MSG_NOSIGNAL);
+    ::send(conn, f2.data(), f2.size(), MSG_NOSIGNAL);
+    // Keep the socket open briefly so the client's two Pumps can read both.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+};
+
 class TinyWsServer final : public TinyTcpAcceptor {
  protected:
   void Handle(int conn) override {

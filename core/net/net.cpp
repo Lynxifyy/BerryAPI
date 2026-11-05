@@ -1126,8 +1126,10 @@ bool WebSocket::SendFrame(WsOpcode op, const void* payload, size_t len) {
   // The whole send (including the mask draw) is serialized, so two concurrent
   // SendFrame calls cannot interleave on the wire.
   std::lock_guard<std::mutex> lk(sendMutex_);
-  return StreamSend(frame.data(), frame.size(), Deadline::After(5000)) ==
-         (ssize_t)frame.size();
+  const bool ok = StreamSend(frame.data(), frame.size(), Deadline::After(5000)) ==
+                  (ssize_t)frame.size();
+  if (ok) lastSendMs_ = NowMs();
+  return ok;
 }
 
 //----------------------------------------------------------------------------
@@ -1218,19 +1220,36 @@ void WebSocket::Pump() {
   // partial frame from an earlier Pump, are never lost (bugs 43, 47).
   const Deadline poll = Deadline::After(200);
 
+  // Keepalive (improvement 51): send a ping when the interval has elapsed since
+  // the last send, so an idle connection is kept open.
+  if (keepaliveMs_ > 0) {
+    const u64 now = NowMs();
+    if (lastSendMs_ == 0 || now - lastSendMs_ >= (u64)keepaliveMs_) {
+      if (SendFrame(WsOpcode::Ping, nullptr, 0)) lastSendMs_ = now;
+    }
+  }
+
   // Read whatever is available into rxBuf_.
+  bool eof = false;
   if (StreamWaitReadable(poll)) {
     char tmp[8192];
     ssize_t n = StreamRecv(tmp, sizeof tmp, poll);
     if (n > 0) {
       rxBuf_.insert(rxBuf_.end(), (const u8*)tmp, (const u8*)tmp + n);
     } else if (n == 0) {
-      open_ = false;
-      if (onClose_) onClose_(1006, "eof");
-      return;
+      eof = true;
     }
   }
-  if (rxBuf_.empty()) return;
+  // Parse already-buffered data BEFORE reporting EOF: a peer that sends its
+  // frames and closes in one go must still have those frames delivered, so the
+  // EOF is only reported once the buffer is drained.
+  if (rxBuf_.empty()) {
+    if (eof) {
+      open_ = false;
+      if (onClose_) onClose_(1006, "eof");
+    }
+    return;
+  }
 
   WsFrameView view;
   WsFrameStatus st = ParseWsFrame(rxBuf_.data(), rxBuf_.size(), &view,
@@ -1278,10 +1297,49 @@ void WebSocket::Pump() {
     return;
   }
   if (view.opcode == (u8)WsOpcode::Ping) {
-    SendFrame(WsOpcode::Pong, msg.payload.data(), msg.payload.size());
+    if (autoPong_) {
+      SendFrame(WsOpcode::Pong, msg.payload.data(), msg.payload.size());
+    }
     return;
   }
-  if (onMessage_) onMessage_(msg);
+  if (view.opcode == (u8)WsOpcode::Pong) return;   // a keepalive reply
+
+  // Fragmentation reassembly (improvement 51): a data frame with FIN=0 starts a
+  // message; Continuation frames append; the FIN frame completes it. Control
+  // frames (handled above) may interleave and do not disturb the buffer.
+  const bool isData = view.opcode == (u8)WsOpcode::Text ||
+                      view.opcode == (u8)WsOpcode::Binary;
+  const bool isCont = view.opcode == (u8)WsOpcode::Continuation;
+  if (isData && !view.fin) {
+    fragmenting_ = true;
+    fragOpcode_ = view.opcode;
+    fragBuf_ = std::move(msg.payload);
+    return;
+  }
+  if (isCont) {
+    if (!fragmenting_) {
+      // A continuation with no start is a protocol error.
+      Close(1002, "unexpected continuation");
+      return;
+    }
+    if (fragBuf_.size() + msg.payload.size() > kMaxMessage) {
+      Close(1009, "message too big");
+      return;
+    }
+    fragBuf_.insert(fragBuf_.end(), msg.payload.begin(), msg.payload.end());
+    if (!view.fin) return;   // more fragments to come
+    // The message is complete: deliver it under its original opcode.
+    WsMessage whole{(WsOpcode)fragOpcode_, std::move(fragBuf_), true};
+    fragmenting_ = false;
+    fragBuf_.clear();
+    fragOpcode_ = 0;
+    if (onMessage_) onMessage_(whole);
+    return;
+  }
+  if (isData && view.fin) {
+    if (onMessage_) onMessage_(msg);
+    return;
+  }
 }
 
 //----------------------------------------------------------------------------

@@ -284,6 +284,14 @@ class BERRY_API WebSocket {
   /// True when the connection was opened over `wss://`.
   bool isTls() const { return tls_; }
 
+  /// Enable automatic keepalive pings every `intervalMs` (improvement 51). A
+  /// value of 0 disables them. The ping is sent from Pump when the interval has
+  /// elapsed since the last send, so a quiet connection is kept alive without
+  /// the caller doing anything.
+  void SetKeepalive(int intervalMs) { keepaliveMs_ = intervalMs; }
+  /// Send a pong automatically in reply to a ping (on by default).
+  void SetAutoPong(bool on) { autoPong_ = on; }
+
  private:
   bool SendFrame(WsOpcode op, const void* payload, size_t len);
 
@@ -310,6 +318,17 @@ class BERRY_API WebSocket {
   std::vector<u8> rxBuf_;
   /// True once we have sent a close frame, so a second Close does not resend.
   bool closeSent_ = false;
+  /// Fragmentation reassembly (improvement 51): a text/binary message split
+  /// across frames is buffered here until the FIN frame arrives, with a cap so
+  /// a peer cannot grow it without bound.
+  std::vector<u8> fragBuf_;
+  u8 fragOpcode_ = 0;
+  bool fragmenting_ = false;
+  static constexpr size_t kMaxMessage = 16u * 1024 * 1024;
+  /// Keepalive ping interval in ms (0 = off) and the time of the last send.
+  int keepaliveMs_ = 0;
+  u64 lastSendMs_ = 0;
+  bool autoPong_ = true;
 
   WsOpenCb onOpen_;
   WsMessageCb onMessage_;

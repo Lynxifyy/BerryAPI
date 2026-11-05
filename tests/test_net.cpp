@@ -162,6 +162,30 @@ int main() {
     }
   }
 
+  // --- WebSocket fragmentation reassembly (improvement 51) ---
+  {
+    TinyWsFragmentServer frag;
+    int fp = frag.Start(18088);
+    CHECK(fp > 0);
+    if (fp > 0) {
+      WebSocket c;
+      std::string got;
+      bool done = false;
+      c.OnMessage([&](const WsMessage& m) {
+        if (m.opcode == WsOpcode::Text) { got = m.text(); done = true; }
+      });
+      CHECK(c.Connect((std::string("ws://127.0.0.1:") + std::to_string(fp)).c_str(), 2000));
+      for (int i = 0; i < 20 && !done; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        c.Pump();
+      }
+      CHECK(done);
+      CHECK(got == "hello world");   // the two fragments reassembled in order
+      c.Close();
+      frag.Stop();
+    }
+  }
+
   // --- WebSocket loopback (echo) ---
   TinyWsServer ws;
   int wsPort = ws.Start(18082);
