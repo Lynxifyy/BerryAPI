@@ -22,6 +22,22 @@ std::atomic<int> Log::level_{(int)LogLevel::Info};
 
 namespace {
 
+/// The bounded ring of recent lines for the in-game console (improvement 90).
+constexpr size_t kMaxRing = 512;
+std::deque<Log::Entry> g_ring;
+bool jsonLines_ = false;
+
+const char* JsonLevelName(LogLevel lv) {
+  switch (lv) {
+    case LogLevel::Trace: return "trace";
+    case LogLevel::Debug: return "debug";
+    case LogLevel::Info:  return "info";
+    case LogLevel::Warn:  return "warn";
+    case LogLevel::Error: return "error";
+  }
+  return "info";
+}
+
 // Per-module level overrides and rate-limit state (improvement 90). Guarded by
 // Log's mutex so a concurrent SetModuleLevel cannot race a read.
 struct ModuleState {
@@ -136,12 +152,37 @@ void Log::VFormat(LogLevel level, const char* fmt, va_list args) {
   // actual I/O OUTSIDE it: a slow sink must not block every other logger (bug
   // 52).
   bool silent = false;
+  bool json = false;
   {
     std::lock_guard<std::mutex> lk(mutex_);
     silent = silent_;
+    json = jsonLines_;
     if (capture_) last_message_ = msg;
+    // Keep a bounded ring for the in-game console (improvement 90).
+    g_ring.push_back(Entry{level, msg});
+    if (g_ring.size() > kMaxRing) g_ring.pop_front();
   }
   if (silent) return;
+
+  if (json) {
+    // JSON lines: {"level":"warn","msg":"..."} (improvement 90). Minimal
+    // escaping (quote, backslash, newline) so a line stays one JSON object.
+    std::string esc;
+    esc.reserve(strlen(msg) + 8);
+    for (const char* q = msg; *q; ++q) {
+      switch (*q) {
+        case '"': esc += "\\\""; break;
+        case '\\': esc += "\\\\"; break;
+        case '\n': esc += "\\n"; break;
+        case '\r': esc += "\\r"; break;
+        case '\t': esc += "\\t"; break;
+        default: esc.push_back(*q); break;
+      }
+    }
+    fprintf(stderr, "{\"level\":\"%s\",\"msg\":\"%s\"}\n",
+            JsonLevelName(level), esc.c_str());
+    return;
+  }
 
 #ifdef __ANDROID__
   android_LogPriority prio = ANDROID_LOG_INFO;
@@ -156,6 +197,30 @@ void Log::VFormat(LogLevel level, const char* fmt, va_list args) {
 #else
   fprintf(stderr, "[Berry][%s] %s\n", LevelName(level), msg);
 #endif
+}
+
+std::vector<Log::Entry> Log::RecentEntries(size_t maxLines) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  std::vector<Entry> out;
+  const size_t start = g_ring.size() > maxLines ? g_ring.size() - maxLines : 0;
+  for (size_t i = start; i < g_ring.size(); ++i) out.push_back(g_ring[i]);
+  return out;
+}
+
+std::vector<std::string> Log::Recent(size_t maxLines) {
+  std::vector<std::string> out;
+  for (const Entry& e : RecentEntries(maxLines)) out.push_back(e.text);
+  return out;
+}
+
+void Log::ClearRecent() {
+  std::lock_guard<std::mutex> lk(mutex_);
+  g_ring.clear();
+}
+
+void Log::SetJsonLines(bool enabled) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  jsonLines_ = enabled;
 }
 
 void Log::LogAt(LogLevel level, const char* fmt, ...) {

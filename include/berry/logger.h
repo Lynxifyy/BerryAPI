@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
+#include <deque>
 #include <mutex>
 
 namespace Berry {
@@ -45,6 +47,22 @@ class BERRY_API Log {
   static void LogTagged(LogLevel level, const char* module, int maxPerSecond,
                         const char* fmt, ...)
       __attribute__((format(printf, 4, 5)));
+
+  /// A bounded in-memory ring of the most recent lines, for an in-game console
+  /// (improvement 90). `maxLines` caps how many are kept. Returns the lines
+  /// oldest-first.
+  static std::vector<std::string> Recent(size_t maxLines = 100);
+  /// Clears the ring.
+  static void ClearRecent();
+  /// Emit each line as a JSON object ({"level":"warn","msg":"..."}) instead of
+  /// the default text, so a host can ship structured logs (improvement 90).
+  static void SetJsonLines(bool enabled);
+
+  /// A single captured line: its level and text. Public so a caller can render
+  /// the console with the right colour per level.
+  struct Entry { LogLevel level; std::string text; };
+  /// The ring as entries (with level), oldest-first.
+  static std::vector<Entry> RecentEntries(size_t maxLines = 100);
 
  private:
   static void VFormat(LogLevel level, const char* fmt, va_list args);
