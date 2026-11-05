@@ -507,13 +507,17 @@ ScriptValue HttpRequestBlocking(ScriptContext& ctx, const std::string& method,
   if (timeout > 60000) timeout = 60000;
   if (maxBodyBytes == 0) maxBodyBytes = 4u * 1024 * 1024;
 
-  auto fail = [](const std::string& why) {
+  // The failure table carries a machine-readable `error_kind` (improvement 82)
+  // alongside the human `error` string, so a script branches on an enum rather
+  // than matching message text. The kinds are the IDL's documented set.
+  auto fail = [](const std::string& why, const char* kind = "transport") {
     ScriptTable t;
     t["status"] = ScriptValue::Num(0);
     t["ok"] = ScriptValue::Bool(false);
     t["headers"] = ScriptValue::Str("");
     t["body"] = ScriptValue::Str("");
     t["error"] = ScriptValue::Str(why);
+    t["error_kind"] = ScriptValue::Str(kind);
     t["truncated"] = ScriptValue::Bool(false);
     return ScriptValue::Tbl(std::move(t));
   };
@@ -525,17 +529,17 @@ ScriptValue HttpRequestBlocking(ScriptContext& ctx, const std::string& method,
   const Deadline overall = Deadline::After((int)timeout);
   for (int hop = 0; hop <= kMaxRedirects; ++hop) {
     const int remaining = overall.remainingMs();
-    if (remaining == 0) return fail("timeout");
+    if (remaining == 0) return fail("timeout", "timeout");
     Url parsed;
     std::string parseErr;
-    if (!parsed.Parse(current, &parseErr)) return fail("bad url: " + parseErr);
+    if (!parsed.Parse(current, &parseErr)) return fail("bad url: " + parseErr, "bad_url");
     const UrlReject reject = policy.Check(parsed);
     if (reject != UrlReject::None) {
       return fail(std::string("destination refused (") + UrlRejectName(reject) +
-                  "): " + parsed.host);
+                  "): " + parsed.host, "refused");
     }
     if (!HostGranted(ctx, parsed.host)) {
-      return fail("host not granted: " + parsed.host);
+      return fail("host not granted: " + parsed.host, "not_granted");
     }
 
     HttpRequest req(current.c_str());
@@ -545,14 +549,14 @@ ScriptValue HttpRequestBlocking(ScriptContext& ctx, const std::string& method,
       req.Header("Content-Type", "application/json");
     }
     HttpResponse resp = req.Do();
-    if (resp.status == 0) return fail("request failed: " + resp.reason);
+    if (resp.status == 0) return fail("request failed: " + resp.reason, "transport");
 
     if (resp.status >= 300 && resp.status < 400) {
       const char* loc = resp.Header("Location");
-      if (!loc || !*loc) return fail("redirect without Location");
-      if (hop == kMaxRedirects) return fail("too many redirects");
+      if (!loc || !*loc) return fail("redirect without Location", "bad_redirect");
+      if (hop == kMaxRedirects) return fail("too many redirects", "too_many_redirects");
       std::string next = ResolveRedirect(current, parsed, loc);
-      if (next.empty()) return fail("unresolvable redirect");
+      if (next.empty()) return fail("unresolvable redirect", "bad_redirect");
       current = next;
       continue;
     }
@@ -570,10 +574,11 @@ ScriptValue HttpRequestBlocking(ScriptContext& ctx, const std::string& method,
     t["headers"] = ScriptValue::Str(headerText);
     t["body"] = ScriptValue::Str(resp.body);
     t["error"] = ScriptValue::Str("");
+    t["error_kind"] = ScriptValue::Str("");
     t["truncated"] = ScriptValue::Bool(resp.truncated);
     return ScriptValue::Tbl(std::move(t));
   }
-  return fail("too many redirects");
+  return fail("too many redirects", "too_many_redirects");
 }
 
 ScriptValue HttpGetBlocking(ScriptContext& ctx, const std::string& url,

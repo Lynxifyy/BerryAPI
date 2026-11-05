@@ -340,6 +340,7 @@ idl:
 
 idl-check:
 	@python3 tools/idlgen.py --self-test
+	@python3 tools/idlgen.py --golden-test
 	@python3 tools/idlgen.py --check
 
 # Breaking-change lint (improvement 77): diff the current IDL against the last
