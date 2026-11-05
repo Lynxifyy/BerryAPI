@@ -4,6 +4,7 @@
 #include "berry/event.h"
 #include "berry/version.h"
 #include "berry/voice_crypto.h"   // VoiceRandomBytes: the CSPRNG behind WS keys/masks
+#include "berry/inflate.h"        // Content-Encoding decode (gzip/deflate)
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -494,6 +495,7 @@ HttpResponse HttpRequest::Do() {
   std::string req = method_ + " " + path_ + " HTTP/1.1\r\n"
       "Host: " + hostHdr + "\r\n"
       "User-Agent: BerryAPI/" BERRY_VERSION_STRING "\r\n"
+      "Accept-Encoding: gzip, deflate\r\n"
       "Connection: close\r\n";
   // A body-bearing method always sends Content-Length, even for an empty body,
   // so a server that requires it does not answer 411 (bug 36).
@@ -686,6 +688,29 @@ HttpResponse HttpRequest::Do() {
   } else {
     // No framing header: the body runs to the end of the connection (close).
     resp.body = std::move(bodyRaw);
+  }
+
+  // Content-Encoding (improvement 34): decode gzip/deflate so a caller sees the
+  // entity body, not the transfer encoding. A decode failure leaves the body as
+  // received (a caller that asked for identity still gets bytes) rather than
+  // silently corrupting it; `encoding_failed` records the failure.
+  {
+    const char* enc = resp.Header("Content-Encoding");
+    if (enc && *enc) {
+      std::string lower;
+      for (const char* q = enc; *q; ++q) lower.push_back((char)tolower((unsigned char)*q));
+      const bool gz = lower.find("gzip") != std::string::npos;
+      const bool df = lower.find("deflate") != std::string::npos;
+      if (gz || df) {
+        std::string decoded;
+        if (InflateAuto(reinterpret_cast<const u8*>(resp.body.data()),
+                        resp.body.size(), &decoded, maxBodyBytes_)) {
+          resp.body = std::move(decoded);
+        } else {
+          resp.encodingFailed = true;
+        }
+      }
+    }
   }
 
   // Trim the body to the caller's cap even when the raw buffer was within the

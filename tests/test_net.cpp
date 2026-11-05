@@ -122,6 +122,13 @@ int main() {
       HttpRequest bs((base + "/badstatus").c_str());
       HttpResponse bsr = bs.Do();
       CHECK(bsr.status == 0);                       // strict status parse
+
+      // A gzip-encoded body is decoded (improvement 34).
+      HttpRequest gz((base + "/gzip").c_str());
+      HttpResponse gzr = gz.Do();
+      CHECK(gzr.status == 200);
+      CHECK(gzr.body == "hello gzip");
+      CHECK(!gzr.encodingFailed);
       fs.Stop();
     }
   }

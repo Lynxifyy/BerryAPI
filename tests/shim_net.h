@@ -197,6 +197,16 @@ class TinyFramingServer final : public TinyTcpAcceptor {
              "  beta\r\n"
              "Content-Length: 2\r\n"
              "Connection: close\r\n\r\nok";
+    } else if (req.rfind("GET /gzip", 0) == 0) {
+      // A gzip-encoded "hello gzip" (CRC-verified by the client's inflater).
+      const unsigned char gz[] = {0x1f,0x8b,0x08,0x00,0x00,0x00,0x00,0x00,0x02,0xff,
+                                  0xcb,0x48,0xcd,0xc9,0xc9,0x57,0x48,0xaf,0xca,0x2c,
+                                  0x00,0x00,0x19,0x6a,0xd2,0xdf,0x0a,0x00,0x00,0x00};
+      std::string body((const char*)gz, sizeof gz);
+      resp = "HTTP/1.1 200 OK\r\n"
+             "Content-Encoding: gzip\r\n"
+             "Content-Length: " + std::to_string(body.size()) + "\r\n"
+             "Connection: close\r\n\r\n" + body;
     } else if (req.rfind("GET /badstatus", 0) == 0) {
       resp = "HTTP/1.1 XX OK\r\nContent-Length: 0\r\n\r\n";
     } else {

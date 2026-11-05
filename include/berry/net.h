@@ -141,6 +141,9 @@ struct BERRY_API HttpResponse {
   /// Set when the body hit the request's byte cap and the rest was discarded,
   /// so a caller can tell a complete response from a clipped one.
   bool truncated = false;
+  /// Set when a Content-Encoding (gzip/deflate) could not be decoded, so the
+  /// body is still the encoded bytes (improvement 34).
+  bool encodingFailed = false;
 
   const char* Header(const char* name) const;
   bool ok() const { return status >= 200 && status < 300; }
