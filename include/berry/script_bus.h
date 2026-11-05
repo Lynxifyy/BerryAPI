@@ -63,6 +63,14 @@ class BERRY_API ScriptEventBus {
   /// identifier shape (letters, digits, `_`) plus the `ns.fn` dot form.
   static bool ValidHandler(const std::string& handler);
 
+  /// True when `payload` matches the schema the IDL declares for `channel`
+  /// (improvement 67). A declared channel's payload is a comma-separated field
+  /// list whose field count equals the declared arity; an undeclared
+  /// (script-only) channel is unconstrained, and an empty payload is always
+  /// allowed (a channel with no fields). Exposed so a publisher can pre-check.
+  static bool ValidatePayload(const std::string& channel,
+                              const std::string& payload);
+
   /// Registers a persistent subscription. Returns the subscription id, or 0
   /// when refused (invalid channel/handler, or a cap reached). Re-registering
   /// the same (script, channel, handler) triple returns the existing id rather
