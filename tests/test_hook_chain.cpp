@@ -25,8 +25,6 @@ static int g_fail = 0;
 __attribute__((noinline)) int AddFn(int a, int b) { PROLOGUE_PAD; return a + b; }
 __attribute__((noinline)) int MulFn(int a, int b) { PROLOGUE_PAD; return a * b; }
 __attribute__((noinline)) int SubFn(int a, int b) { PROLOGUE_PAD; return a - b; }
-// A lone `ret`: the shim must refuse to patch it (bug 3).
-__attribute__((noinline)) int RetOnlyFn(int, int) { return 0; }
 
 int main() {
   if (!BERRY_ShimCanPatch()) {
@@ -98,11 +96,11 @@ int main() {
   {
     auto detour = +[](int, int) -> int { return 7; };
     HookGroup<int (*)(int, int)> g;
-    // The second target is a lone `ret` (four bytes of padding after it), which
-    // the shim refuses because a terminal instruction cannot be patched; the
-    // group must roll the first install back.
+    // The second target is null, which the shim refuses without reading any
+    // code (so the refusal is deterministic and independent of what the
+    // compiler emitted); the group must roll the first install back.
     std::vector<std::pair<void*, int (*)(int, int)>> bad = {
-        {(void*)&AddFn, detour}, {(void*)&RetOnlyFn, detour}};
+        {(void*)&AddFn, detour}, {nullptr, detour}};
     size_t failed = 999;
     CHECK(!g.InstallAll(backend, bad, &failed));
     CHECK(failed == 1);
