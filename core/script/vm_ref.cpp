@@ -35,6 +35,7 @@
 #include "berry/script.h"
 #include "berry/logger.h"
 #include "berry/value_codec.h"
+#include <functional>
 
 #include <algorithm>
 #include <cctype>
@@ -242,6 +243,30 @@ class RefVm final : public IScriptVm {
       bytes += ValueCodec::Bytes(kv.second);
     }
     return bytes;
+  }
+
+  MemoryBreakdown MemoryByCategory() const override {
+    // Walk the value tree once, attributing each byte to strings or tables
+    // (improvement 73). Keys and the ScriptValue node itself are table
+    // overhead; a leaf string is string bytes.
+    MemoryBreakdown b;
+    std::function<void(const ScriptValue&)> walk = [&](const ScriptValue& v) {
+      if (v.type == ScriptValue::Type::String) {
+        b.strings += v.string.size();
+        return;
+      }
+      if (v.type == ScriptValue::Type::Table && v.table) {
+        for (const auto& kv : *v.table) {
+          b.tables += kv.first.size() + sizeof(ScriptValue);
+          walk(kv.second);
+        }
+      }
+    };
+    for (const auto& kv : globals_) {
+      b.tables += kv.first.size() + sizeof(ScriptValue);
+      walk(kv.second);
+    }
+    return b;
   }
 
   void ResetInstructionCount() override { instructions_ = 0; }

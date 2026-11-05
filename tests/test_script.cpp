@@ -171,6 +171,27 @@ static void TestInstructionBudget() {
   CHECK(vm->InstructionsExecuted() >= 5000);
 }
 
+// The per-category memory breakdown (improvement 73) attributes bytes to
+// strings vs tables, and its total matches MemoryUsed.
+static void TestMemoryByCategory() {
+  std::unique_ptr<IScriptVm> vm(CreateReferenceVm());
+  ScriptError err;
+  const char* src =
+      "func on_load\n"
+      "  push \"a fairly long string value\"\n"
+      "  store greeting\n"
+      "  ret 0\n"
+      "end\n";
+  CHECK(vm->Load(src, "memcat", &err));
+  std::vector<ScriptValue> ret;
+  CHECK(vm->Call("on_load", {}, &ret, &err) == ScriptStatus::Ok);
+
+  const IScriptVm::MemoryBreakdown b = vm->MemoryByCategory();
+  CHECK(b.strings >= 25);                 // the greeting string's bytes
+  CHECK(b.tables > 0);                    // the globals table overhead
+  CHECK(b.total() == vm->MemoryUsed());   // the breakdown sums to the total
+}
+
 static void TestMemoryLimit() {
   std::unique_ptr<IScriptVm> vm(CreateReferenceVm());
   ScriptError err;
@@ -503,6 +524,7 @@ int main() {
   TestVmBasics();
   TestAssemblerErrors();
   TestInstructionBudget();
+  TestMemoryByCategory();
   TestMemoryLimit();
   TestTimeslice();
   TestBindingsGate();

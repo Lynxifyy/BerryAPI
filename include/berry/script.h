@@ -339,6 +339,19 @@ class BERRY_API IScriptVm {
   /// instruction count so the two cannot be confused (bug 61).
   virtual u64 SafepointsExecuted() const { return 0; }
   virtual size_t MemoryUsed() const = 0;
+
+  /// A per-category memory breakdown (improvement 73): strings, tables and
+  /// "other" (VM bookkeeping), so a script or the profiler can see where its
+  /// bytes go rather than one opaque total. A VM that cannot break it down
+  /// reports everything under "other".
+  struct MemoryBreakdown {
+    size_t strings = 0;
+    size_t tables = 0;
+    size_t other = 0;
+    size_t total() const { return strings + tables + other; }
+  };
+  virtual MemoryBreakdown MemoryByCategory() const { return MemoryBreakdown{}; }
+
   /// Resets the per-invocation instruction counter.
   virtual void ResetInstructionCount() = 0;
 
