@@ -20,6 +20,22 @@
 
 namespace Berry {
 
+namespace {
+
+/// Collects task ids from the first argument of a combinator call. A table
+/// argument contributes its values in key order; anything else yields nothing,
+/// so a malformed argument resolves to an empty task set rather than faulting.
+std::vector<u64> TaskIdsFrom(const std::vector<ScriptValue>& args) {
+  std::vector<u64> ids;
+  if (args.empty()) return ids;
+  const ScriptTable* t = args[0].AsTable();
+  if (!t) return ids;
+  for (const auto& kv : *t) ids.push_back((u64)kv.second.AsNumber());
+  return ids;
+}
+
+}  // namespace
+
 //----------------------------------------------------------------------------
 // TaskState
 //----------------------------------------------------------------------------
@@ -57,8 +73,64 @@ u64 TaskScheduler::Suspend(const std::string& script, const std::string& reason,
   t.timeoutTick = timeoutTick;
   t.timeoutMs = timeoutMs;
   t.createdAtMs = nowMs;
+  // Join the script's current open scope, so cancelling the scope tears down
+  // every await the entry point started (improvement 72).
+  for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
+    if (it->open && it->script == script) { t.scope = it->id; break; }
+  }
   tasks_.push_back(std::move(t));
   return tasks_.back().id;
+}
+
+u64 TaskScheduler::OpenScope(const std::string& script) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  Scope s;
+  s.id = nextScopeId_++;
+  s.script = script;
+  s.open = true;
+  scopes_.push_back(s);
+  return s.id;
+}
+
+u64 TaskScheduler::CurrentScope(const std::string& script) const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
+    if (it->open && it->script == script) return it->id;
+  }
+  return 0;
+}
+
+size_t TaskScheduler::CancelScope(u64 scope) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  size_t cancelled = 0;
+  for (auto it = tasks_.begin(); it != tasks_.end();) {
+    if (it->scope == scope) {
+      ++cancelled;
+      it = tasks_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  for (auto& s : scopes_) {
+    if (s.id == scope) s.open = false;
+  }
+  return cancelled;
+}
+
+void TaskScheduler::CloseScope(u64 scope) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  for (auto& s : scopes_) {
+    if (s.id == scope) s.open = false;
+  }
+}
+
+size_t TaskScheduler::CountInScope(u64 scope) const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  size_t n = 0;
+  for (const auto& t : tasks_) {
+    if (t.scope == scope) ++n;
+  }
+  return n;
 }
 
 std::vector<AsyncTask> TaskScheduler::Poll(GameTick currentTick, u64 nowMs) {
@@ -201,7 +273,9 @@ size_t TaskScheduler::CountInState(TaskState state) const {
 void TaskScheduler::Clear() {
   std::lock_guard<std::mutex> lk(mutex_);
   tasks_.clear();
+  scopes_.clear();
   nextId_ = 1;
+  nextScopeId_ = 1;
 }
 
 //----------------------------------------------------------------------------
@@ -308,6 +382,88 @@ void AsyncRuntime::InstallBindings(ScriptBindings* bindings,
   // the gate answers "does this script hold any network capability at all?";
   // HttpGetBlocking then narrows it to the concrete host it is about to
   // contact, which is the only place the URL is known.
+  // Promise combinators (improvement 71). The await model is one suspension per
+  // binding call, so a combinator cannot itself await other awaits; instead it
+  // awaits a *predicate* over already-running state. `async.timeout` is the one
+  // that needs a clock: it suspends until `ticks` elapse and then completes.
+  //
+  // async.timeout(ticks): resolves after `ticks` game ticks, like wait(), but
+  // named for use in a race-style select. Needs no capability.
+  bindings->Register(AsyncBindings::Timeout(), Capability::NoCap(),
+                     [self](ScriptContext& ctx,
+                            const std::vector<ScriptValue>& args) {
+                       const GameTick ticks =
+                           args.empty() ? 0 : (GameTick)args[0].AsNumber();
+                       auto target = std::make_shared<GameTick>(
+                           self->currentTick_ ? self->currentTick_() + ticks : 0);
+                       self->Await(ctx, "timeout(" +
+                                            std::to_string((long long)ticks) + ")",
+                                   [target, self](ScriptValue* out) {
+                                     if (!self->currentTick_) {
+                                       if (out) *out = ScriptValue::Bool(true);
+                                       return true;
+                                     }
+                                     if (self->currentTick_() >= *target) {
+                                       if (out) *out = ScriptValue::Bool(true);
+                                       return true;
+                                     }
+                                     return false;
+                                   });
+                       return ScriptValue::Nil();
+                     });
+
+  // async.race(tasks): resolves with the first task's result. `tasks` is a
+  // table of task ids (from a prior await setup); the predicate fires when any
+  // one is no longer Pending. Needs no capability.
+  bindings->Register(AsyncBindings::Race(), Capability::NoCap(),
+                     [self](ScriptContext& ctx,
+                            const std::vector<ScriptValue>& args) {
+                       std::vector<u64> ids = TaskIdsFrom(args);
+                       auto idsSp = std::make_shared<std::vector<u64>>(ids);
+                       self->Await(ctx, "race", [idsSp](ScriptValue* out) {
+                         for (u64 id : *idsSp) {
+                           AsyncTask t;
+                           if (!TaskScheduler::Instance().Find(id, &t)) continue;
+                           if (t.state != TaskState::Pending &&
+                               t.state != TaskState::Ready) {
+                             if (out) *out = t.hasResult ? t.result : ScriptValue::Nil();
+                             return true;
+                           }
+                         }
+                         return false;
+                       });
+                       return ScriptValue::Nil();
+                     });
+
+  // async.all(tasks): resolves with a table of every task's result once all
+  // have completed. Needs no capability.
+  bindings->Register(AsyncBindings::All(), Capability::NoCap(),
+                     [self](ScriptContext& ctx,
+                            const std::vector<ScriptValue>& args) {
+                       std::vector<u64> ids = TaskIdsFrom(args);
+                       auto idsSp = std::make_shared<std::vector<u64>>(ids);
+                       self->Await(ctx, "all", [idsSp](ScriptValue* out) {
+                         ScriptTable results;
+                         size_t i = 0;
+                         for (u64 id : *idsSp) {
+                           AsyncTask t;
+                           if (!TaskScheduler::Instance().Find(id, &t)) {
+                             results[std::to_string(i++)] = ScriptValue::Nil();
+                             continue;
+                           }
+                           if (t.state == TaskState::Pending ||
+                               t.state == TaskState::Ready) {
+                             return false;   // not all done yet
+                           }
+                           results[std::to_string(i++)] =
+                               t.hasResult ? t.result : ScriptValue::Nil();
+                         }
+                         if (out) *out = ScriptValue::Tbl(std::move(results));
+                         return true;
+                       });
+                       return ScriptValue::Nil();
+                     });
+
   Capability netCap;
   Capability::Parse("network:*", &netCap);
   bindings->Register(AsyncBindings::HttpGet(), netCap,
@@ -409,13 +565,17 @@ ScriptValue HttpRequestBlocking(ScriptContext& ctx, const std::string& method,
   if (timeout > 60000) timeout = 60000;
   if (maxBodyBytes == 0) maxBodyBytes = 4u * 1024 * 1024;
 
-  auto fail = [](const std::string& why) {
+  // The failure table carries a machine-readable `error_kind` (improvement 82)
+  // alongside the human `error` string, so a script branches on an enum rather
+  // than matching message text. The kinds are the IDL's documented set.
+  auto fail = [](const std::string& why, const char* kind = "transport") {
     ScriptTable t;
     t["status"] = ScriptValue::Num(0);
     t["ok"] = ScriptValue::Bool(false);
     t["headers"] = ScriptValue::Str("");
     t["body"] = ScriptValue::Str("");
     t["error"] = ScriptValue::Str(why);
+    t["error_kind"] = ScriptValue::Str(kind);
     t["truncated"] = ScriptValue::Bool(false);
     return ScriptValue::Tbl(std::move(t));
   };
@@ -427,17 +587,17 @@ ScriptValue HttpRequestBlocking(ScriptContext& ctx, const std::string& method,
   const Deadline overall = Deadline::After((int)timeout);
   for (int hop = 0; hop <= kMaxRedirects; ++hop) {
     const int remaining = overall.remainingMs();
-    if (remaining == 0) return fail("timeout");
+    if (remaining == 0) return fail("timeout", "timeout");
     Url parsed;
     std::string parseErr;
-    if (!parsed.Parse(current, &parseErr)) return fail("bad url: " + parseErr);
+    if (!parsed.Parse(current, &parseErr)) return fail("bad url: " + parseErr, "bad_url");
     const UrlReject reject = policy.Check(parsed);
     if (reject != UrlReject::None) {
       return fail(std::string("destination refused (") + UrlRejectName(reject) +
-                  "): " + parsed.host);
+                  "): " + parsed.host, "refused");
     }
     if (!HostGranted(ctx, parsed.host)) {
-      return fail("host not granted: " + parsed.host);
+      return fail("host not granted: " + parsed.host, "not_granted");
     }
 
     HttpRequest req(current.c_str());
@@ -447,14 +607,23 @@ ScriptValue HttpRequestBlocking(ScriptContext& ctx, const std::string& method,
       req.Header("Content-Type", "application/json");
     }
     HttpResponse resp = req.Do();
-    if (resp.status == 0) return fail("request failed: " + resp.reason);
+    if (resp.status == 0) return fail("request failed: " + resp.reason, "transport");
 
     if (resp.status >= 300 && resp.status < 400) {
       const char* loc = resp.Header("Location");
-      if (!loc || !*loc) return fail("redirect without Location");
-      if (hop == kMaxRedirects) return fail("too many redirects");
+      if (!loc || !*loc) return fail("redirect without Location", "bad_redirect");
+      if (hop == kMaxRedirects) return fail("too many redirects", "too_many_redirects");
       std::string next = ResolveRedirect(current, parsed, loc);
-      if (next.empty()) return fail("unresolvable redirect");
+      if (next.empty()) return fail("unresolvable redirect", "bad_redirect");
+      // A redirect must not downgrade https to plaintext (improvement 35): a
+      // hostile or compromised server could otherwise strip TLS mid-chain.
+      Url nextParsed;
+      if (nextParsed.Parse(next) && parsed.scheme == "https" &&
+          nextParsed.scheme != "https") {
+        return fail("redirect downgrades https to http", "refused");
+      }
+      // The per-hop policy check below re-applies to the new URL, so a
+      // cross-origin redirect is validated before it is followed.
       current = next;
       continue;
     }
@@ -472,10 +641,11 @@ ScriptValue HttpRequestBlocking(ScriptContext& ctx, const std::string& method,
     t["headers"] = ScriptValue::Str(headerText);
     t["body"] = ScriptValue::Str(resp.body);
     t["error"] = ScriptValue::Str("");
+    t["error_kind"] = ScriptValue::Str("");
     t["truncated"] = ScriptValue::Bool(resp.truncated);
     return ScriptValue::Tbl(std::move(t));
   }
-  return fail("too many redirects");
+  return fail("too many redirects", "too_many_redirects");
 }
 
 ScriptValue HttpGetBlocking(ScriptContext& ctx, const std::string& url,

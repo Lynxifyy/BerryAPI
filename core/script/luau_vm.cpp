@@ -69,8 +69,15 @@ static u64 SteadyMs() {
 /// coroutine of a VM: only one runs at a time.
 struct VmContext {
   LuauVm* vm = nullptr;
+  /// The coroutine currently running, for the abort helper (a safepoint runs
+  /// on the executing thread, so this is valid when `aborting` is set).
+  lua_State* L = nullptr;
   u64 startMs = 0;
   bool aborting = false;
+  /// Time spent inside native bindings during this invocation, subtracted from
+  /// the wall-clock charge so only script work counts against `wallClockMs`
+  /// once the native time has itself been charged (bug 61).
+  u64 nativeMs = 0;
 };
 
 /// Hand-off of the abort reason from the interrupt callback to the status
@@ -189,6 +196,10 @@ class LuauVm final : public IScriptVm {
     L_ = lua_newstate(&LuauVm::Alloc, this);
     if (!L_) return;
     lua_callbacks(L_)->interrupt = &Interrupt;
+    // Real instruction counting: the debugstep hook fires once per VM
+    // instruction (bug 61). It is only installed while a script runs, so a
+    // detached VM pays nothing.
+    lua_callbacks(L_)->debugstep = &DebugStep;
     luaL_openlibs(L_);
     StripDangerous();
     Sandbox();
@@ -238,7 +249,10 @@ class LuauVm final : public IScriptVm {
     interrupt_ = false;
 
     ScriptError cerr;
-    if (!MapResume(lua_resume(loader, nullptr, 0), &cerr)) {
+    lua_singlestep(L_, limits_.countInstructions ? 1 : 0);
+    const int rawLoad = lua_resume(loader, nullptr, 0);
+    lua_singlestep(L_, 0);
+    if (!MapResume(rawLoad, &cerr)) {
       if (err) *err = cerr;
       lua_pop(L_, 1);
       return false;
@@ -348,7 +362,10 @@ class LuauVm final : public IScriptVm {
     inCall_ = true;
     suspended_ = false;
 
-    ScriptStatus st = Categorize(lua_resume(call_, nullptr, (int)args.size()));
+    lua_singlestep(call_, limits_.countInstructions ? 1 : 0);
+    const int rawCall = lua_resume(call_, nullptr, (int)args.size());
+    lua_singlestep(call_, 0);
+    ScriptStatus st = Categorize(rawCall);
     if (st != ScriptStatus::Ok && st != ScriptStatus::Yielded && err) {
       *err = lastError_;
     }
@@ -377,7 +394,10 @@ class LuauVm final : public IScriptVm {
     vmctx_.aborting = false;
     instructions_ = 0;
     inCall_ = true;
-    Categorize(lua_resume(call_, nullptr, 1));
+    lua_singlestep(call_, limits_.countInstructions ? 1 : 0);
+    const int rawResume = lua_resume(call_, nullptr, 1);
+    lua_singlestep(call_, 0);
+    Categorize(rawResume);
     // The host resumes through its Step-driven loop, so leave the call open for
     // one Step() to report the status Categorize just computed.
     inCall_ = true;
@@ -401,12 +421,20 @@ class LuauVm final : public IScriptVm {
   }
   void SetContext(ScriptContext* ctx) override { ctx_ = ctx; }
 
-  u64 InstructionsExecuted() const override { return instructions_; }
+  u64 InstructionsExecuted() const override {
+    // With single-step on, the debugstep hook counts every instruction. With it
+    // off (or unavailable), fall back to the safepoint count so the budget
+    // still bounds work (bug 61).
+    return limits_.countInstructions ? instructions_ : safepoints_;
+  }
+  u64 SafepointsExecuted() const override { return safepoints_; }
   size_t MemoryUsed() const override { return liveBytes_; }
 
   void ResetInstructionCount() override {
     instructions_ = 0;
+    safepoints_ = 0;
     vmctx_.startMs = SteadyMs();
+    vmctx_.nativeMs = 0;
   }
 
   void RequestInterrupt() override { interrupt_ = true; }
@@ -453,7 +481,48 @@ class LuauVm final : public IScriptVm {
 
   //-- used by the free helpers + interrupt callback ------------------------
 
-  void NoteInstruction() { ++instructions_; }
+  /// One real VM instruction (the single-step debug hook). Increments the
+  /// instruction counter and enforces the instruction/wall budgets. It does not
+  /// run the safepoint logic (that is `Interrupt`), so the two counters stay
+  /// distinct (bug 61).
+  static void DebugStep(lua_State* L, lua_Debug*) {
+    VmContext* vc = (VmContext*)lua_getthreaddata(L);
+    if (!vc || !vc->vm) return;
+    LuauVm* vm = vc->vm;
+    if (!vm->limits_.countInstructions) return;   // safepoint mode
+    if (vc->aborting) return;
+    ++vm->instructions_;
+    if (vm->interrupt_) {
+      Abort(L, vc, ScriptStatus::Interrupted, "interrupted");
+      return;
+    }
+    if (vm->instructions_ > vm->limits_.instructionBudget) {
+      Abort(L, vc, ScriptStatus::BudgetExceeded, "instruction budget exceeded");
+      return;
+    }
+    // The wall clock excludes time already charged to native calls, so a long
+    // blocking native call does not immediately blow the script's own clock
+    // (the native time is charged separately, below).
+    const u64 scriptMs = SteadyMs() - vc->startMs - vc->nativeMs;
+    if (scriptMs > vm->limits_.wallClockMs) {
+      Abort(L, vc, ScriptStatus::Timeout, "wall-clock timeout");
+    }
+  }
+
+  /// Raises a script error with `status`, recording the abort reason for the
+  /// resume path. Must be called with the VM mid-instruction (the safepoint or
+  /// debug hook), so room for the error object is reserved first. `L` is passed
+  /// explicitly: the debug hook and the safepoint both know it.
+  static void Abort(lua_State* L, VmContext* vc, ScriptStatus status,
+                    const char* message) {
+    vc->aborting = true;
+    vc->L = L;
+    g_abort.status = status;
+    g_abort.message = message;
+    lua_rawcheckstack(L, 1);
+    luaL_error(L, "%s", message);
+  }
+
   bool InterruptRequested() const { return interrupt_; }
 
   int InvokeBound(lua_State* L, const std::string& name) {
@@ -466,7 +535,18 @@ class LuauVm final : public IScriptVm {
     for (int i = 0; i < nargs; ++i)
       args[(size_t)i] = FromLua(L, i + 1, 0, &seen());
     bool ok = false, denied = false;
+    // Charge the wall clock for the native call: a blocking binding would
+    // otherwise hide behind a cheap safepoint count (bug 61). The elapsed time
+    // is added to nativeMs so it is excluded from the script's own clock and
+    // compared against the native allowance instead.
+    const u64 nativeStart = SteadyMs();
     ScriptValue r = bindings_->Invoke(*ctx_, name, args, &ok, &denied);
+    const u64 nativeElapsed = SteadyMs() - nativeStart;
+    vmctx_.nativeMs += nativeElapsed;
+    if (nativeElapsed > limits_.wallClockMs) {
+      luaL_error(L, "native call exceeded the wall-clock budget");
+      return 0;
+    }
     if (!ok) {
       luaL_error(L, "%s %s", denied ? "capability denied" : "no such binding", name.c_str());
       return 0;
@@ -502,36 +582,38 @@ class LuauVm final : public IScriptVm {
     return bf->vm->InvokeBound(L, bf->name);
   }
 
+  /// A VM safepoint (a call or a loop back-edge). This is NOT an instruction
+  /// count: it increments `safepoints_` and only enforces the budgets when
+  /// single-step counting is off (otherwise DebugStep owns them), so the two
+  /// counters measure different things (bug 61).
   static void Interrupt(lua_State* L, int gc) {
     if (gc >= 0) return;   // a GC-step notification, not our safepoint
     VmContext* vc = (VmContext*)lua_getthreaddata(L);
     if (!vc || !vc->vm) return;
+    vc->L = L;
     LuauVm* vm = vc->vm;
-    vm->NoteInstruction();
+    ++vm->safepoints_;
     if (vc->aborting) return;
+    if (vm->limits_.countInstructions) {
+      // DebugStep enforces the budgets; the safepoint only honours a
+      // cooperative interrupt promptly.
+      if (vm->interrupt_) Abort(L, vc, ScriptStatus::Interrupted, "interrupted");
+      return;
+    }
 
     ScriptStatus status = ScriptStatus::Ok;
-    std::string message;
+    const char* message = "";
     if (vm->interrupt_) {
       status = ScriptStatus::Interrupted;
       message = "interrupted";
-    } else if (vm->instructions_ > vm->limits_.instructionBudget) {
+    } else if (vm->safepoints_ > vm->limits_.instructionBudget) {
       status = ScriptStatus::BudgetExceeded;
       message = "instruction budget exceeded";
-    } else if (SteadyMs() - vc->startMs > vm->limits_.wallClockMs) {
+    } else if (SteadyMs() - vc->startMs - vc->nativeMs > vm->limits_.wallClockMs) {
       status = ScriptStatus::Timeout;
       message = "wall-clock timeout";
     }
-    if (status == ScriptStatus::Ok) return;
-
-    vc->aborting = true;
-    g_abort.status = status;
-    g_abort.message = message;
-    // The safepoint runs with the VM mid-instruction; reserve room for the
-    // error object before luaL_error longjmps (Luau's own interrupt users do
-    // the same).
-    lua_rawcheckstack(L, 1);
-    luaL_error(L, "%s", message.c_str());   // longjmps out of the resume
+    if (status != ScriptStatus::Ok) Abort(L, vc, status, message);
   }
 
   // Allocator with a hard byte cap. Refusing an allocation makes Luau raise an
@@ -736,6 +818,7 @@ class LuauVm final : public IScriptVm {
   ScriptError lastError_;
   ScriptStatus status_ = ScriptStatus::Ok;
   u64 instructions_ = 0;
+  u64 safepoints_ = 0;
   size_t liveBytes_ = 0;
   bool memoryDenied_ = false;
   bool loaded_ = false;

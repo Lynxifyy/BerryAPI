@@ -125,6 +125,29 @@ struct BERRY_API ScriptTestReport {
   bool discoveryOk = false;
   std::string error;
 
+  /// Every test the runner discovered, whether or not it ran (a filter or the
+  /// maxTests cap can leave some unrun). With `results`, this is the coverage
+  /// view: `covered` is the fraction of discovered tests that actually ran
+  /// (improvement 74).
+  std::vector<std::string> discovered;
+  std::vector<std::string> unrun() const {
+    std::vector<std::string> out;
+    for (const auto& name : discovered) {
+      bool ran = false;
+      for (const auto& r : results) {
+        if (r.name == name) { ran = true; break; }
+      }
+      if (!ran) out.push_back(name);
+    }
+    return out;
+  }
+  /// Fraction of discovered tests that ran, in [0, 1]. 1.0 when nothing was
+  /// discovered (an empty suite is not "uncovered").
+  f64 covered() const {
+    if (discovered.empty()) return 1.0;
+    return (f64)results.size() / (f64)discovered.size();
+  }
+
   size_t total() const { return results.size(); }
   bool ok() const { return discoveryOk && failed == 0; }
 };

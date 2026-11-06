@@ -1,0 +1,104 @@
+# BerryAPI CI (improvement 96).
+#
+# A matrix over the compiler, the sanitizer set and the architecture, plus the
+# static checks. The host suite is the primary gate; the arm64 job runs the
+# portable tests under qemu-user so the arm64 decode paths are exercised on a
+# real arm64 ABI. TSan is deliberately not in the matrix: the core uses atomics
+# and mutexes with a documented thread model, and TSan's false positives on the
+# vendored Luau allocator make it noise rather than signal (see docs/THREADING.md).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  host:
+    name: host (${{ matrix.cxx }}, ${{ matrix.build }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+        build: [test, sanitize]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Build and test
+        env:
+          CXX: ${{ matrix.cxx }}
+        run: |
+          if [ "${{ matrix.build }}" = "sanitize" ]; then
+            make -j"$(nproc)" test-sanitize
+          else
+            make -j"$(nproc)" test
+          fi
+
+  arm64:
+    name: arm64 (qemu)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install qemu + cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-aarch64-linux-gnu qemu-user-static
+      # The Makefile target cross-compiles both the C++ and the vendored C, so
+      # every object is arm64. (Overriding only CXX here left the C objects
+      # host-format and the link failed with "file in wrong format".)
+      - name: Cross-build the portable suites
+        run: make arm64-portable-tests
+      - name: Run the arm64 decode + parser tests under qemu
+        run: |
+          for b in build/test_test_sigscan build/test_test_x86_length \
+                   build/test_test_url build/test_test_metrics \
+                   build/test_test_inflate build/test_test_netquota \
+                   build/test_test_conn_pool build/test_test_require; do
+            echo "-- $b --"
+            qemu-aarch64-static -L /usr/aarch64-linux-gnu "$b" "$b" || exit 1
+          done
+
+  static-analysis:
+    name: static analysis
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y clang-tidy cppcheck
+      - name: clang-tidy (first-party, high-signal checks only)
+        run: |
+          make -j"$(nproc)" compile_commands.json 2>/dev/null || true
+          if [ -f compile_commands.json ]; then
+            clang-tidy -p . --checks='-*,bugprone-*,clang-analyzer-*,performance-*' \
+              core/hooks/*.cpp core/net/net.cpp core/script/*.cpp 2>&1 | tail -50
+          fi
+      - name: cppcheck
+        run: |
+          cppcheck --error-exitcode=1 --enable=warning,performance \
+            --suppress=missingIncludeSystem --inline-suppr \
+            -Iinclude core util 2>&1 | tail -50
+      - name: Strict warning baseline (-Wshadow -Wconversion)
+        run: make check-warnings
+      - name: Script lint/format pack (.luaurc)
+        run: make lint-scripts
+      - name: Script examples run (docs verified in CI)
+        run: make check-examples
+
+  provenance:
+    name: provenance + SBOM
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Vendored dependency pinning
+        run: |
+          make check-mbedtls
+          make check-sources
+          make check-android-sources
+      - name: Generate a CycloneDX SBOM (improvement 100)
+        run: python3 tools/gen-sbom.py > sbom.cdx.json && head -20 sbom.cdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cdx.json

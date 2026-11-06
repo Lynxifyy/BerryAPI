@@ -13,8 +13,10 @@
 CORE_SRC := \
   core/client/client.cpp \
   core/events/event.cpp \
+  core/events/metrics.cpp \
   core/hooks/sigscan.cpp \
   core/hooks/backend_shim.cpp \
+  core/hooks/hook_chain.cpp \
   core/hooks/x86_length.cpp \
   core/modules/module.cpp \
   core/modules/combat.cpp \
@@ -45,8 +47,13 @@ CORE_SRC := \
   core/modules/governor.cpp \
   core/modules/governor_c.cpp \
   core/lifecycle/engine.cpp \
+  core/lifecycle/crash.cpp \
+  core/lifecycle/configfile.cpp \
   core/lifecycle/thread.cpp \
   core/net/net.cpp \
+  core/net/inflate.cpp \
+  core/net/netquota.cpp \
+  core/net/debug_endpoint.cpp \
   core/net/tls.cpp \
   core/net/ws_client.cpp \
   core/net/cosmetic_sync.cpp \
@@ -73,6 +80,12 @@ CORE_SRC := \
   core/script/loader.cpp \
   core/script/pack.cpp \
   core/script/async.cpp \
+  core/script/timers.cpp \
+  core/script/require.cpp \
+  core/script/bytecode_cache.cpp \
+  core/script/secret_store.cpp \
+  core/script/consent.cpp \
+  core/script/secure_buffer.cpp \
   core/script/script_bus.cpp \
   core/script/url.cpp \
   core/script/api_bindings.cpp \
@@ -221,6 +234,24 @@ TEST_SRC := \
   tests/test_render.cpp \
   tests/test_sample.cpp \
   tests/test_sigscan.cpp \
+  tests/test_x86_length.cpp \
+  tests/test_hooks.cpp \
+  tests/test_hook_chain.cpp \
+  tests/test_mem.cpp \
+  tests/test_metrics.cpp \
+  tests/test_inflate.cpp \
+  tests/test_netquota.cpp \
+  tests/test_logger.cpp \
+  tests/test_conn_pool.cpp \
+  tests/test_require.cpp \
+  tests/test_debug_endpoint.cpp \
+  tests/test_bytecode_cache.cpp \
+  tests/test_secret_store.cpp \
+  tests/test_consent.cpp \
+  tests/test_secure_buffer.cpp \
+  tests/test_crash.cpp \
+  tests/test_configfile.cpp \
+  tests/test_timers.cpp \
   tests/test_thread.cpp \
   tests/test_fuzz.cpp \
   tests/test_manifest.cpp \

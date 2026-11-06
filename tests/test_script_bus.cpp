@@ -300,8 +300,25 @@ static void TestDeclaredChannelsMatchIdl() {
   CHECK(found);
 }
 
+// Payload schema validation (improvement 67): a declared channel's payload
+// field count must match its declared arity.
+static void TestPayloadSchema() {
+  // A declared channel ("hit") has arity 1: one field.
+  CHECK(ScriptEventBus::ValidatePayload("hit", "12"));
+  CHECK(ScriptEventBus::ValidatePayload("hit", "a:1:b"));
+  CHECK(!ScriptEventBus::ValidatePayload("hit", "1,2"));   // two fields
+  CHECK(!ScriptEventBus::ValidatePayload("hit", ""));      // empty
+  // A script-only channel is unconstrained.
+  CHECK(ScriptEventBus::ValidatePayload("myCustom", ""));
+  CHECK(ScriptEventBus::ValidatePayload("myCustom", "anything,at,all"));
+  // A declared channel with arity 1 refuses a differently-shaped payload on Emit.
+  ScriptEventBus bus;
+  CHECK(bus.Emit("hit", "1,2") == 0);   // schema mismatch -> refused
+}
+
 int main() {
   TestValidation();
+  TestPayloadSchema();
   TestSubscribeAndDeliver();
   TestIdempotentAndOwnership();
   TestOffAllIsScoped();

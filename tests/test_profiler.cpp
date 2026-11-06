@@ -196,6 +196,29 @@ static void TestCrossThreadSpanKeepsStackBalanced() {
   CHECK(p.Flame().children.size() == 3);
 }
 
+// The Chrome trace export (improvement 58) is valid JSON with one event per
+// named span, and is deterministic.
+static void TestChromeTraceExport() {
+  Profiler& p = Profiler::Instance();
+  p.FlameReset();
+  p.SetEnabled(true);
+  { ProfilerScope s("alpha"); SpinMs(1); }
+  { ProfilerScope s("beta"); SpinMs(2); }
+
+  const std::string trace = p.ExportChromeTrace();
+  CHECK(trace.find("\"traceEvents\"") != std::string::npos);
+  CHECK(trace.find("\"alpha\"") != std::string::npos);
+  CHECK(trace.find("\"beta\"") != std::string::npos);
+  CHECK(trace.find("\"ph\":\"X\"") != std::string::npos);
+  // Two events -> exactly two 'X' phase markers.
+  size_t first = trace.find("\"ph\":\"X\"");
+  size_t second = trace.find("\"ph\":\"X\"", first + 1);
+  CHECK(first != std::string::npos && second != std::string::npos);
+  CHECK(trace.find("\"ph\":\"X\"", second + 1) == std::string::npos);
+  // Deterministic: same input, same output.
+  CHECK(p.ExportChromeTrace() == trace);
+}
+
 int main() {
   TestFlatStats();
   TestNestingAndSelfTime();
@@ -205,6 +228,7 @@ int main() {
   TestReset();
   TestDisabledRecordsNothing();
   TestCrossThreadSpanKeepsStackBalanced();
+  TestChromeTraceExport();
   if (g_fail == 0) printf("test_profiler: ALL OK\n");
   return g_fail == 0 ? 0 : 1;
 }

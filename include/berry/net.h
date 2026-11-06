@@ -47,6 +47,33 @@ struct BERRY_API Deadline {
   int remainingMs() const;
 };
 
+/// An address family for Happy-Eyeballs ordering (improvement 45).
+enum class AddrFamily : u8 { V4 = 0, V6 = 1 };
+
+/// Orders a host's resolved addresses for a dual-stack connect (RFC 8305): IPv6
+/// addresses first, then IPv4, each family in the order the resolver returned.
+/// Interleaving a single IPv6 ahead of the IPv4s is the practical behaviour: a
+/// host with working IPv6 is reached over it, and a host without one falls back
+/// to IPv4 after the first attempt fails, without serialising every AAAA
+/// address first. Exposed (and pure) so the ordering is testable without a
+/// network. Returns the indices into `families` in connect order.
+BERRY_API std::vector<size_t> HappyEyeballsOrder(
+    const std::vector<AddrFamily>& families);
+
+/// A forward proxy (improvement 44). The transport opens a TCP connection to the
+/// proxy and then tunnels to the target through it.
+struct BERRY_API ProxyConfig {
+  enum class Kind : u8 { None = 0, HttpConnect, Socks5 };
+  Kind kind = Kind::None;
+  std::string host;   // the proxy host
+  u16 port = 0;       // the proxy port
+  /// Optional SOCKS5 username/password (RFC 1929). Both must be set to use it.
+  std::string username;
+  std::string password;
+
+  bool configured() const { return kind != Kind::None && !host.empty() && port != 0; }
+};
+
 class BERRY_API TcpSocket {
  public:
   TcpSocket();
@@ -57,6 +84,13 @@ class BERRY_API TcpSocket {
   /// As `Connect`, but the connect (including every candidate address) is
   /// bounded by the deadline rather than by a fresh per-address timeout.
   bool Connect(const char* host, u16 port, const Deadline& deadline);
+
+  /// Connects to `host:port` through `proxy` (improvement 44): opens the proxy
+  /// connection, then an HTTP CONNECT or SOCKS5 tunnel to the target. A
+  /// malformed or refused proxy handshake fails closed. A `Kind::None` proxy is
+  /// equivalent to a direct `Connect`.
+  bool ConnectVia(const ProxyConfig& proxy, const char* host, u16 port,
+                  const Deadline& deadline);
   ssize_t Send(const void* data, size_t len);
   /// Sends the whole buffer, bounded by `deadline`. Returns the byte count, -1
   /// on error, or -2 when the deadline passed before everything was sent. A
@@ -141,6 +175,9 @@ struct BERRY_API HttpResponse {
   /// Set when the body hit the request's byte cap and the rest was discarded,
   /// so a caller can tell a complete response from a clipped one.
   bool truncated = false;
+  /// Set when a Content-Encoding (gzip/deflate) could not be decoded, so the
+  /// body is still the encoded bytes (improvement 34).
+  bool encodingFailed = false;
 
   const char* Header(const char* name) const;
   bool ok() const { return status >= 200 && status < 300; }
@@ -176,11 +213,38 @@ class BERRY_API HttpRequest {
 
   HttpResponse Do();
 
+  /// Streams the response body in chunks through `onChunk` instead of buffering
+  /// it whole (improvement 37), for a large download that should not be held in
+  /// memory. `onChunk(data, len)` is called for each read; returning false
+  /// aborts the transfer. `maxBodyBytes` still bounds the TOTAL bytes, so a
+  /// streaming caller cannot be made to read forever. The returned response has
+  /// an empty `body` (the bytes went to the callback) and the same status and
+  /// headers as `Do()`. A Content-Encoding is NOT decoded here (a chunk boundary
+  /// may split a compressed stream), so a streaming caller must ask for
+  /// `Accept-Encoding: identity` if it needs the raw entity.
+  HttpResponse DoStreaming(const std::function<bool(const char*, size_t)>& onChunk);
+
+  /// True when the URL carried a character that must never appear in a request
+  /// line or a header value (CR, LF or NUL). Such a URL is refused outright so
+  /// it can never become a request-splitting injection (bug 32).
+  bool malformed() const { return malformed_; }
+
  private:
+  /// True when `s` contains CR, LF or NUL.
+  static bool HasControl(const std::string& s);
+  /// Parses the authority (`host[:port]`, with an optional `[IPv6]` literal and
+  /// an optional userinfo prefix) into `host_`/`port_`. Returns false on a
+  /// malformed authority or an out-of-range/non-numeric port.
+  bool ParseAuthority(const std::string& authority, u16 defaultPort);
+
   std::string url_, method_ = "GET", body_, host_, path_;
   u16 port_ = 80;
   bool badScheme_ = false;
   bool tls_ = false;
+  bool malformed_ = false;
+  /// True when the port was written explicitly (so Host must carry it even if
+  /// it equals the scheme default) (bug 35).
+  bool explicitPort_ = false;
   /// Default 4 MiB: comfortably larger than any JSON/config response, small
   /// enough that a streaming server cannot exhaust the worker's memory.
   size_t maxBodyBytes_ = 4u * 1024 * 1024;
@@ -218,12 +282,17 @@ struct BERRY_API WsFrameView {
 };
 
 // Parses a WebSocket frame from an in-memory buffer. Fail closed: returns
-// Invalid for reserved opcodes, RSV bits, or malformed control frames
-// (control frames must be <=125 bytes and FIN). `maxPayload` guards against
-// oversized frame bombs.
+// Invalid for reserved opcodes, RSV bits, malformed control frames (control
+// frames must be <=125 bytes and FIN), a masked frame (a client never receives
+// one from a compliant server) and a non-minimal length encoding. `maxPayload`
+// guards against oversized frame bombs.
 BERRY_API WsFrameStatus ParseWsFrame(const u8* data, size_t len,
                                      WsFrameView* out,
                                      u64 maxPayload = 16u * 1024 * 1024);
+
+/// The Sec-WebSocket-Accept value for a client key: base64(SHA1(key + GUID)).
+/// Exposed so a test can pin it against RFC6455 §1.3.
+BERRY_API std::string WsAcceptFor(const std::string& key);
 
 struct BERRY_API WsMessage {
   WsOpcode opcode = WsOpcode::Text;
@@ -260,9 +329,16 @@ class BERRY_API WebSocket {
   /// True when the connection was opened over `wss://`.
   bool isTls() const { return tls_; }
 
+  /// Enable automatic keepalive pings every `intervalMs` (improvement 51). A
+  /// value of 0 disables them. The ping is sent from Pump when the interval has
+  /// elapsed since the last send, so a quiet connection is kept alive without
+  /// the caller doing anything.
+  void SetKeepalive(int intervalMs) { keepaliveMs_ = intervalMs; }
+  /// Send a pong automatically in reply to a ping (on by default).
+  void SetAutoPong(bool on) { autoPong_ = on; }
+
  private:
   bool SendFrame(WsOpcode op, const void* payload, size_t len);
-  void HandleCloseFrame(const WsMessage& frame);
 
   /// Transport dispatch: the connection is either a plaintext `TcpSocket` or a
   /// verified `TlsSocket`. One of the two is live at a time; these keep the
@@ -272,13 +348,32 @@ class BERRY_API WebSocket {
   bool StreamWaitReadable(const Deadline& dl);
   void StreamClose();
 
+  /// Reads exactly `n` bytes into `out`, appending. False on error/timeout.
+  bool RecvInto(std::string* out, size_t n, const Deadline& dl);
+
   std::unique_ptr<TcpSocket> sock_;
   std::unique_ptr<TlsSocket> tlsSock_;
   bool tls_ = false;
   std::mutex sendMutex_;
   std::string err_;
   bool open_ = false;
-  u64 frameSeq_ = 0;
+  /// Bytes received after the handshake terminator (and any partial frame),
+  /// carried into the frame reader so a frame that arrived in the same read as
+  /// the 101 response is not lost (bug 43).
+  std::vector<u8> rxBuf_;
+  /// True once we have sent a close frame, so a second Close does not resend.
+  bool closeSent_ = false;
+  /// Fragmentation reassembly (improvement 51): a text/binary message split
+  /// across frames is buffered here until the FIN frame arrives, with a cap so
+  /// a peer cannot grow it without bound.
+  std::vector<u8> fragBuf_;
+  u8 fragOpcode_ = 0;
+  bool fragmenting_ = false;
+  static constexpr size_t kMaxMessage = 16u * 1024 * 1024;
+  /// Keepalive ping interval in ms (0 = off) and the time of the last send.
+  int keepaliveMs_ = 0;
+  u64 lastSendMs_ = 0;
+  bool autoPong_ = true;
 
   WsOpenCb onOpen_;
   WsMessageCb onMessage_;

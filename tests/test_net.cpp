@@ -47,6 +47,228 @@ int main() {
     server.Stop();
   }
 
+  // --- SOCKS5 proxy tunnel (improvement 44) ---
+  {
+    TinySocks5Server socks;
+    int sp = socks.Start(18090);
+    CHECK(sp > 0);
+    if (sp > 0) {
+      TcpSocket s;
+      ProxyConfig proxy;
+      proxy.kind = ProxyConfig::Kind::Socks5;
+      proxy.host = "127.0.0.1";
+      proxy.port = (u16)sp;
+      Deadline dl = Deadline::After(3000);
+      CHECK(s.ConnectVia(proxy, "example.com", 80, dl));
+      CHECK(s.fd() >= 0);
+      // The echo proves the tunnel is open end to end.
+      const char* msg = "through-the-proxy";
+      CHECK(s.SendAll(msg, strlen(msg), dl) == (ssize_t)strlen(msg));
+      char back[64] = {0};
+      ssize_t got = s.Recv(back, sizeof back - 1, dl);
+      CHECK(got == (ssize_t)strlen(msg));
+      CHECK(std::string(back, (size_t)got) == msg);
+      s.Close();
+      socks.Stop();
+    }
+    // A Kind::None proxy is a direct connect.
+    ProxyConfig none;
+    CHECK(!none.configured());
+  }
+
+  // --- Happy Eyeballs candidate ordering (improvement 45) ---
+  {
+    using AF = AddrFamily;
+    // All IPv4: order preserved.
+    auto a = HappyEyeballsOrder({AF::V4, AF::V4, AF::V4});
+    CHECK(a.size() == 3 && a[0] == 0 && a[1] == 1 && a[2] == 2);
+    // IPv6 present: the first IPv6 leads, then all IPv4, then remaining IPv6.
+    auto b = HappyEyeballsOrder({AF::V4, AF::V6, AF::V4, AF::V6});
+    CHECK(b.size() == 4);
+    CHECK(b[0] == 1);                 // first IPv6 leads
+    CHECK(b[1] == 0 && b[2] == 2);    // then the IPv4s in order
+    CHECK(b[3] == 3);                 // then the remaining IPv6
+    // IPv6 only.
+    auto c = HappyEyeballsOrder({AF::V6, AF::V6});
+    CHECK(c.size() == 2 && c[0] == 0 && c[1] == 1);
+    // Empty.
+    CHECK(HappyEyeballsOrder({}).empty());
+  }
+
+  // --- HTTP authority parsing (bugs 32-35) ---
+  {
+    // IPv6 literal: the bracketed address is the host and the trailing port is
+    // parsed, not folded into the host (bug 33).
+    HttpRequest v6("http://[::1]:8080/p");
+    CHECK(v6.host() == "::1");
+    CHECK(v6.port() == 8080);
+    CHECK(!v6.malformed());
+
+    // IPv6 with no port keeps the scheme default.
+    HttpRequest v6b("http://[2001:db8::1]/p");
+    CHECK(v6b.host() == "2001:db8::1");
+    CHECK(v6b.port() == 80);
+
+    // userinfo is dropped from the authority.
+    HttpRequest ui("http://user:pass@example.com:81/p");
+    CHECK(ui.host() == "example.com");
+    CHECK(ui.port() == 81);
+
+    // A junk or out-of-range port is refused, not truncated (bug 34).
+    HttpRequest badPort("http://example.com:70000/");
+    CHECK(badPort.malformed());
+    HttpRequest junkPort("http://example.com:abc/");
+    CHECK(junkPort.malformed());
+    HttpRequest zeroPort("http://example.com:0/");
+    CHECK(zeroPort.malformed());
+
+    // A control character in the URL is refused (bug 32).
+    HttpRequest crlf("http://example.com/\r\nX-Evil: 1");
+    CHECK(crlf.malformed());
+    CHECK(crlf.Do().status == 0);
+
+    // A CR/LF header is dropped rather than sent.
+    HttpRequest hdr("http://example.com/");
+    hdr.Header("X-Ok", "fine").Header("X-Evil", "a\r\nX-Injected: 1");
+    // (The header is dropped at insert time; the request still works.)
+
+    // Explicit default port still appears in Host (bug 35) - verified via the
+    // server echo below.
+  }
+
+  // --- HTTP body framing (bugs 30, 31, 37) ---
+  {
+    TinyFramingServer fs;
+    int fport = fs.Start(18085);
+    CHECK(fport > 0);
+    if (fport > 0) {
+      std::string base = "http://127.0.0.1:" + std::to_string(fport);
+
+      HttpRequest c((base + "/chunked").c_str());
+      HttpResponse cr = c.Do();
+      CHECK(cr.status == 200);
+      CHECK(cr.body == "Hello, chunked world!");   // decoded, size lines gone
+      CHECK(!cr.truncated);
+
+      HttpRequest s((base + "/short").c_str());
+      HttpResponse sr = s.Do();
+      CHECK(sr.status == 200);
+      CHECK(sr.truncated);                          // short body flagged
+
+      HttpRequest d((base + "/dup").c_str());
+      HttpResponse dr = d.Do();
+      CHECK(dr.status == 200);
+      const char* xa = dr.Header("x-a");
+      CHECK(xa != nullptr && std::string(xa) == "one, two");   // combined
+
+      HttpRequest f((base + "/fold").c_str());
+      HttpResponse fr = f.Do();
+      CHECK(fr.status == 200);
+      const char* xb = fr.Header("x-b");
+      CHECK(xb != nullptr && std::string(xb) == "alpha beta");  // unfolded
+
+      HttpRequest bs((base + "/badstatus").c_str());
+      HttpResponse bsr = bs.Do();
+      CHECK(bsr.status == 0);                       // strict status parse
+
+      // A gzip-encoded body is decoded (improvement 34).
+      HttpRequest gz((base + "/gzip").c_str());
+      HttpResponse gzr = gz.Do();
+      CHECK(gzr.status == 200);
+      CHECK(gzr.body == "hello gzip");
+      CHECK(!gzr.encodingFailed);
+
+      // A streaming request delivers the body in chunks and does not buffer it
+      // (improvement 37).
+      {
+        HttpRequest st((base + "/big").c_str());
+        st.MaxBodyBytes(64 * 1024);
+        std::string streamed;
+        int chunks = 0;
+        HttpResponse sr = st.DoStreaming([&](const char* d, size_t n) {
+          ++chunks;
+          streamed.append(d, n);
+          return true;
+        });
+        CHECK(sr.status == 200);
+        CHECK(sr.body.empty());              // the bytes went to the callback
+        CHECK(!streamed.empty());
+        CHECK(chunks >= 1);
+        // /big is 256 KiB; the 64 KiB cap means no more than that is delivered.
+        CHECK(streamed.size() <= 64 * 1024);
+        CHECK(sr.truncated || streamed.size() == 64 * 1024);
+      }
+
+      // An aborting callback stops the transfer early.
+      {
+        HttpRequest st((base + "/big").c_str());
+        st.MaxBodyBytes(256 * 1024);
+        size_t delivered = 0;
+        HttpResponse sr = st.DoStreaming([&](const char*, size_t n) {
+          delivered += n;
+          return false;   // stop after the first chunk
+        });
+        CHECK(sr.status == 200);
+        CHECK(delivered > 0);
+        CHECK(delivered <= 256 * 1024);
+      }
+      fs.Stop();
+    }
+  }
+
+  // --- WebSocket handshake verification (bugs 38, 39) ---
+  {
+    // RFC6455 §1.3 vector: the key below must produce the published accept.
+    CHECK(WsAcceptFor("dGhlIHNhbXBsZSBub25jZQ==") ==
+          "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+
+    TinyBadWsServer bad;
+    int bp = bad.Start(18086);
+    CHECK(bp > 0);
+    if (bp > 0) {
+      WebSocket c;
+      // A 101 with the wrong accept must be refused.
+      CHECK(!c.Connect((std::string("ws://127.0.0.1:") + std::to_string(bp)).c_str(), 2000));
+      CHECK(!c.IsOpen());
+      bad.Stop();
+    }
+
+    TinyNoUpgradeWsServer nou;
+    int np = nou.Start(18087);
+    CHECK(np > 0);
+    if (np > 0) {
+      WebSocket c;
+      // A 101 without Upgrade/Connection headers must be refused.
+      CHECK(!c.Connect((std::string("ws://127.0.0.1:") + std::to_string(np)).c_str(), 2000));
+      CHECK(!c.IsOpen());
+      nou.Stop();
+    }
+  }
+
+  // --- WebSocket fragmentation reassembly (improvement 51) ---
+  {
+    TinyWsFragmentServer frag;
+    int fp = frag.Start(18088);
+    CHECK(fp > 0);
+    if (fp > 0) {
+      WebSocket c;
+      std::string got;
+      bool done = false;
+      c.OnMessage([&](const WsMessage& m) {
+        if (m.opcode == WsOpcode::Text) { got = m.text(); done = true; }
+      });
+      CHECK(c.Connect((std::string("ws://127.0.0.1:") + std::to_string(fp)).c_str(), 2000));
+      for (int i = 0; i < 20 && !done; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        c.Pump();
+      }
+      CHECK(done);
+      CHECK(got == "hello world");   // the two fragments reassembled in order
+      c.Close();
+      frag.Stop();
+    }
+  }
+
   // --- WebSocket loopback (echo) ---
   TinyWsServer ws;
   int wsPort = ws.Start(18082);
@@ -229,9 +451,79 @@ int main() {
         }
         CHECK(got.find("tls-pong") != std::string::npos);
         CHECK(got.rfind("HTTP/1.1 200", 0) == 0);
+        // The peer's pin hash is available after a handshake (improvement 42).
+        const std::string spki = s.PeerSpkiSha256();
+        CHECK(spki.size() == 64);
         s.Close();
       }
       tls.Stop();
+    }
+
+    // Certificate pinning (improvement 42): a wrong pin must refuse the
+    // handshake even though the chain and hostname verify; the right pin (the
+    // one observed above) must accept it.
+    {
+      // The loopback TLS server accepts one connection then stops, so each
+      // connect gets a fresh server.
+      std::string goodPin;
+      {
+        berry_test::TinyTlsServer srv;
+        const int p = srv.Start(0);
+        CHECK(p > 0);
+        if (p > 0) {
+          TlsSocket s;
+          Deadline dl = Deadline::After(5000);
+          CHECK(s.Connect("localhost", (u16)p, dl));
+          goodPin = s.PeerSpkiSha256();
+          s.Close();
+          srv.Stop();
+        }
+      }
+      CHECK(goodPin.size() == 64);
+      // A wrong pin is refused (chain + hostname still verify, so this proves
+      // the pin is what refused it).
+      {
+        TlsSocket::SetPin("localhost", {"00" + std::string(62, '0')});
+        berry_test::TinyTlsServer srv;
+        const int p = srv.Start(0);
+        CHECK(p > 0);
+        if (p > 0) {
+          TlsSocket s;
+          Deadline dl = Deadline::After(5000);
+          CHECK(!s.Connect("localhost", (u16)p, dl));
+          CHECK(!s.valid());
+          srv.Stop();
+        }
+      }
+      // The right pin is accepted.
+      {
+        TlsSocket::SetPin("localhost", {goodPin});
+        berry_test::TinyTlsServer srv;
+        const int p = srv.Start(0);
+        CHECK(p > 0);
+        if (p > 0) {
+          TlsSocket s;
+          Deadline dl = Deadline::After(5000);
+          CHECK(s.Connect("localhost", (u16)p, dl));
+          s.Close();
+          srv.Stop();
+        }
+      }
+      // Clearing the pin falls back to normal verification.
+      TlsSocket::ClearPins();
+      CHECK(TlsSocket::Pins("localhost").empty());
+      {
+        berry_test::TinyTlsServer srv;
+        const int p = srv.Start(0);
+        CHECK(p > 0);
+        if (p > 0) {
+          TlsSocket s;
+          Deadline dl = Deadline::After(5000);
+          CHECK(s.Connect("localhost", (u16)p, dl));
+          s.Close();
+          srv.Stop();
+        }
+      }
     }
 
     // A handshake to a name the certificate is NOT for must fail: hostname

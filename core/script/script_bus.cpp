@@ -61,6 +61,25 @@ bool ScriptEventBus::ValidHandler(const std::string& handler) {
   return true;
 }
 
+bool ScriptEventBus::ValidatePayload(const std::string& channel,
+                                     const std::string& payload) {
+  // Find the declared arity for the channel, if it is declared at all.
+  const api::EventSpec* specs = api::EventSpecs();
+  int arity = -1;
+  for (size_t i = 0; i < api::EventSpecCount(); ++i) {
+    if (channel == specs[i].name) { arity = specs[i].arity; break; }
+  }
+  if (arity < 0) return true;         // script-only channel: unconstrained
+  if (arity == 0) return payload.empty();
+  if (payload.empty()) return false;  // a non-zero arity needs a payload
+  // The payload is a comma-separated field list; the field count must match.
+  int fields = 1;
+  for (char c : payload) {
+    if (c == ',') ++fields;
+  }
+  return fields == arity;
+}
+
 ScriptEventBus::~ScriptEventBus() {
   // Drop every engine listener this bus installed. A listener holds a closure
   // over `this`, so leaving one registered would call into a destroyed bus.
@@ -213,6 +232,15 @@ std::vector<std::string> ScriptEventBus::Channels() const {
 size_t ScriptEventBus::Emit(const std::string& channel,
                             const std::string& payload) {
   if (!ValidChannel(channel)) return 0;
+  // Validate against the declared schema (improvement 67): a declared channel's
+  // payload is a comma-separated field list of the declared arity, so a
+  // publisher cannot send a differently-shaped payload that a subscriber would
+  // then mis-read. A script-only channel is unconstrained.
+  if (!ValidatePayload(channel, payload)) {
+    Log::Warn("script bus: payload for '%s' does not match the declared schema",
+              channel.c_str());
+    return 0;
+  }
   if (IsDeclaredChannel(channel)) {
     // A declared channel goes out on the engine bus, so an engine emitter and a
     // script emitter reach subscribers by the same path (and the bus listener

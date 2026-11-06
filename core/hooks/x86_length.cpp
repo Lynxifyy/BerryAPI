@@ -84,7 +84,11 @@ Imm OneByteImm(u8 op) {
     case 0x05: case 0x0D: case 0x15: case 0x1D:
     case 0x25: case 0x2D: case 0x35: case 0x3D:
       return kIz;
-    case 0x68: case 0x69: case 0xE8: case 0xE9: case 0x9A: case 0xEA:
+    // 0x68 (push imm) and 0x69 (imul r,rm,imm) take an imm16 under a 0x66
+    // operand-size prefix and an imm32 otherwise: the Iz rule, not imm32.
+    case 0x68: case 0x69:
+      return kIz;
+    case 0xE8: case 0xE9: case 0x9A: case 0xEA:
       return kId;
     case 0x80: case 0x83: case 0xA8: case 0xC0: case 0xC1:
     case 0xC6: case 0xCD: case 0xD4: case 0xD5:
@@ -163,11 +167,13 @@ X86InsnInfo X86DecodeInsn(const u8* code, size_t maxLen) {
 
   const u8 op = code[i++];
   bool hasModrm = false;
+  bool terminal = false;
   Imm imm = kNone;
 
   if (op == 0x0F) {
     if (i >= maxLen) return out;
     const u8 op2 = code[i++];
+    if (op2 == 0x0B) terminal = true;   // ud2
     if (op2 == 0x38) {
       if (i >= maxLen) return out;
       ++i;                       // third opcode byte
@@ -177,23 +183,28 @@ X86InsnInfo X86DecodeInsn(const u8* code, size_t maxLen) {
       ++i;                       // third opcode byte
       hasModrm = true;
       imm = kIb;
+    } else if (op2 >= 0x80 && op2 <= 0x8F) {
+      // 0x0F 0x8x is Jcc rel32: no ModRM, and the whole operand is the
+      // displacement.
+      isRelBranch = true;
+      imm = kId;
     } else {
       hasModrm = !TwoByteNoModrm(op2);
       imm = TwoByteImm(op2);
-      // 0x0F 0x8x is Jcc rel32.
-      if (op2 >= 0x80 && op2 <= 0x8F) isRelBranch = true;
     }
   } else if (op == 0xC4 || op == 0xC5 || op == 0x62) {
     // VEX (C4/C5) and EVEX (62) are not decoded: refuse rather than guess.
     return out;
   } else {
     hasModrm = !OneByteNoModrm(op);
-    imm = OneByteImm(op);
     // rel8/rel32 branches and calls, plus the rel8 loop forms.
-    if (op == 0xE8 || op == 0xE9) isRelBranch = true;
-    if (op == 0xEB) { isRelBranch = true; rel8 = true; }
-    if (op >= 0x70 && op <= 0x7F) { isRelBranch = true; rel8 = true; }
-    if (op >= 0xE0 && op <= 0xE3) { isRelBranch = true; rel8 = true; }
+    if (op == 0xE8 || op == 0xE9) { isRelBranch = true; imm = kId; }
+    else if (op == 0xEB) { isRelBranch = true; rel8 = true; imm = kIb; }
+    else if (op >= 0x70 && op <= 0x7F) { isRelBranch = true; rel8 = true; imm = kIb; }
+    else if (op >= 0xE0 && op <= 0xE3) { isRelBranch = true; rel8 = true; imm = kIb; }
+    else if (!hasModrm) imm = OneByteImm(op);
+    // With a ModRM byte the immediate (if any) follows ModRM/SIB/disp, so it is
+    // filled in below rather than here.
   }
 
   bool ripRel = false;
@@ -209,8 +220,15 @@ X86InsnInfo X86DecodeInsn(const u8* code, size_t maxLen) {
         if (i >= maxLen) return out;
         const u8 sib = code[i++];
         const u8 base = sib & 0x07;
-        if (mod == 0 && base == 5) i += 4;
-        else if (mod == 1) i += 1;
+        if (mod == 0 && base == 5) {
+          // In 64-bit mode `mod=00, rm=100 (SIB), base=101` is a RIP-relative
+          // [disp32] operand, not an absolute one: the displacement is measured
+          // from the end of the instruction and must be rebased when the
+          // instruction is relocated.
+          ripRel = true;
+          relocOffset = i;
+          i += 4;
+        } else if (mod == 1) i += 1;
         else if (mod == 2) i += 4;
       } else {
         if (mod == 0 && rm == 5) { ripRel = true; relocOffset = i; i += 4; }
@@ -223,6 +241,9 @@ X86InsnInfo X86DecodeInsn(const u8* code, size_t maxLen) {
       const u8 reg = (modrm >> 3) & 0x07;
       if (reg <= 1) imm = (op == 0xF6) ? kIb : kIz;
     }
+    // For every other ModRM opcode the immediate (when the table names one)
+    // comes after ModRM/SIB/disp, so it was deliberately not filled above.
+    if (imm == kNone && op != 0x0F) imm = OneByteImm(op);
   }
 
   // A rel32 branch's displacement is the first 4 bytes of its immediate.
@@ -240,10 +261,29 @@ X86InsnInfo X86DecodeInsn(const u8* code, size_t maxLen) {
   }
 
   if (i > maxLen || i > 15) return out;
+
+  // Instructions after which control does not fall through, so the prologue
+  // walk must stop at one: decoding past a terminal instruction reads the next
+  // function, and a patch that overwrote those bytes would corrupt a neighbour.
+  switch (op) {
+    case 0xC2: case 0xC3:            // ret imm16 / ret
+    case 0xCA: case 0xCB:            // retf imm16 / retf
+    case 0xCC: case 0xCD:            // int3 / int imm8
+    case 0xCE: case 0xCF:            // into / iret
+    case 0xF1: case 0xF4:            // int1 / hlt
+    case 0xEB: case 0xE9:            // jmp rel8 / jmp rel32
+    case 0xEA:                       // jmpf (invalid in 64-bit, still terminal)
+      terminal = true;
+      break;
+    default:
+      break;
+  }
+
   out.length = i;
   out.ripRelative = ripRel;
   out.relative = isRelBranch;
   out.rel8Branch = rel8;
+  out.terminal = terminal;
   out.relocOffset = relocOffset;
   out.relocSize = (ripRel || (isRelBranch && !rel8)) ? 4 : 0;
   return out;

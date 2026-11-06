@@ -37,6 +37,11 @@ struct BERRY_API ReloadResult {
   bool compileFailed = false;  // the new revision failed to load
   bool stateRestored = false;  // state handoff succeeded
   bool unchanged = false;      // revision matched; nothing to do
+  /// True when the outgoing and incoming scripts declared different state
+  /// schema versions, so the old state was deliberately dropped and the script
+  /// starts from defaults (improvement 69). A script that changes its state
+  /// shape bumps the version and migrates explicitly in `on_load`.
+  bool stateSchemaChanged = false;
   u64 elapsedMs = 0;           // wall-clock cost of the swap
   ScriptError error;           // populated when compileFailed
 };

@@ -66,10 +66,18 @@ struct BERRY_API RoomTokenClientConfig {
   /// The backend base URL, e.g. "https://presence.example.com". Must be https:
   /// a token over plaintext would hand the room secret to anything on the path.
   std::string baseUrl;
-  /// The backend's Ed25519 public key (hex, 32 bytes). When set, the token's
-  /// signature is required and verified. When empty, only TLS authenticates the
-  /// token — acceptable for a deployment that terminates TLS at the backend.
+  /// The backend's Ed25519 public key (hex, 32 bytes). A token's signature is
+  /// required and verified against this key. When it is empty, verification
+  /// FAILS CLOSED unless `allowUnsigned` is set explicitly, so a missing key is
+  /// never silently read as "no signature needed" (bug 53).
   std::string backendPublicKeyHex;
+  /// Opt in to accepting an unsigned token authenticated by TLS alone. This must
+  /// be set deliberately; without it an empty key refuses every token.
+  bool allowUnsigned = false;
+  /// Opt in to a relay host inside a loopback / link-local / private range. The
+  /// default refuses such a host so a malicious token cannot pivot into the
+  /// client's LAN (bug 56).
+  bool allowPrivateRelayHost = false;
   /// The request timeout in milliseconds (an absolute deadline for the whole
   /// request, like every other Berry request).
   int timeoutMs = 8000;

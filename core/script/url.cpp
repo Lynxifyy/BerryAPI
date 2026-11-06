@@ -89,37 +89,54 @@ bool ParseIpv6(const std::string& host, unsigned short out[8]) {
     i = colon + 1;
   }
 
+  // Write the groups into `out` starting at `offset`, advancing the write
+  // cursor by however many 16-bit words each group occupies. An embedded IPv4
+  // ("::ffff:192.168.0.1") fills TWO words but is one group, so the cursor must
+  // advance by two — indexing by group number misplaces every later word
+  // (bug 59). It also validates that the whole 8-word region is written.
   auto fill = [](const std::vector<std::string>& groups, size_t offset,
-                 unsigned short* out) -> bool {
-    for (size_t g = 0; g < groups.size(); ++g) {
-      const std::string& s = groups[g];
+                 unsigned short* out, size_t* written) -> bool {
+    size_t w = offset;
+    for (const std::string& s : groups) {
       if (s.find('.') != std::string::npos) {
         unsigned char v4[4];
         if (!ParseIpv4(s, v4)) return false;
-        out[offset + g] = (unsigned short)((v4[0] << 8) | v4[1]);
-        out[offset + g + 1] = (unsigned short)((v4[2] << 8) | v4[3]);
+        if (w + 1 >= 8) return false;
+        out[w] = (unsigned short)((v4[0] << 8) | v4[1]);
+        out[w + 1] = (unsigned short)((v4[2] << 8) | v4[3]);
+        w += 2;
         continue;
       }
-      if (s.size() > 4) return false;
+      if (s.empty() || s.size() > 4) return false;
       for (char c : s) {
         if (!std::isxdigit((unsigned char)c)) return false;
       }
-      out[offset + g] = (unsigned short)std::strtoul(s.c_str(), nullptr, 16);
+      if (w >= 8) return false;
+      out[w] = (unsigned short)std::strtoul(s.c_str(), nullptr, 16);
+      ++w;
     }
+    *written = w - offset;
     return true;
   };
 
-  size_t total = 0;
-  for (const auto& s : head) total += (s.find('.') != std::string::npos) ? 2 : 1;
-  for (const auto& s : tail) total += (s.find('.') != std::string::npos) ? 2 : 1;
+  auto wordCount = [](const std::vector<std::string>& gs) {
+    size_t n = 0;
+    for (const auto& s : gs) n += (s.find('.') != std::string::npos) ? 2 : 1;
+    return n;
+  };
+  const size_t headWords = wordCount(head);
+  const size_t total = headWords + wordCount(tail);
 
+  size_t written = 0;
   if (dcolon == std::string::npos) {
     if (total != 8) return false;
-    return fill(head, 0, out);
+    if (!fill(head, 0, out, &written)) return false;
+    return written == 8;
   }
   if (total >= 8) return false;
-  if (!fill(head, 0, out)) return false;
-  if (!fill(tail, 8 - total, out)) return false;
+  if (!fill(head, 0, out, &written)) return false;
+  if (written != headWords) return false;
+  if (!fill(tail, 8 - total, out, &written)) return false;
   return true;
 }
 

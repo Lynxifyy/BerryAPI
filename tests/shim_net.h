@@ -1,5 +1,6 @@
 #pragma once
 #include "berry/types.h"
+#include "berry/net.h"   // WsAcceptFor: the test WS server computes the accept
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -160,6 +161,68 @@ class TinyHttpServer final : public TinyTcpAcceptor {
     ::send(conn, resp.data(), resp.size(), MSG_NOSIGNAL);
   }
 };
+/// A server that answers each path with a specific framing, to exercise the
+/// client's strict body handling: chunked transfer-encoding, a Content-Length
+/// that promises more than is sent (a truncated body), duplicate headers and an
+/// obsolete line fold.
+class TinyFramingServer final : public TinyTcpAcceptor {
+ protected:
+  void Handle(int conn) override {
+    std::string req = RecvUntil(conn, "\r\n\r\n", 2000);
+    if (req.empty()) return;
+    std::string resp;
+    if (req.rfind("GET /chunked", 0) == 0) {
+      // "Hello, " + "chunked world!" in two chunks.
+      resp = "HTTP/1.1 200 OK\r\n"
+             "Transfer-Encoding: chunked\r\n"
+             "Connection: close\r\n\r\n"
+             "7\r\nHello, \r\n"
+             "e\r\nchunked world!\r\n"
+             "0\r\n\r\n";
+    } else if (req.rfind("GET /short", 0) == 0) {
+      // Content-Length 100 but only 5 bytes are sent, then the socket closes.
+      resp = "HTTP/1.1 200 OK\r\n"
+             "Content-Length: 100\r\n"
+             "Connection: close\r\n\r\n"
+             "short";
+    } else if (req.rfind("GET /dup", 0) == 0) {
+      resp = "HTTP/1.1 200 OK\r\n"
+             "X-A: one\r\n"
+             "X-A: two\r\n"
+             "Content-Length: 2\r\n"
+             "Connection: close\r\n\r\nok";
+    } else if (req.rfind("GET /fold", 0) == 0) {
+      resp = "HTTP/1.1 200 OK\r\n"
+             "X-B: alpha\r\n"
+             "  beta\r\n"
+             "Content-Length: 2\r\n"
+             "Connection: close\r\n\r\nok";
+    } else if (req.rfind("GET /gzip", 0) == 0) {
+      // A gzip-encoded "hello gzip" (CRC-verified by the client's inflater).
+      const unsigned char gz[] = {0x1f,0x8b,0x08,0x00,0x00,0x00,0x00,0x00,0x02,0xff,
+                                  0xcb,0x48,0xcd,0xc9,0xc9,0x57,0x48,0xaf,0xca,0x2c,
+                                  0x00,0x00,0x19,0x6a,0xd2,0xdf,0x0a,0x00,0x00,0x00};
+      std::string body((const char*)gz, sizeof gz);
+      resp = "HTTP/1.1 200 OK\r\n"
+             "Content-Encoding: gzip\r\n"
+             "Content-Length: " + std::to_string(body.size()) + "\r\n"
+             "Connection: close\r\n\r\n" + body;
+    } else if (req.rfind("GET /big", 0) == 0) {
+      // A 256 KiB body, so a streaming client with a smaller cap is truncated.
+      std::string big(256u * 1024, 'y');
+      resp = "HTTP/1.1 200 OK\r\n"
+             "Content-Type: application/octet-stream\r\n"
+             "Content-Length: " + std::to_string(big.size()) + "\r\n"
+             "Connection: close\r\n\r\n" + big;
+    } else if (req.rfind("GET /badstatus", 0) == 0) {
+      resp = "HTTP/1.1 XX OK\r\nContent-Length: 0\r\n\r\n";
+    } else {
+      resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+    }
+    ::send(conn, resp.data(), resp.size(), MSG_NOSIGNAL);
+  }
+};
+
 /// A server that answers with valid HTTP headers and then dribbles the body
 /// one byte at a time, just slower than a client's per-read timeout. It exists
 /// to pin the difference between a per-read timeout (which it defeats: the read
@@ -194,6 +257,88 @@ class TinySlowDripServer final : public TinyTcpAcceptor {
   int dripMs_;
 };
 
+/// A WebSocket server that answers 101 but with a wrong Sec-WebSocket-Accept,
+/// so the client's accept verification (bug 38) can be exercised.
+class TinyBadWsServer final : public TinyTcpAcceptor {
+ protected:
+  void Handle(int conn) override {
+    std::string handshake = RecvUntil(conn, "\r\n\r\n", 4000);
+    if (handshake.empty()) return;
+    std::string resp = "HTTP/1.1 101 Switching Protocols\r\n"
+        "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+        "Sec-WebSocket-Accept: AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH=\r\n\r\n";
+    ::send(conn, resp.data(), resp.size(), MSG_NOSIGNAL);
+  }
+};
+
+/// A WebSocket server that answers 101 with the correct accept but without the
+/// Upgrade/Connection headers, to prove the handshake check is not just the
+/// status line.
+class TinyNoUpgradeWsServer final : public TinyTcpAcceptor {
+ protected:
+  void Handle(int conn) override {
+    std::string handshake = RecvUntil(conn, "\r\n\r\n", 4000);
+    if (handshake.empty()) return;
+    std::string key;
+    const std::string kn = "Sec-WebSocket-Key:";
+    size_t p = handshake.find(kn);
+    if (p != std::string::npos) {
+      size_t v = p + kn.size();
+      size_t e = handshake.find("\r\n", v);
+      key = handshake.substr(v, e - v);
+      size_t b = key.find_first_not_of(" \t");
+      size_t en = key.find_last_not_of(" \t\r");
+      if (b != std::string::npos) key = key.substr(b, en - b + 1);
+    }
+    std::string resp = "HTTP/1.1 101 Switching Protocols\r\n"
+        "Sec-WebSocket-Accept: " + Berry::WsAcceptFor(key) + "\r\n\r\n";
+    ::send(conn, resp.data(), resp.size(), MSG_NOSIGNAL);
+  }
+};
+
+/// A WebSocket server that answers the handshake and then sends one text
+/// message split across two frames (a FIN=0 text frame and a FIN=1 continuation
+/// with no mask), so the client's fragmentation reassembly can be exercised
+/// (improvement 51).
+class TinyWsFragmentServer final : public TinyTcpAcceptor {
+ protected:
+  void Handle(int conn) override {
+    std::string handshake = RecvUntil(conn, "\r\n\r\n", 4000);
+    if (handshake.empty()) return;
+    std::string key;
+    const std::string kn = "Sec-WebSocket-Key:";
+    size_t p = handshake.find(kn);
+    if (p != std::string::npos) {
+      size_t v = p + kn.size();
+      size_t e = handshake.find("\r\n", v);
+      key = handshake.substr(v, e - v);
+      size_t b = key.find_first_not_of(" \t");
+      size_t en = key.find_last_not_of(" \t\r");
+      if (b != std::string::npos) key = key.substr(b, en - b + 1);
+    }
+    std::string resp = "HTTP/1.1 101 Switching Protocols\r\n"
+        "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+        "Sec-WebSocket-Accept: " + Berry::WsAcceptFor(key) + "\r\n\r\n";
+    ::send(conn, resp.data(), resp.size(), MSG_NOSIGNAL);
+
+    // "hello " (FIN=0, text) then "world" (FIN=1, continuation), unmasked.
+    const char* part1 = "hello ";
+    const char* part2 = "world";
+    std::string f1;
+    f1.push_back((char)0x01);            // FIN=0, opcode=1 (text)
+    f1.push_back((char)strlen(part1));
+    f1 += part1;
+    std::string f2;
+    f2.push_back((char)0x80);            // FIN=1, opcode=0 (continuation)
+    f2.push_back((char)strlen(part2));
+    f2 += part2;
+    ::send(conn, f1.data(), f1.size(), MSG_NOSIGNAL);
+    ::send(conn, f2.data(), f2.size(), MSG_NOSIGNAL);
+    // Keep the socket open briefly so the client's two Pumps can read both.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+};
+
 class TinyWsServer final : public TinyTcpAcceptor {
  protected:
   void Handle(int conn) override {
@@ -201,9 +346,23 @@ class TinyWsServer final : public TinyTcpAcceptor {
     std::string handshake = RecvUntil(conn, "\r\n\r\n", 4000);
     if (handshake.find("Upgrade: websocket") == std::string::npos &&
         handshake.find("upgrade: websocket") == std::string::npos) return;
+    // Compute the accept value from the client's key, as RFC6455 §4.2.2
+    // requires; the client now verifies it.
+    std::string key;
+    const std::string kn = "Sec-WebSocket-Key:";
+    size_t p = handshake.find(kn);
+    if (p != std::string::npos) {
+      size_t v = p + kn.size();
+      size_t e = handshake.find("\r\n", v);
+      key = handshake.substr(v, e - v);
+      size_t b = key.find_first_not_of(" \t");
+      size_t en = key.find_last_not_of(" \t\r");
+      if (b != std::string::npos) key = key.substr(b, en - b + 1);
+    }
+    std::string accept = Berry::WsAcceptFor(key);
     std::string resp = "HTTP/1.1 101 Switching Protocols\r\n"
         "Upgrade: websocket\r\nConnection: Upgrade\r\n"
-        "Sec-WebSocket-Accept: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+        "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
     ::send(conn, resp.data(), resp.size(), MSG_NOSIGNAL);
 
     // Read exactly one frame (header + optional ext len + mask + payload).
@@ -359,5 +518,41 @@ class TinyJsonRpcServer final : public TinyTcpAcceptor {
       else if (c == close) { if (--depth == 0) { ++e; break; } }
     }
     return s.substr(p, e - p);
+  }
+};
+
+//----------------------------------------------------------------------------
+// A minimal SOCKS5 server (no auth) for the proxy test (improvement 44). It
+// completes the greeting + CONNECT handshake and then acts as a TCP echo for
+// the tunnelled bytes, so a client can prove the tunnel is open end to end.
+//----------------------------------------------------------------------------
+class TinySocks5Server final : public TinyTcpAcceptor {
+ protected:
+  void Handle(int conn) override {
+    // Greeting: ver, nmethods, methods...
+    unsigned char hdr[2];
+    if (::recv(conn, hdr, 2, MSG_WAITALL) != 2 || hdr[0] != 0x05) return;
+    std::string methods((size_t)hdr[1], '\0');
+    if (!methods.empty() && ::recv(conn, &methods[0], methods.size(), MSG_WAITALL) != (ssize_t)methods.size()) return;
+    unsigned char sel[2] = {0x05, 0x00};   // no auth
+    if (::send(conn, sel, 2, MSG_NOSIGNAL) != 2) return;
+
+    // Request: ver, cmd, rsv, atyp, addr, port
+    unsigned char req[4];
+    if (::recv(conn, req, 4, MSG_WAITALL) != 4 || req[0] != 0x05) return;
+    size_t addrLen = req[3] == 0x01 ? 4 : (req[3] == 0x04 ? 16 : 0);
+    if (addrLen == 0) return;
+    std::string drain((size_t)addrLen + 2, '\0');
+    if (::recv(conn, &drain[0], drain.size(), MSG_WAITALL) != (ssize_t)drain.size()) return;
+    // Reply: success, bound address 0.0.0.0:0.
+    unsigned char rep[10] = {0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0};
+    if (::send(conn, rep, sizeof rep, MSG_NOSIGNAL) != (ssize_t)sizeof rep) return;
+    // Echo the tunnelled bytes back.
+    char buf[512];
+    for (;;) {
+      ssize_t n = ::recv(conn, buf, sizeof buf, 0);
+      if (n <= 0) break;
+      if (::send(conn, buf, (size_t)n, MSG_NOSIGNAL) != n) break;
+    }
   }
 };

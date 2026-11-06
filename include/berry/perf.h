@@ -1,4 +1,5 @@
 #pragma once
+// (See the frame-budget helper at the bottom of this header.)
 // BerryAPI performance governor.
 //
 // The headline FPS feature: watch real frame time, and when it drifts away
@@ -304,6 +305,40 @@ class BERRY_API PerformanceGovernor {
   /// streak because a fast frame between two spikes must not erase the signal.
   int tailStreak_ = 0;
   bool dirty_ = false;
+};
+
+//----------------------------------------------------------------------------
+// Per-subsystem frame-time budget (improvement 92).
+//
+// A subsystem records how long its per-frame work took; the budget warns once
+// per overrun window when the rolling mean exceeds the subsystem's share of the
+// frame. The warning is rate-limited so a persistently slow subsystem does not
+// flood the log.
+//----------------------------------------------------------------------------
+class BERRY_API FrameBudget {
+ public:
+  /// `name` labels the metric and the warning; `budgetMs` is the per-frame
+  /// allowance for this subsystem.
+  FrameBudget(const char* name, f32 budgetMs);
+
+  /// Records one frame's cost for this subsystem. Returns true when it
+  /// overran the budget (and emits a rate-limited warning at most once/sec).
+  bool Record(f32 ms);
+
+  /// The rolling mean over the last `kWindow` samples, in ms.
+  f32 Mean() const;
+  f32 budgetMs() const { return budgetMs_; }
+  u64 overruns() const { return overruns_; }
+
+ private:
+  static constexpr size_t kWindow = 60;
+  const char* name_;
+  f32 budgetMs_;
+  f32 samples_[kWindow]{};
+  size_t count_ = 0;
+  size_t next_ = 0;
+  u64 overruns_ = 0;
+  u64 lastWarnMs_ = 0;
 };
 
 }  // namespace Berry

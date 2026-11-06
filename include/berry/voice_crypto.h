@@ -66,6 +66,11 @@ BERRY_API bool VoiceCryptoAvailable();
 /// when the CSPRNG cannot be seeded (then nothing is written).
 BERRY_API bool VoiceRandomBytes(void* out, size_t n);
 
+/// Overwrites `s`'s storage with zeros through a non-elidable write, so a
+/// secret held in a std::string is not left in freed heap (bug 58). The
+/// capacity is not changed; the caller still owns the (now zeroed) buffer.
+BERRY_API void VoiceZeroizeString(std::string* s);
+
 /// X25519 public key for `secret32` (RFC 7748). False on a bad size or a
 /// backend failure.
 BERRY_API bool VoiceX25519PublicKey(const std::string& secret32, std::string* pub32);
@@ -211,6 +216,13 @@ class BERRY_API VoiceSession {
 
   /// Forgets the send counter and the replay window, keeping the key.
   void Reset();
+
+  /// Wipes the session key (and the counters), so a dropped session leaves no
+  /// key material in freed heap (bug 58).
+  void Zeroize();
+
+  /// The key's mutable storage, for the owner that zeroizes it (bug 58).
+  std::string& mutableKey() { return key_; }
 
  private:
   std::string key_;

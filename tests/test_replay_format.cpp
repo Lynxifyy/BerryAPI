@@ -68,6 +68,37 @@ ReplayFile BuildSample(int keyframes, size_t payloadPerRecord = 64) {
 
 //--------------------------------------------------------------------------
 
+// The determinism inputs (RNG seed + clock origin) round-trip through the
+// container (improvement 68).
+void TestDeterminismRoundTrip() {
+  ReplayFile f = BuildSample(2);
+  ReplayDeterminism d;
+  d.rngSeed = 0x1234567890abcdefULL;
+  d.wallClockOriginMs = 1700000000000ULL;
+  d.tickRate = 20;
+  CHECK(f.RecordDeterminism(d) == ReplayError::Ok);
+  CHECK(f.determinism == d);
+
+  ReplayWriter w;
+  std::string bytes;
+  CHECK(w.Write(f, &bytes) == ReplayError::Ok);
+  ReplayFile out;
+  ReplayReader r;
+  CHECK(r.Read(bytes, &out) == ReplayError::Ok);
+  CHECK(out.ReadDeterminism());
+  CHECK(out.determinism.rngSeed == d.rngSeed);
+  CHECK(out.determinism.wallClockOriginMs == d.wallClockOriginMs);
+  CHECK(out.determinism.tickRate == d.tickRate);
+
+  // A file with no RunSeed record reports no determinism.
+  ReplayFile plain = BuildSample(1);
+  CHECK(!plain.ReadDeterminism());
+  // An unrecorded determinism is a no-op.
+  ReplayDeterminism none;
+  CHECK(plain.RecordDeterminism(none) == ReplayError::Ok);
+  CHECK(!plain.ReadDeterminism());
+}
+
 void TestRoundTripExact() {
   ReplayFile in = BuildSample(3);
   ReplayWriter w;
@@ -504,6 +535,7 @@ void TestEmptyAndEdges() {
 }  // namespace
 
 int main() {
+  TestDeterminismRoundTrip();
   TestRoundTripExact();
   TestCompressionActuallyCompresses();
   TestIncompressibleStoredRaw();

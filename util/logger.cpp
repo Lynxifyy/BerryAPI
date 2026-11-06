@@ -1,7 +1,12 @@
 #include "berry/logger.h"
-#include <mutex>
+#include "berry/types.h"
+#include <chrono>
 #include <cstdarg>
 #include <cstring>
+#include <map>
+#include <mutex>
+#include <string>
+#include <vector>
 
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -13,10 +18,90 @@ std::mutex Log::mutex_;
 std::string Log::last_message_;
 bool Log::capture_ = false;
 bool Log::silent_ = false;
-LogLevel Log::level_ = LogLevel::Info;
+std::atomic<int> Log::level_{(int)LogLevel::Info};
 
-void Log::SetLevel(LogLevel level) { level_ = level; }
-LogLevel Log::GetLevel() { return level_; }
+namespace {
+
+/// The bounded ring of recent lines for the in-game console (improvement 90).
+constexpr size_t kMaxRing = 512;
+std::deque<Log::Entry> g_ring;
+bool jsonLines_ = false;
+
+const char* JsonLevelName(LogLevel lv) {
+  switch (lv) {
+    case LogLevel::Trace: return "trace";
+    case LogLevel::Debug: return "debug";
+    case LogLevel::Info:  return "info";
+    case LogLevel::Warn:  return "warn";
+    case LogLevel::Error: return "error";
+  }
+  return "info";
+}
+
+// Per-module level overrides and rate-limit state (improvement 90). Guarded by
+// Log's mutex so a concurrent SetModuleLevel cannot race a read.
+struct ModuleState {
+  int level = -1;                 // -1 = no override
+  u64 windowStartMs = 0;
+  u32 emittedThisSecond = 0;
+};
+std::map<std::string, ModuleState> g_moduleState;
+
+u64 SteadyMs() {
+  using namespace std::chrono;
+  return (u64)duration_cast<milliseconds>(steady_clock::now().time_since_epoch())
+      .count();
+}
+
+}  // namespace
+
+void Log::SetModuleLevel(const std::string& module, LogLevel level) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  g_moduleState[module].level = (int)level;
+}
+
+LogLevel Log::ModuleLevel(const std::string& module) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  auto it = g_moduleState.find(module);
+  if (it != g_moduleState.end() && it->second.level >= 0) {
+    return (LogLevel)it->second.level;
+  }
+  return GetLevel();
+}
+
+void Log::ClearModuleLevels() {
+  std::lock_guard<std::mutex> lk(mutex_);
+  g_moduleState.clear();
+}
+
+void Log::LogTagged(LogLevel level, const char* module, int maxPerSecond,
+                    const char* fmt, ...) {
+  const std::string mod = module ? module : "";
+  // Resolve the effective level and, if a rate limit applies, decide whether
+  // this call is allowed. All under the lock; the sink itself runs outside it.
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto& st = g_moduleState[mod];
+    const int effective = st.level >= 0 ? st.level : level_.load();
+    if ((int)level < effective) return;
+    if (maxPerSecond > 0) {
+      const u64 now = SteadyMs();
+      if (now - st.windowStartMs >= 1000) {
+        st.windowStartMs = now;
+        st.emittedThisSecond = 0;
+      }
+      if (st.emittedThisSecond >= (u32)maxPerSecond) return;   // dropped
+      ++st.emittedThisSecond;
+    }
+  }
+  va_list args;
+  va_start(args, fmt);
+  VFormat(level, fmt, args);
+  va_end(args);
+}
+
+void Log::SetLevel(LogLevel level) { level_.store((int)level); }
+LogLevel Log::GetLevel() { return (LogLevel)level_.load(); }
 
 std::string Log::LastMessage() {
   std::lock_guard<std::mutex> lk(mutex_);
@@ -45,14 +130,60 @@ static const char* LevelName(LogLevel lv) {
 }
 
 void Log::VFormat(LogLevel level, const char* fmt, va_list args) {
-  std::lock_guard<std::mutex> lk(mutex_);
-  char buf[1024];
-  {
+  // Format first, WITHOUT the lock. The message is bounded but not truncated at
+  // a fixed 1 KiB: a longer line is retried with a bigger buffer, so a long
+  // path or a large value is logged whole rather than silently cut (bug 52).
+  std::vector<char> buf(1024);
+  for (;;) {
     va_list cp;
     va_copy(cp, args);
-    vsnprintf(buf, sizeof(buf), fmt, cp);
+    const int n = vsnprintf(buf.data(), buf.size(), fmt, cp);
     va_end(cp);
+    if (n < 0) {
+      buf[0] = '\0';
+      break;
+    }
+    if ((size_t)n < buf.size()) break;   // it fit
+    buf.resize((size_t)n + 1);           // retry with room for the whole line
   }
+  const char* msg = buf.data();
+
+  // Publish the line and read the output flags under the lock, then do the
+  // actual I/O OUTSIDE it: a slow sink must not block every other logger (bug
+  // 52).
+  bool silent = false;
+  bool json = false;
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    silent = silent_;
+    json = jsonLines_;
+    if (capture_) last_message_ = msg;
+    // Keep a bounded ring for the in-game console (improvement 90).
+    g_ring.push_back(Entry{level, msg});
+    if (g_ring.size() > kMaxRing) g_ring.pop_front();
+  }
+  if (silent) return;
+
+  if (json) {
+    // JSON lines: {"level":"warn","msg":"..."} (improvement 90). Minimal
+    // escaping (quote, backslash, newline) so a line stays one JSON object.
+    std::string esc;
+    esc.reserve(strlen(msg) + 8);
+    for (const char* q = msg; *q; ++q) {
+      switch (*q) {
+        case '"': esc += "\\\""; break;
+        case '\\': esc += "\\\\"; break;
+        case '\n': esc += "\\n"; break;
+        case '\r': esc += "\\r"; break;
+        case '\t': esc += "\\t"; break;
+        default: esc.push_back(*q); break;
+      }
+    }
+    fprintf(stderr, "{\"level\":\"%s\",\"msg\":\"%s\"}\n",
+            JsonLevelName(level), esc.c_str());
+    return;
+  }
+
 #ifdef __ANDROID__
   android_LogPriority prio = ANDROID_LOG_INFO;
   switch (level) {
@@ -62,15 +193,38 @@ void Log::VFormat(LogLevel level, const char* fmt, va_list args) {
     case LogLevel::Error: prio = ANDROID_LOG_ERROR; break;
     default: break;
   }
-  if (!silent_) __android_log_print(prio, "Berry", "%s", buf);
+  __android_log_print(prio, "Berry", "%s", msg);
 #else
-  if (!silent_) fprintf(stderr, "[Berry][%s] %s\n", LevelName(level), buf);
+  fprintf(stderr, "[Berry][%s] %s\n", LevelName(level), msg);
 #endif
-  if (capture_) last_message_ = buf;
+}
+
+std::vector<Log::Entry> Log::RecentEntries(size_t maxLines) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  std::vector<Entry> out;
+  const size_t start = g_ring.size() > maxLines ? g_ring.size() - maxLines : 0;
+  for (size_t i = start; i < g_ring.size(); ++i) out.push_back(g_ring[i]);
+  return out;
+}
+
+std::vector<std::string> Log::Recent(size_t maxLines) {
+  std::vector<std::string> out;
+  for (const Entry& e : RecentEntries(maxLines)) out.push_back(e.text);
+  return out;
+}
+
+void Log::ClearRecent() {
+  std::lock_guard<std::mutex> lk(mutex_);
+  g_ring.clear();
+}
+
+void Log::SetJsonLines(bool enabled) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  jsonLines_ = enabled;
 }
 
 void Log::LogAt(LogLevel level, const char* fmt, ...) {
-  if (level < Log::GetLevel()) return;
+  if ((int)level < level_.load()) return;
   va_list args;
   va_start(args, fmt);
   VFormat(level, fmt, args);
@@ -78,23 +232,23 @@ void Log::LogAt(LogLevel level, const char* fmt, ...) {
 }
 
 void Log::Trace(const char* fmt, ...) {
-  if (LogLevel::Trace < Log::GetLevel()) return;
+  if ((int)LogLevel::Trace < level_.load()) return;
   va_list args; va_start(args, fmt); VFormat(LogLevel::Trace, fmt, args); va_end(args);
 }
 void Log::Debug(const char* fmt, ...) {
-  if (LogLevel::Debug < Log::GetLevel()) return;
+  if ((int)LogLevel::Debug < level_.load()) return;
   va_list args; va_start(args, fmt); VFormat(LogLevel::Debug, fmt, args); va_end(args);
 }
 void Log::Info(const char* fmt, ...) {
-  if (LogLevel::Info < Log::GetLevel()) return;
+  if ((int)LogLevel::Info < level_.load()) return;
   va_list args; va_start(args, fmt); VFormat(LogLevel::Info, fmt, args); va_end(args);
 }
 void Log::Warn(const char* fmt, ...) {
-  if (LogLevel::Warn < Log::GetLevel()) return;
+  if ((int)LogLevel::Warn < level_.load()) return;
   va_list args; va_start(args, fmt); VFormat(LogLevel::Warn, fmt, args); va_end(args);
 }
 void Log::Error(const char* fmt, ...) {
-  if (LogLevel::Error < Log::GetLevel()) return;
+  if ((int)LogLevel::Error < level_.load()) return;
   va_list args; va_start(args, fmt); VFormat(LogLevel::Error, fmt, args); va_end(args);
 }
 

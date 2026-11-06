@@ -12,6 +12,11 @@
 
 namespace Berry {
 
+namespace {
+/// A monotonic microsecond clock for the binding profiler.
+u64 NowUs() { return NowNs() / 1000ULL; }
+}  // namespace
+
 //----------------------------------------------------------------------------
 // ScriptValue
 //----------------------------------------------------------------------------
@@ -158,6 +163,42 @@ ScriptError ScriptError::Make(std::string msg, std::string chunk, i32 line) {
 // Status names
 //----------------------------------------------------------------------------
 
+//----------------------------------------------------------------------------
+// FrameQuota (improvement 57)
+//----------------------------------------------------------------------------
+
+bool FrameQuota::Record(f32 ms, u64 nowMs) {
+  samples_[next_] = ms;
+  next_ = (next_ + 1) % kWindow;
+  if (count_ < kWindow) ++count_;
+  if (ms > (f32)budgetMs_) ++over_;
+  // A soft warning only when the ROLLING MEAN is over, so a single spike does
+  // not warn; and at most once a second.
+  if (budgetMs_ == 0 || MeanMs() <= (f32)budgetMs_) return false;
+  if (nowMs - lastWarnMs_ >= 1000) {
+    lastWarnMs_ = nowMs;
+    Log::Warn("script frame budget: mean %.2fms over %llums (script work); "
+              "%llu frames over", MeanMs(), (unsigned long long)budgetMs_,
+              (unsigned long long)over_);
+    return true;
+  }
+  return false;
+}
+
+f32 FrameQuota::MeanMs() const {
+  if (count_ == 0) return 0.0f;
+  f32 sum = 0.0f;
+  for (size_t i = 0; i < count_; ++i) sum += samples_[i];
+  return sum / (f32)count_;
+}
+
+void FrameQuota::Reset() {
+  count_ = 0;
+  next_ = 0;
+  over_ = 0;
+  lastWarnMs_ = 0;
+}
+
 const char* ScriptStatusName(ScriptStatus s) {
   switch (s) {
     case ScriptStatus::Ok: return "ok";
@@ -248,9 +289,68 @@ ScriptValue ScriptBindings::Invoke(ScriptContext& ctx, const std::string& name,
       return ScriptValue::Nil();
     }
     if (ok) *ok = true;
-    return e.second.fn(ctx, args);
+    // Per-binding profiling (improvement 58): every native call goes through
+    // here, so timing it here gives a call/microsecond tally per binding with
+    // no second instrumentation point.
+    const u64 t0 = NowUs();
+    ScriptValue r = e.second.fn(ctx, args);
+    BindingProfiler::Instance().Record(name, NowUs() - t0);
+    return r;
   }
   return ScriptValue::Nil();
+}
+
+BindingProfiler& BindingProfiler::Instance() {
+  static BindingProfiler* inst = new BindingProfiler();
+  return *inst;
+}
+
+void BindingProfiler::Record(const std::string& name, u64 micros) {
+  if (!enabled_.load()) return;
+  std::lock_guard<std::mutex> lk(mutex_);
+  BindingStat& s = stats_[name];
+  s.name = name;
+  ++s.calls;
+  s.totalUs += micros;
+  if (micros > s.maxUs) s.maxUs = micros;
+}
+
+std::vector<BindingProfiler::BindingStat> BindingProfiler::Snapshot() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  std::vector<BindingStat> out;
+  out.reserve(stats_.size());
+  for (const auto& kv : stats_) out.push_back(kv.second);
+  std::sort(out.begin(), out.end(),
+            [](const BindingStat& a, const BindingStat& b) {
+              return a.totalUs > b.totalUs;   // expensive first
+            });
+  return out;
+}
+
+void BindingProfiler::Reset() {
+  std::lock_guard<std::mutex> lk(mutex_);
+  stats_.clear();
+}
+
+std::string BindingProfiler::ExportChromeTrace() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  std::string out = "{\"traceEvents\":[";
+  double ts = 0.0;
+  bool first = true;
+  // Deterministic order by name.
+  std::vector<std::pair<std::string, BindingStat>> v(stats_.begin(), stats_.end());
+  std::sort(v.begin(), v.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  for (const auto& kv : v) {
+    if (!first) out += ",";
+    first = false;
+    out += "{\"name\":\"" + kv.first + "\",\"ph\":\"X\",\"pid\":1,\"tid\":1,";
+    out += "\"ts\":" + std::to_string(ts) + ",\"dur\":";
+    out += std::to_string(kv.second.totalUs / 1000.0) + "}";
+    ts += kv.second.totalUs / 1000.0;
+  }
+  out += "],\"displayTimeUnit\":\"ms\"}";
+  return out;
 }
 
 size_t ScriptBindings::Count() const { return entries_.size(); }

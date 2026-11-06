@@ -232,16 +232,27 @@ ReloadResult ScriptReloader::Reload(bool force) {
     return result;
   }
 
-  // State handoff: carry script-visible state across the swap. Best-effort —
-  // a revision may change its state shape, which is reported but not fatal.
+  // State handoff: carry script-visible state across the swap, but only when
+  // the outgoing and incoming scripts declare the SAME state schema version
+  // (improvement 69). A version change means the state shape may differ, so the
+  // old state is dropped deliberately and the script migrates in `on_load`
+  // rather than being fed an incompatible snapshot.
   if (host_) {
-    std::string state = host_->SerializeState();
-    if (!state.empty()) {
-      ScriptError restoreErr;
-      result.stateRestored = candidate->RestoreState(state, &restoreErr);
-      if (!result.stateRestored) {
-        Log::Warn("ScriptReloader[%s]: state handoff skipped (%s)",
-                  name_.c_str(), restoreErr.message.c_str());
+    const int oldSchema = host_->StateSchemaVersion();
+    const int newSchema = candidate->StateSchemaVersion();
+    if (oldSchema != newSchema) {
+      result.stateSchemaChanged = true;
+      Log::Info("ScriptReloader[%s]: state schema %d -> %d; state reset",
+                name_.c_str(), oldSchema, newSchema);
+    } else {
+      std::string state = host_->SerializeState();
+      if (!state.empty()) {
+        ScriptError restoreErr;
+        result.stateRestored = candidate->RestoreState(state, &restoreErr);
+        if (!result.stateRestored) {
+          Log::Warn("ScriptReloader[%s]: state handoff skipped (%s)",
+                    name_.c_str(), restoreErr.message.c_str());
+        }
       }
     }
   }

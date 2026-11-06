@@ -2,6 +2,7 @@
 
 #include "berry/event.h"
 #include "berry/render.h"
+#include "berry/math.h"
 
 #include <algorithm>
 #include <cmath>
@@ -9,8 +10,6 @@
 namespace Berry {
 
 namespace {
-constexpr f32 kPi = 3.14159265358979f;
-
 /// Where a sector's mid-angle sits, in radians. Sector 0 is centred on
 /// straight up (-Y in screen space) and the sectors run clockwise, which is the
 /// layout a player expects from a radial menu.

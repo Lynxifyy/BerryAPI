@@ -151,13 +151,22 @@ bool ReadFileAt(int dirFd, const std::string& leaf, std::string* out) {
 /// regular file. Symlinks are unlinked but never followed, so a planted link
 /// cannot make this reach outside the sandbox. Leftover staging files are
 /// always removed and never counted.
+/// The recursion depth a directory walk will descend to. Without a bound, a
+/// pathologically deep tree (or a filesystem loop) overflows the stack; the cap
+/// fails closed by stopping the walk rather than crashing (bug 62).
+constexpr int kMaxWalkDepth = 64;
+
 void WalkDir(int dirFd, const std::string& relPrefix, bool collect,
-             std::string* out) {
-  const int dupFd = dup(dirFd);
-  if (dupFd < 0) return;
-  DIR* d = fdopendir(dupFd);
+             std::string* out, int depth = 0) {
+  if (depth > kMaxWalkDepth) return;
+  // A directory is re-opened with openat() rather than dup()ed: a dup shares
+  // the file offset, so a second walk of the same fd would start at end-of-
+  // directory and see nothing (bug 62). openat() yields an independent offset.
+  const int openFd = openat(dirFd, ".", O_RDONLY | O_DIRECTORY);
+  if (openFd < 0) return;
+  DIR* d = fdopendir(openFd);
   if (!d) {
-    close(dupFd);
+    close(openFd);
     return;
   }
   while (struct dirent* e = readdir(d)) {
@@ -174,7 +183,7 @@ void WalkDir(int dirFd, const std::string& relPrefix, bool collect,
           openat(dirFd, name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
       if (sub < 0) continue;
       const std::string rel = relPrefix.empty() ? name : relPrefix + '/' + name;
-      WalkDir(sub, rel, collect, out);
+      WalkDir(sub, rel, collect, out, depth + 1);
       close(sub);
       if (!collect) unlinkat(dirFd, name.c_str(), AT_REMOVEDIR);
       continue;
@@ -198,12 +207,15 @@ void WalkDir(int dirFd, const std::string& relPrefix, bool collect,
 
 /// Recursively sums regular files (skipping symlinks and staging files) under
 /// an open directory, so `Open` can seed the quota from what is already there.
-void ScanDir(int dirFd, size_t* files, size_t* bytes) {
-  const int dupFd = dup(dirFd);
-  if (dupFd < 0) return;
-  DIR* d = fdopendir(dupFd);
+void ScanDir(int dirFd, size_t* files, size_t* bytes, int depth = 0) {
+  if (depth > kMaxWalkDepth) return;
+  // openat() (not dup()) so the offset is independent and a re-scan sees the
+  // whole directory (bug 62).
+  const int openFd = openat(dirFd, ".", O_RDONLY | O_DIRECTORY);
+  if (openFd < 0) return;
+  DIR* d = fdopendir(openFd);
   if (!d) {
-    close(dupFd);
+    close(openFd);
     return;
   }
   while (struct dirent* e = readdir(d)) {
@@ -216,7 +228,7 @@ void ScanDir(int dirFd, size_t* files, size_t* bytes) {
       const int sub =
           openat(dirFd, name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
       if (sub < 0) continue;
-      ScanDir(sub, files, bytes);
+      ScanDir(sub, files, bytes, depth + 1);
       close(sub);
       continue;
     }

@@ -1,0 +1,22 @@
+{
+  "languageMode": "strict",
+  "lint": {
+    "*": true,
+    "LocalShadow": true,
+    "ImportUnused": true,
+    "UnusedLocal": true,
+    "DuplicateLocal": true,
+    "GlobalShadow": true,
+    "FunctionUnused": true,
+    "TableLiteral": true,
+    "ForRange": true,
+    "UnreachableCode": true
+  },
+  "lintErrors": true,
+  "globals": [
+    "test", "async", "Events", "Http", "network", "ws", "json_rpc",
+    "hud", "ui", "render", "world", "entity", "fs", "audio", "input",
+    "cosmetic", "animator", "perf", "mod", "intent", "crystal", "combat",
+    "packets", "touch", "voice", "gamereads"
+  ]
+}

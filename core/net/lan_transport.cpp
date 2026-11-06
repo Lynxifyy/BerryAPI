@@ -2,13 +2,14 @@
 // for the wire format and the fail-closed rules.
 #include "berry/lan_transport.h"
 #include "berry/logger.h"
+#include "berry/voice_crypto.h"   // VoiceRandomBytes: the CSPRNG behind the tag
 #include "cosmetic_frag.h"
 #include "multicast_lock.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
-#include <random>
 
 namespace Berry {
 
@@ -27,9 +28,18 @@ u64 SteadyNowMs() {
 /// not share a tag, so a client recognises (and skips) the copy of its own
 /// traffic that multicast loops back. Not a security value: a peer's datagram
 /// still goes through signature verification before it is applied.
+///
+/// The tag comes from the CSPRNG, not std::random_device: on some standard
+/// library builds random_device is deterministic, which would hand two clients
+/// the same tag so they would drop each other's packets (bug 57). The steady
+/// clock and the address are folded in as a fallback when the CSPRNG is not
+/// available.
 u32 MakeSelfTag() {
-  std::random_device rd;
-  u32 t = ((u32)rd() << 16) ^ (u32)rd() ^ (u32)SteadyNowMs();
+  u32 t = 0;
+  if (!VoiceRandomBytes(&t, sizeof t)) {
+    t = (u32)SteadyNowMs() ^ (u32)(uintptr_t)&t;
+  }
+  t ^= (u32)SteadyNowMs();
   return t ? t : 1u;   // 0 means "no tag"; never hand that out
 }
 

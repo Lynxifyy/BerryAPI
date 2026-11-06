@@ -29,6 +29,14 @@ include tools/sources.mk
 -include $(patsubst %.cpp,build/san/%.d,$(CORE_SRC))
 -include $(patsubst %.cpp,build/san/tests/%.d,$(TEST_SRC))
 -include $(patsubst %.cpp,build/shared/%.d,$(CORE_SRC))
+# The tools/ binaries (berry-run, berry-relay) compile with -MMD too, but their
+# .d files live under build/tools/. Without these two lines a header change
+# leaves build/tools/berry-run.o stale, and it then links against core objects
+# with a different layout — the exact silent-mismatch failure the header
+# tracking exists to prevent.
+-include build/tools/berry-run.d
+-include build/tools/berry-relay.d
+-include build/tools/berry-sigcheck.d
 -include $(MBEDTLS_SRC:.c=.d)
 -include $(LZ4_SRC:.c=.d)
 -include $(patsubst %.c,build/san/%.d,$(LZ4_SRC))
@@ -144,7 +152,7 @@ check-samples: samples/sample_hitmarker.o
 	@echo "== samples compile OK =="
 	@rm -f samples/sample_hitmarker.o
 
-test: idl-check check-signer check-sigpack-signer check-sources check-android-sources check-mbedtls check-run $(TEST_BINS) build/$(SHARED_NAME) check-samples
+test: idl-check check-signer check-sigpack-signer check-sources check-android-sources check-mbedtls check-run check-sigcheck check-warnings check-werror check-examples $(TEST_BINS) build/$(SHARED_NAME) check-samples
 	@for b in $(TEST_BINS); do \
 	  echo "-- $$b --"; ./$$b "$$b" || exit 1; \
 	done
@@ -158,9 +166,18 @@ test: idl-check check-signer check-sigpack-signer check-sources check-android-so
 # Sanitizer build: ASan+UBSan host tests. Everything is built into its own
 # directory so it never collides with the normal build/, and every binary runs
 # with leak + stack checks enabled.
+# `-fno-sanitize=function`: UBSan's function sanitizer (clang only) reads a type
+# descriptor 8 bytes BEFORE an indirect-call target. The shim backend's
+# trampolines are JIT pages with no such descriptor, so the check reads the page
+# before the pool and faults. The check is a C++-type-confusion detector, not a
+# memory-safety one, and this library calls raw machine code by design, so it is
+# disabled for the sanitizer build. gcc has no equivalent, which is why the g++
+# job passed without it.
+# The flag is clang-only (gcc rejects the name), so add it only for clang.
+SAN_FUNCTION_FLAG := $(if $(findstring clang,$(CXX)),-fno-sanitize=function,)
 SAN_CXXFLAGS := -std=c++17 -Wall -Wextra -O1 -g -Iinclude -Ithird_party/ed25519 $(MBEDTLS_INCLUDES) $(LZ4_INCLUDES) $(LUAU_INCLUDES) \
                 -DBERRY_THREAD_ASSERT \
-                -fsanitize=address,undefined -fno-omit-frame-pointer
+                -fsanitize=address,undefined $(SAN_FUNCTION_FLAG) -fno-omit-frame-pointer
 SAN_LDFLAGS  := -pthread -fsanitize=address,undefined
 SAN_TEST_OBJ := $(patsubst tests/%.cpp,build/san/tests/%.o,$(TEST_SRC))
 SAN_BINS     := $(patsubst tests/%.cpp,build/san/test_%,$(TEST_SRC))
@@ -279,6 +296,30 @@ build/berry-run: $(RUN_OBJ) $(CORE_OBJ)
 berry-run: build/berry-run
 	@echo "== built build/berry-run =="
 
+# The offline signature-table validator (tools/berry-sigcheck.cpp): proves a
+# signature table against an extracted module in CI, before release. It links
+# the portable core so it uses the same parser/scanner the runtime uses.
+SIGCHECK_OBJ := build/tools/berry-sigcheck.o
+build/tools/berry-sigcheck.o: tools/berry-sigcheck.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Itools -c $< -o $@
+
+build/berry-sigcheck: $(SIGCHECK_OBJ) $(CORE_OBJ)
+	$(CXX) $(LDFLAGS) $(SIGCHECK_OBJ) $(CORE_OBJ) -ldl -o $@
+
+.PHONY: berry-sigcheck
+berry-sigcheck: build/berry-sigcheck
+	@echo "== built build/berry-sigcheck =="
+
+# Self-check: the tool must read a build-id from a real ELF and match a pattern
+# against it. Uses the tool's own binary as the ELF.
+.PHONY: check-sigcheck
+check-sigcheck: build/berry-sigcheck
+	@id=$$(./build/berry-sigcheck build/berry-sigcheck --build-id) || { echo "check-sigcheck: no build-id"; exit 1; }; \
+	[ -n "$$id" ] || { echo "check-sigcheck: empty build-id"; exit 1; }; \
+	./build/berry-sigcheck build/berry-sigcheck --pattern "7F 45 4C 46" >/dev/null || { echo "check-sigcheck: ELF magic did not match"; exit 1; }; \
+	echo "== berry-sigcheck OK =="
+
 # End-to-end check for the developer CLI. It drives the real binary through
 # every mode and asserts the exit code, so the argument parsing, the verified
 # loader path, the test runner and the bounded replay reader are all exercised
@@ -308,7 +349,22 @@ idl:
 
 idl-check:
 	@python3 tools/idlgen.py --self-test
+	@python3 tools/idlgen.py --golden-test
 	@python3 tools/idlgen.py --check
+
+# Breaking-change lint (improvement 77): diff the current IDL against the last
+# released copy (api/berry.idl.prev, kept by the release job). A binding removed
+# without a `removed` version, or an arity/return/capability change, fails. A
+# missing .prev (a fresh checkout) is not an error.
+.PHONY: idl-breaking
+idl-breaking:
+	@if [ -f api/berry.idl.prev ]; then \
+	  python3 tools/idlgen.py --breaking-diff api/berry.idl.prev api/berry.idl \
+	    && echo "== no breaking script-API changes ==" \
+	    || { echo "idl-breaking: breaking script-API change; bump the major version and mark it"; exit 1; }; \
+	else \
+	  echo "idl-breaking: no api/berry.idl.prev to diff against; skipped"; \
+	fi
 
 # The Python signer and the C++ verifier must agree on the canonical payload
 # byte for byte, or every published script would be rejected at load time.
@@ -322,6 +378,117 @@ check-signer:
 .PHONY: check-sigpack-signer
 check-sigpack-signer:
 	@python3 tools/check-sigpack-signer.py
+
+# libFuzzer targets (improvement 97). Needs clang; on a machine without it this
+# is a no-op, so `make fuzz` never breaks the host build. The targets share the
+# pure parsers the deterministic tests already cover.
+.PHONY: fuzz
+fuzz:
+	@if command -v clang++ >/dev/null 2>&1; then \
+	  clang++ -std=c++17 -g -O1 -fsanitize=fuzzer,address,undefined \
+	    -Iinclude -Ithird_party/ed25519 -Ithird_party/mbedtls/include \
+	    -DMBEDTLS_CONFIG_FILE='"mbedtls/mbedtls_config.h"' -Ithird_party/lz4/lib \
+	    -Ithird_party/luau/Common/include -Ithird_party/luau/Ast/include \
+	    -Ithird_party/luau/Compiler/include -Ithird_party/luau/VM/include \
+	    fuzz/fuzz_targets.cpp $(CORE_OBJ) -o build/berry_fuzz \
+	    && ./build/berry_fuzz -max_total_time=60 -rss_limit_mb=2048 \
+	  || echo "fuzz: clang++ not available; skipped"; \
+	else \
+	  echo "fuzz: clang++ not available; skipped"; \
+	fi
+
+# A CycloneDX SBOM (improvement 100).
+.PHONY: sbom
+sbom:
+	@python3 tools/gen-sbom.py > build/sbom.cdx.json && echo "== wrote build/sbom.cdx.json =="
+
+# Script lint/format rule pack (improvement 75). Runs the project's .luaurc lint
+# config through luau-analyze and the stylua config through stylua when either
+# tool is present; a machine without them skips rather than failing. The .luaurc
+# itself is always validated (it must be valid JSON), so a typo in the config is
+# caught even without the tools.
+# Cross-build a few portable suites for arm64 and run them under qemu-user in
+# CI (improvement 96), so the arm64 decode paths are exercised on a real arm64
+# ABI. The cross compiler is passed in so the vendored C is cross-built too:
+# overriding only CXX leaves the C objects host-format and the link then fails
+# with "file in wrong format". Run from a clean tree (CI checks out fresh), or
+# the host objects are reused.
+ARM64_CXX ?= aarch64-linux-gnu-g++
+ARM64_CC  ?= aarch64-linux-gnu-gcc
+ARM64_TEST_BINS := build/test_test_sigscan build/test_test_x86_length \
+                   build/test_test_url build/test_test_metrics \
+                   build/test_test_inflate build/test_test_netquota \
+                   build/test_test_conn_pool build/test_test_require
+.PHONY: arm64-portable-tests
+arm64-portable-tests:
+	$(MAKE) -j"$(shell nproc)" CXX=$(ARM64_CXX) CC=$(ARM64_CC) $(ARM64_TEST_BINS)
+
+# A strict warning pass over first-party code (improvement 98): -Wshadow and
+# -Wconversion catch real bugs (a shadowed name, a narrowing conversion) that
+# the default flag set hides. Vendored code is excluded (it is not ours to
+# change). A clean pass is the baseline; a new warning fails.
+.PHONY: check-warnings
+check-warnings:
+	@fail=0; \
+	for f in core/hooks/*.cpp core/net/net.cpp core/net/room_token.cpp \
+	         core/net/lan_transport.cpp core/script/async.cpp core/script/timers.cpp \
+	         core/events/metrics.cpp core/lifecycle/crash.cpp \
+	         core/lifecycle/configfile.cpp util/*.cpp; do \
+	  out=$$($(CXX) -std=c++17 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion -fsyntax-only \
+	    -Iinclude -Ithird_party/ed25519 -Ithird_party/mbedtls/include \
+	    -DMBEDTLS_CONFIG_FILE='"mbedtls/mbedtls_config.h"' -Ithird_party/lz4/lib \
+	    -Ithird_party/luau/Common/include -Ithird_party/luau/Ast/include \
+	    -Ithird_party/luau/Compiler/include -Ithird_party/luau/VM/include "$$f" 2>&1 \
+	    | grep -E "warning:" || true); \
+	  if [ -n "$$out" ]; then echo "check-warnings: $$f"; echo "$$out"; fail=1; fi; \
+	done; \
+	[ $$fail -eq 0 ] && echo "== warning baseline clean ==" || exit 1
+
+# -Werror over the first-party files whose warning baseline is clean
+# (improvement 98). Vendored code and the few files still carrying a third-party
+# header warning are excluded; this is the gate that keeps a new warning from
+# landing in the files already clean.
+.PHONY: check-werror
+check-werror:
+	@fail=0; \
+	for f in core/hooks/backend_shim.cpp core/hooks/x86_length.cpp \
+	         core/hooks/sigscan.cpp core/hooks/hook_chain.cpp \
+	         core/net/net.cpp core/net/inflate.cpp core/net/netquota.cpp \
+	         core/net/room_token.cpp core/net/lan_transport.cpp \
+	         core/net/tls.cpp core/events/metrics.cpp \
+	         core/lifecycle/crash.cpp core/lifecycle/configfile.cpp \
+	         core/script/async.cpp core/script/timers.cpp util/logger.cpp \
+	         util/mem.cpp; do \
+	  $(CXX) -std=c++17 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion -Werror -fsyntax-only \
+	    -Iinclude -Ithird_party/ed25519 -Ithird_party/mbedtls/include \
+	    -DMBEDTLS_CONFIG_FILE='"mbedtls/mbedtls_config.h"' -Ithird_party/lz4/lib \
+	    -Ithird_party/luau/Common/include -Ithird_party/luau/Ast/include \
+	    -Ithird_party/luau/Compiler/include -Ithird_party/luau/VM/include "$$f" \
+	    || { echo "check-werror: $$f"; fail=1; }; \
+	done; \
+	[ $$fail -eq 0 ] && echo "== -Werror clean ==" || exit 1
+
+# Every example in examples/*.luau is a runnable berry-run test suite, so CI
+# proves the documentation still works (improvement 76).
+.PHONY: check-examples
+check-examples: build/berry-run
+	@for f in examples/*.luau; do \
+	  [ -e "$$f" ] || continue; \
+	  echo "-- $$f --"; \
+	  ./build/berry-run test "$$f" || { echo "check-examples: $$f failed"; exit 1; }; \
+	done
+	@echo "== examples OK =="
+
+.PHONY: lint-scripts
+lint-scripts:
+	@python3 -c "import json,sys; json.load(open('.luaurc')); print('== .luaurc is valid JSON ==')"
+	@if command -v luau-analyze >/dev/null 2>&1; then \
+	  echo "== luau-analyze =="; \
+	  find samples -name '*.luau' -exec luau-analyze {} + || true; \
+	else echo "lint-scripts: luau-analyze not installed; skipped"; fi
+	@if command -v stylua >/dev/null 2>&1; then \
+	  echo "== stylua --check =="; stylua --check . || true; \
+	else echo "lint-scripts: stylua not installed; skipped"; fi
 
 # Every .cpp under core/ and util/ must be in tools/sources.mk, so the host
 # build and the Android build cannot silently drift apart.

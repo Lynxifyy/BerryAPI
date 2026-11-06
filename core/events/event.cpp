@@ -273,6 +273,41 @@ std::vector<std::pair<std::string, Profiler::SpanStats>> Profiler::Spans() const
   return out;
 }
 
+std::string Profiler::ExportChromeTrace() const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  // Chrome trace-event JSON: a list of complete ("X") events. The timestamp is
+  // a synthetic running offset (each span starts where the previous ended) so
+  // the viewer lays the summary out as one timeline; the duration is the span's
+  // cumulative total, which is what a "where did the time go" view wants.
+  std::string out = "{\"traceEvents\":[";
+  double ts = 0.0;
+  bool first = true;
+  auto esc = [](const std::string& s) {
+    std::string r;
+    for (char c : s) {
+      if (c == '"' || c == '\\') { r.push_back('\\'); r.push_back(c); }
+      else if (c == '\n') r += "\\n";
+      else r.push_back(c);
+    }
+    return r;
+  };
+  // Flatten the span stats into one thread lane (tid 1), name-ordered so the
+  // output is deterministic.
+  std::vector<std::pair<std::string, SpanStats>> spans(stats_.begin(), stats_.end());
+  std::sort(spans.begin(), spans.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  for (const auto& kv : spans) {
+    if (!first) out += ",";
+    first = false;
+    out += "{\"name\":\"" + esc(kv.first) + "\",\"ph\":\"X\",\"pid\":1,\"tid\":1,";
+    out += "\"ts\":" + std::to_string(ts) + ",";
+    out += "\"dur\":" + std::to_string(kv.second.totalMs) + "}";
+    ts += kv.second.totalMs;
+  }
+  out += "],\"displayTimeUnit\":\"ms\"}";
+  return out;
+}
+
 void Profiler::FlameReset() {
   std::lock_guard<std::mutex> lk(mutex_);
   // The tree is only freed when no span is open: a live span holds a node

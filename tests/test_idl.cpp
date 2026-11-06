@@ -44,7 +44,39 @@ static void TestSpecTableWellFormed() {
     const size_t dot = full.find('.');
     CHECK(dot != std::string::npos);
     CHECK(dot > 0 && dot + 1 < full.size());
+    // The version bounds (improvement 77) are either null or a real
+    // major.minor.patch string; a malformed one would break the loader's gate.
+    if (s.since) {
+      const std::string v(s.since);
+      CHECK(v.find('.') != std::string::npos);
+    }
+    if (s.removed) {
+      const std::string v(s.removed);
+      CHECK(v.find('.') != std::string::npos);
+    }
   }
+}
+
+// Generated argument validation (improvement 78): the IDL constraints become a
+// predicate over the argument list.
+static void TestArgValidation() {
+  // combat_state.set_max_reach takes number[0,64].
+  CHECK(api::ValidateBindingArgs("combat_state.set_max_reach", {ScriptValue::Num(10)}));
+  CHECK(!api::ValidateBindingArgs("combat_state.set_max_reach", {ScriptValue::Num(100)}));
+  CHECK(!api::ValidateBindingArgs("combat_state.set_max_reach", {ScriptValue::Num(-1)}));
+  CHECK(!api::ValidateBindingArgs("combat_state.set_max_reach", {ScriptValue::Str("x")}));
+  // render.set_zoom takes number[0.1,10].
+  CHECK(api::ValidateBindingArgs("render.set_zoom", {ScriptValue::Num(1.0)}));
+  CHECK(!api::ValidateBindingArgs("render.set_zoom", {ScriptValue::Num(0.05)}));
+  // audio.set_volume takes number[0,1].
+  CHECK(api::ValidateBindingArgs("audio.set_volume", {ScriptValue::Num(0.5)}));
+  CHECK(!api::ValidateBindingArgs("audio.set_volume", {ScriptValue::Num(2)}));
+  // An unconstrained binding, or an unknown name, is accepted (the capability
+  // gate refuses an unknown binding, not this).
+  CHECK(api::ValidateBindingArgs("combat.recent_kills", {}));
+  CHECK(api::ValidateBindingArgs("does.not_exist", {ScriptValue::Num(9999)}));
+  // A missing argument is not a validation failure (arity is the gate's job).
+  CHECK(api::ValidateBindingArgs("audio.set_volume", {}));
 }
 
 static void TestLookupByName() {
@@ -158,6 +190,7 @@ static void TestDeprecationTable() {
 
 int main() {
   TestSpecTableWellFormed();
+  TestArgValidation();
   TestLookupByName();
   TestModuleTablesAgree();
   TestCapabilityNamesResolve();

@@ -36,6 +36,11 @@ struct X86InsnInfo {
   /// is only +/-127 bytes, and a trampoline is not that close). The caller
   /// refuses such a prologue.
   bool rel8Branch = false;
+  /// Control does not fall through this instruction (ret/int3/hlt/ud2/an
+  /// unconditional jmp). The prologue walk must stop here: decoding past a
+  /// terminal instruction reads the *next* function, and a patch that
+  /// overwrote it would corrupt a neighbour.
+  bool terminal = false;
   /// Byte offset (from the instruction start) and size (always 4) of the field
   /// that must be rebased when the instruction moves to a trampoline: the RIP
   /// displacement for `ripRelative`, or the rel32 branch displacement for

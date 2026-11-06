@@ -45,7 +45,7 @@ module CombatState {
   doc "The configured maximum legitimate reach, in blocks."
   fn max_reach() -> number
   doc "Sets the reach limit. Must be a finite positive number; a bad value is refused and leaves the limit unchanged."
-  fn set_max_reach(blocks: number) -> bool
+  fn set_max_reach(blocks: number[0,64]) -> bool
   doc "The most recent reach check as {valid, distance, max_reach, within_reach, tick, attacker, victim}."
   fn last_reach() -> Table
   doc "How many applied hits so far were beyond the reach limit."
@@ -140,7 +140,7 @@ module Render {
   fn draw_line(x1: number, y1: number, x2: number, y2: number, color: Rgba) -> nil
   fn draw_circle(x: number, y: number, radius: number, color: Rgba) -> nil
   fn screen_size() -> Vec3
-  fn set_zoom(factor: number) -> nil
+  fn set_zoom(factor: number[0.1,10]) -> nil
   doc "Projects a world point to pixels through the current camera. Returns {visible, x, y, distance}: `visible` is false when the point is behind the camera or no camera is set, so a caller checks it before drawing. `distance` is the world distance from the camera eye."
   fn world_to_screen(x: number, y: number, z: number) -> Table
   doc "Draws a world-space line. Clipped against the active clip rectangle; dropped when an endpoint is behind the camera."
@@ -232,7 +232,7 @@ module Audio {
   capability audio
   doc "Client-side sound cues. A script plays a named cue; the device backend decides what the name means. This is a sound the local player hears, so nothing here is authoritative. An unknown or malformed cue name is refused, and a muted play is dropped rather than queued. Volume and pitch are clamped into range."
   fn play(name: string, volume: number, pitch: number) -> bool
-  fn set_volume(volume: number) -> nil
+  fn set_volume(volume: number[0,1]) -> nil
   fn volume() -> number
   fn set_muted(muted: bool) -> nil
   fn muted() -> bool
@@ -313,7 +313,7 @@ module Mod {
 
 module Network {
   capability network
-  doc "Outbound requests. Requires a network grant scoped to the host. Both calls return an HttpResult table (status, ok, headers, body, error, truncated) rather than raising, so a script can branch on the outcome; headers is a newline-separated \"Name: value\" list. A refused destination (bad URL, egress policy, or a host outside the grant) comes back with status 0 and a non-empty error. TLS is not implemented, so an https destination is refused rather than downgraded to plaintext."
+  doc "Outbound requests. Requires a network grant scoped to the host. Both calls return an HttpResult table (status, ok, headers, body, error, error_kind, truncated) rather than raising, so a script can branch on the outcome; headers is a newline-separated \"Name: value\" list. On a refusal, status is 0, error is a human string and error_kind is a stable machine-readable enum: \"\" on success, otherwise one of bad_url, refused (egress policy), not_granted (host outside the grant), transport, timeout, bad_redirect, too_many_redirects. Branch on error_kind, not on error text. TLS is implemented and verified; an https destination is refused rather than downgraded if the handshake fails."
   fn get(url: string, timeout_ms: number) -> HttpResult
   fn post(url: string, body: string, timeout_ms: number) -> HttpResult
 }

@@ -79,6 +79,29 @@ class BERRY_API TlsSocket {
   /// library reports false and `Connect` fails closed.
   static bool Available();
 
+  /// Pin a host to a set of SHA-256 SPKI hashes (improvement 42). When a host
+  /// has a pin set, its certificate chain's leaf public key must hash to one of
+  /// them IN ADDITION to the normal chain/hostname verification, so a
+  /// certificate issued by a compromised CA is still refused. `hexHashes` are
+  /// lowercase hex SHA-256 of the DER SubjectPublicKeyInfo. An empty set clears
+  /// the pin for the host (falls back to normal verification).
+  static void SetPin(const std::string& host, const std::vector<std::string>& hexHashes);
+  /// The pins for a host (empty when none).
+  static std::vector<std::string> Pins(const std::string& host);
+  /// Clears every pin.
+  static void ClearPins();
+  /// The SHA-256 SPKI hash of the peer's leaf certificate after a handshake, in
+  /// lowercase hex, or empty when not connected. Exposed so a tool can compute
+  /// a pin from a known-good server.
+  std::string PeerSpkiSha256() const;
+
+  /// The extra directory of CA certificates to load in addition to the bundle
+  /// (improvement 43), e.g. "/system/etc/security/cacerts" on Android. Every
+  /// file in it is treated as a PEM certificate. Setting it drops the cached
+  /// store so the next connect reloads.
+  static void SetCaDirectory(std::string path);
+  static std::string CaDirectory();
+
   /// The CA bundle path used for verification. Defaults to the system store
   /// (`/etc/ssl/certs/ca-certificates.crt` on the host). Setting it drops the
   /// cached store so the next connect reloads.

@@ -347,6 +347,101 @@ static void TestWaitWithoutClock() {
   TaskScheduler::Instance().Clear();
 }
 
+// The combinators are capability-free, so a script may call them without any
+// grant. They register and resolve without faulting (improvement 71).
+static void TestCombinatorBindings() {
+  TaskScheduler::Instance().Clear();
+  GameTick tick = 0;
+  u64 now = 0;
+  AsyncRuntime rt([&tick]() { return tick; }, [&now]() { return now; });
+  ScriptBindings bindings;
+  rt.InstallBindings(&bindings);
+
+  CHECK(bindings.Has(AsyncBindings::All()));
+  CHECK(bindings.Has(AsyncBindings::Race()));
+  CHECK(bindings.Has(AsyncBindings::Timeout()));
+  CHECK(bindings.Has(AsyncBindings::Wait()));
+  CHECK(bindings.Has(AsyncBindings::EventsOnce()));
+  CHECK(bindings.Has(AsyncBindings::HttpGet()));
+
+  // Each combinator needs no capability (NoCap), not an unset requirement.
+  CHECK(bindings.Required(AsyncBindings::All()).kind == CapKind::NoCap);
+  CHECK(bindings.Required(AsyncBindings::Race()).kind == CapKind::NoCap);
+  CHECK(bindings.Required(AsyncBindings::Timeout()).kind == CapKind::NoCap);
+  TaskScheduler::Instance().Clear();
+}
+
+// async.timeout awaits a tick deadline and resolves with true.
+static void TestTimeoutCombinatorResumes() {
+  TaskScheduler::Instance().Clear();
+  GameTick tick = 0;
+  u64 now = 0;
+  AsyncRuntime rt([&tick]() { return tick; }, [&now]() { return now; });
+  ScriptBindings bindings;
+  rt.InstallBindings(&bindings);
+
+  auto vm = std::unique_ptr<IScriptVm>(CreateReferenceVm());
+  ScriptHost host("combo", Grant({}), std::move(vm));
+  host.SetBindings(&bindings);
+
+  ScriptError err;
+  const char* src =
+      "func on_tick\n"
+      "  push 3\n"
+      "  native async.timeout 1\n"
+      "  pop\n"
+      "  ret 0\n"
+      "end\n";
+  CHECK(host.Load(src, "combo", &err));
+  CHECK(host.RunHook("on_tick") == ScriptStatus::Yielded);
+  CHECK(TaskScheduler::Instance().Pending() == 1);
+  CHECK(rt.Pump(host, 1) == 0);   // not yet
+  tick = 3;
+  CHECK(rt.Pump(host, 3) == 1);   // fires at the deadline
+  CHECK(!host.suspended());
+  TaskScheduler::Instance().Clear();
+}
+
+// A structured scope groups the tasks a script started while it was open, and
+// cancelling the scope cancels all of them at once (improvement 72).
+static void TestStructuredScopes() {
+  TaskScheduler::Instance().Clear();
+  auto& sched = TaskScheduler::Instance();
+
+  u64 scope = sched.OpenScope("s1");
+  CHECK(scope != 0);
+  CHECK(sched.CurrentScope("s1") == scope);
+  CHECK(sched.CurrentScope("other") == 0);
+
+  // Two tasks suspended while the scope is open join it.
+  sched.Suspend("s1", "a", [](ScriptValue*) { return false; }, 0);
+  sched.Suspend("s1", "b", [](ScriptValue*) { return false; }, 0);
+  CHECK(sched.CountInScope(scope) == 2);
+  CHECK(sched.Pending() == 2);
+
+  // A task for another script is not in the scope.
+  sched.Suspend("s2", "c", [](ScriptValue*) { return false; }, 0);
+  CHECK(sched.CountInScope(scope) == 2);
+
+  // Cancelling the scope drops its two tasks and closes it.
+  CHECK(sched.CancelScope(scope) == 2);
+  CHECK(sched.Pending() == 1);   // the s2 task survives
+  CHECK(sched.CurrentScope("s1") == 0);
+
+  // A new task after the scope closed does not join it.
+  sched.Suspend("s1", "d", [](ScriptValue*) { return false; }, 0);
+  CHECK(sched.CountInScope(scope) == 0);
+
+  // Closing a scope without cancelling keeps its tasks.
+  u64 scope2 = sched.OpenScope("s1");
+  sched.Suspend("s1", "e", [](ScriptValue*) { return false; }, 0);
+  sched.CloseScope(scope2);
+  CHECK(sched.CountInScope(scope2) == 1);
+  CHECK(sched.CurrentScope("s1") == 0);
+
+  TaskScheduler::Instance().Clear();
+}
+
 int main() {
   TestSchedulerBasics();
   TestSchedulerTimeout();
@@ -358,6 +453,9 @@ int main() {
   TestAwaitTimeoutFaultsHost();
   TestHttpBindingGated();
   TestWaitWithoutClock();
+  TestCombinatorBindings();
+  TestTimeoutCombinatorResumes();
+  TestStructuredScopes();
   if (g_fail == 0) printf("test_async: ALL OK\n");
   return g_fail;
 }

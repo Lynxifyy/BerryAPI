@@ -289,7 +289,7 @@ export type Mod = {
 
 -- Capability required: network.
 export type Network = {
-  -- Outbound requests. Requires a network grant scoped to the host. Both calls return an HttpResult table (status, ok, headers, body, error, truncated) rather than raising, so a script can branch on the outcome; headers is a newline-separated \"Name: value\" list. A refused destination (bad URL, egress policy, or a host outside the grant) comes back with status 0 and a non-empty error. TLS is not implemented, so an https destination is refused rather than downgraded to plaintext.
+  -- Outbound requests. Requires a network grant scoped to the host. Both calls return an HttpResult table (status, ok, headers, body, error, error_kind, truncated) rather than raising, so a script can branch on the outcome; headers is a newline-separated \"Name: value\" list. On a refusal, status is 0, error is a human string and error_kind is a stable machine-readable enum: \"\" on success, otherwise one of bad_url, refused (egress policy), not_granted (host outside the grant), transport, timeout, bad_redirect, too_many_redirects. Branch on error_kind, not on error text. TLS is implemented and verified; an https destination is refused rather than downgraded if the handshake fails.
   get: (url: string, timeout_ms: number) -> HttpResult,
   post: (url: string, body: string, timeout_ms: number) -> HttpResult,
 }

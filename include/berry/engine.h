@@ -184,10 +184,14 @@ class BERRY_API Engine {
 // Berry::Inject() is the explicit, idempotent entry that the constructor
 // calls, guarded so multiple dlopen/detach cycles are safe.
 //----------------------------------------------------------------------------
+// The C ABI uses `int` (0/1), not C++ `bool`: a C host or a dlsym'd call
+// declares these as `int (*)(void)`, and a 1-byte C++ bool return leaves the
+// upper bytes of the result register undefined, so the caller could read a
+// non-zero value as false (or vice versa). `int` is unambiguous across the ABI.
 extern "C" {
-BERRY_API bool BERRY_Inject();
-BERRY_API bool BERRY_InjectWithConfig(const BerryConfigC* cfg);
+BERRY_API int BERRY_Inject();
+BERRY_API int BERRY_InjectWithConfig(const BerryConfigC* cfg);
 BERRY_API void BERRY_Detach();
-BERRY_API bool BERRY_IsAttached();
+BERRY_API int BERRY_IsAttached();
 BERRY_API const char* BERRY_Version();
 }

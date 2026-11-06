@@ -352,6 +352,7 @@ ScriptTestReport ScriptTestRunner::Run(const std::string& source,
     return report;
   }
   report.discoveryOk = true;
+  report.discovered = tests;   // for the coverage view (improvement 74)
 
   size_t executed = 0;
   for (const std::string& name : tests) {

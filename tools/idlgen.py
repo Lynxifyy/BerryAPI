@@ -87,9 +87,30 @@ MODULE_BINDING_PREFIX = {
 
 
 class Param:
-    def __init__(self, name, typ):
+    def __init__(self, name, typ, lo=None, hi=None, maxlen=None):
         self.name = name
         self.type = typ
+        # Optional constraints (improvement 78): a numeric range and/or a
+        # maximum length for a string. The generator emits a validator so a
+        # hand-written range check can disappear.
+        self.lo = lo
+        self.hi = hi
+        self.maxlen = maxlen
+
+    def constraint_cpp(self):
+        """A C++ expression that is true when the value is acceptable, or None
+        when the parameter is unconstrained. `v` is the bound variable."""
+        if self.type == "number":
+            parts = []
+            if self.lo is not None:
+                parts.append("v >= %s" % self.lo)
+            if self.hi is not None:
+                parts.append("v <= %s" % self.hi)
+            if parts:
+                return " && ".join(parts)
+        if self.type == "string" and self.maxlen is not None:
+            return "v.size() <= %d" % self.maxlen
+        return None
 
     def cpp(self):
         return TYPE_MAP[self.type][0]
@@ -102,7 +123,8 @@ class Param:
 
 
 class Function:
-    def __init__(self, name, params, ret, capability, doc, module, deprecated=None):
+    def __init__(self, name, params, ret, capability, doc, module, deprecated=None,
+                 since=None, removed=None):
         self.name = name
         self.params = params
         self.ret = ret
@@ -110,6 +132,11 @@ class Function:
         self.doc = doc
         self.module = module
         self.deprecated = deprecated
+        # SemVer bounds (improvement 77). `since` is the first script-API
+        # version the binding exists in; `removed` the first it is gone from.
+        # Both optional; the breaking-change linter diffs them.
+        self.since = since
+        self.removed = removed
 
     @property
     def binding(self):
@@ -119,15 +146,26 @@ class Function:
 
 
 class Event:
-    def __init__(self, name, params, doc, module):
+    def __init__(self, name, params, doc, module, since=None):
         self.name = name
         self.params = params
         self.doc = doc
         self.module = module
+        # The script-API version the payload schema was introduced in
+        # (improvement 66). A consumer checks it before decoding a payload.
+        self.since = since
 
     @property
     def channel(self):
         return self.name
+
+    @property
+    def payload_schema(self):
+        """A stable, machine-readable name for the payload shape, so a consumer
+        can branch on it rather than parse the doc string."""
+        return "%s(%s)" % (self.name,
+                           ", ".join("%s:%s" % (p.name, p.type)
+                                     for p in self.params))
 
 
 class Module:
@@ -145,12 +183,14 @@ class Module:
 
 
 def _split_types(text):
-    """Split a parameter list on commas that are not inside < > or ( )."""
+    """Split a parameter list on commas that are not inside < >, ( ) or [ ].
+    Brackets matter because a numeric range constraint contains a comma
+    (`number[0,64]`), which must not split the parameter list."""
     out, depth, cur = [], 0, ""
     for ch in text:
-        if ch in "<(":
+        if ch in "<([":
             depth += 1
-        elif ch in ">)":
+        elif ch in ">)]":
             depth -= 1
         if ch == "," and depth == 0:
             out.append(cur)
@@ -167,6 +207,30 @@ def _check_type(typ, where):
         raise IdlError("unknown type %r in %s" % (typ, where))
 
 
+# A parameter may carry a constraint: `x: number[lo,hi]` for a numeric range and
+# `s: string<maxlen>` for a maximum length (improvement 78). Parsed here so the
+# generator can emit a validator and the constraint lives with the type.
+_CONSTRAINT_RE = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_]*)\s*"
+    r"(?:\[\s*(-?[0-9.]+)?\s*,\s*(-?[0-9.]+)?\s*\]|<(\d+)>)?$")
+
+
+def _parse_param(pname, ptype, where):
+    m = _CONSTRAINT_RE.match(ptype.strip())
+    if not m:
+        raise IdlError("bad parameter type %r in %s" % (ptype, where))
+    base, lo, hi, maxlen = m.group(1), m.group(2), m.group(3), m.group(4)
+    _check_type(base, where)
+    if (lo is not None or hi is not None) and base != "number":
+        raise IdlError("a range constraint is only valid on a number in %s" % where)
+    if maxlen is not None and base != "string":
+        raise IdlError("a length constraint is only valid on a string in %s" % where)
+    return Param(pname, base,
+                 float(lo) if lo is not None else None,
+                 float(hi) if hi is not None else None,
+                 int(maxlen) if maxlen is not None else None)
+
+
 def parse(text):
     """Parses the IDL. Returns (api_version, modules). `api_version` is the
     script-API version the IDL declares (a SemVer string), or "" when the
@@ -176,6 +240,8 @@ def parse(text):
     pending_doc = None
     pending_cap = None
     pending_deprecated = None
+    pending_since = None
+    pending_removed = None
     api_version = ""
     seen_fns = set()
     seen_events = set()
@@ -214,29 +280,45 @@ def parse(text):
                 if current is None:
                     raise IdlError("deprecated outside a module")
                 pending_deprecated = _unquote(line.split(None, 1)[1].strip())
+            elif line.startswith("since "):
+                if current is None:
+                    raise IdlError("since outside a module")
+                pending_since = line.split(None, 1)[1].strip()
+                if not _SEMVER_RE.match(pending_since):
+                    raise IdlError("bad since version %r" % pending_since)
+            elif line.startswith("removed "):
+                if current is None:
+                    raise IdlError("removed outside a module")
+                pending_removed = line.split(None, 1)[1].strip()
+                if not _SEMVER_RE.match(pending_removed):
+                    raise IdlError("bad removed version %r" % pending_removed)
             elif line.startswith("doc "):
                 pending_doc = _unquote(line.split(None, 1)[1].strip())
             elif line.startswith("fn "):
                 if current is None:
                     raise IdlError("fn outside a module")
                 fn = _parse_fn(line, current, pending_doc, pending_cap,
-                               pending_deprecated)
+                               pending_deprecated, pending_since, pending_removed)
                 if fn.binding in seen_fns:
                     raise IdlError("duplicate binding %s" % fn.binding)
                 seen_fns.add(fn.binding)
                 current.functions.append(fn)
                 pending_doc = None
                 pending_deprecated = None
+                pending_since = None
+                pending_removed = None
             elif line.startswith("event "):
                 if current is None:
                     raise IdlError("event outside a module")
-                ev = _parse_event(line, current, pending_doc)
+                ev = _parse_event(line, current, pending_doc, pending_since)
                 if ev.channel in seen_events:
                     raise IdlError("duplicate event %s" % ev.channel)
                 seen_events.add(ev.channel)
                 current.events.append(ev)
                 pending_doc = None
                 pending_deprecated = None
+                pending_since = None
+                pending_removed = None
             else:
                 raise IdlError("unrecognised declaration: %r" % line)
         except IdlError as exc:
@@ -250,7 +332,7 @@ def _unquote(s):
     return s
 
 
-def _parse_fn(line, module, doc, cap, deprecated=None):
+def _parse_fn(line, module, doc, cap, deprecated=None, since=None, removed=None):
     m = re.match(r"fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*->\s*(\S+)\s*$", line)
     if not m:
         raise IdlError("bad fn declaration: %r" % line)
@@ -261,14 +343,13 @@ def _parse_fn(line, module, doc, cap, deprecated=None):
             raise IdlError("parameter %r needs a type" % arg)
         pname, ptype = arg.split(":", 1)
         pname, ptype = pname.strip(), ptype.strip()
-        _check_type(ptype, "fn %s" % name)
-        params.append(Param(pname, ptype))
+        params.append(_parse_param(pname, ptype, "fn %s" % name))
     _check_type(ret, "fn %s return" % name)
     return Function(name, params, ret, cap or module.capability, doc or "",
-                    module.name, deprecated)
+                    module.name, deprecated, since, removed)
 
 
-def _parse_event(line, module, doc):
+def _parse_event(line, module, doc, since=None):
     m = re.match(r"event\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*$", line)
     if not m:
         raise IdlError("bad event declaration: %r" % line)
@@ -279,9 +360,8 @@ def _parse_event(line, module, doc):
             raise IdlError("event parameter %r needs a type" % arg)
         pname, ptype = arg.split(":", 1)
         pname, ptype = pname.strip(), ptype.strip()
-        _check_type(ptype, "event %s" % name)
-        params.append(Param(pname, ptype))
-    return Event(name, params, doc or "", module.name)
+        params.append(_parse_param(pname, ptype, "event %s" % name))
+    return Event(name, params, doc or "", module.name, since)
 
 
 def _capability_enum(cap):
@@ -321,8 +401,10 @@ def emit_cpp(api_version, modules):
            "#include \"berry/export.h\"",
            "#include \"berry/types.h\"",
            "#include \"berry/manifest.h\"",
+           "#include \"berry/script.h\"",   # ScriptValue for the arg validator
            "",
            "#include <string>",
+           "#include <vector>",
            "",
            "namespace Berry {",
            "namespace api {",
@@ -348,18 +430,23 @@ def emit_cpp(api_version, modules):
            "  int arity;",
            "  const char* module;",
            "  const char* deprecated;",
+           "  const char* since;",     # first script-API version (nullptr = 0.0.0)
+           "  const char* removed;",   # first version it is gone from (nullptr = live)
            "};",
            ""]
     specs = []
     for mod in modules:
         for fn in mod.functions:
             specs.append((fn.binding, _capability_enum(fn.capability), len(fn.params),
-                          mod.name, fn.deprecated))
+                          mod.name, fn.deprecated, fn.since, fn.removed))
     out.append("inline const BindingSpec* BindingSpecs() {")
     out.append("  static const BindingSpec kSpecs[] = {")
-    for name, cap, arity, module, dep in specs:
+    for name, cap, arity, module, dep, since, removed in specs:
         dep_lit = "nullptr" if dep is None else _cxx_string_literal(dep)
-        out.append("      {\"%s\", %s, %d, \"%s\", %s}," % (name, cap, arity, module, dep_lit))
+        since_lit = "nullptr" if since is None else _cxx_string_literal(since)
+        removed_lit = "nullptr" if removed is None else _cxx_string_literal(removed)
+        out.append("      {\"%s\", %s, %d, \"%s\", %s, %s, %s}," %
+                   (name, cap, arity, module, dep_lit, since_lit, removed_lit))
     out.append("  };")
     out.append("  return kSpecs;")
     out.append("}")
@@ -382,6 +469,52 @@ def emit_cpp(api_version, modules):
     out.append("inline bool IsBindingDeprecated(const std::string& name) {")
     out.append("  const BindingSpec* spec = FindBindingSpec(name);")
     out.append("  return spec != nullptr && spec->deprecated != nullptr;")
+    out.append("}")
+    out.append("")
+
+    # Generated argument validation (improvement 78): a per-binding predicate
+    # over the ScriptValue argument list, derived from the IDL's constraints, so
+    # a hand-written range/length check can be deleted. A binding with no
+    # constrained parameter gets no entry (always valid).
+    constrained = []
+    for mod in modules:
+        for fn in mod.functions:
+            checks = []
+            for i, p in enumerate(fn.params):
+                expr = p.constraint_cpp()
+                if expr:
+                    checks.append((i, p, expr))
+            if checks:
+                constrained.append((fn.binding, checks))
+    out.append("/// True when `args` satisfies every constraint the IDL declares for")
+    out.append("/// `name` (numeric ranges and string length caps). A binding with no")
+    out.append("/// constraints, or an unknown name, is accepted (the capability gate,")
+    out.append("/// not this, is what refuses an unknown binding).")
+    out.append("inline bool ValidateBindingArgs(const std::string& name,")
+    out.append("                                const std::vector<ScriptValue>& args) {")
+    if not constrained:
+        out.append("  (void)name; (void)args;")
+        out.append("  return true;")
+    else:
+        for binding, checks in constrained:
+            out.append("  if (name == \"%s\") {" % binding)
+            for i, p, expr in checks:
+                if p.type == "number":
+                    out.append("    if (args.size() > %d) {" % i)
+                    out.append("      if (!args[%d].IsNumber()) return false;" % i)
+                    out.append("      const f64 v = args[%d].AsNumber();" % i)
+                    out.append("      if (!(%s)) return false;" % expr)
+                    out.append("    }")
+                else:   # string length
+                    out.append("    if (args.size() > %d) {" % i)
+                    out.append("      if (!args[%d].IsString()) return false;" % i)
+                    out.append("      const std::string& v = args[%d].AsString();" % i)
+                    out.append("      if (!(%s)) return false;" % expr)
+                    out.append("    }")
+            out.append("    return true;")
+            out.append("  }")
+        out.append("  (void)args;")
+        out.append("  return true;")
     out.append("}")
     out.append("")
     # Per-module name lists, useful for docs/tests.
@@ -417,7 +550,7 @@ def emit_cpp(api_version, modules):
     events = []
     for mod in modules:
         for ev in mod.events:
-            events.append((ev.name, mod.name, len(ev.params)))
+            events.append((ev.name, mod.name, len(ev.params), ev.payload_schema))
     out.append("// Event channel declared in the IDL. A declared channel is")
     out.append("// bridged from the engine bus by the script bus; a script may")
     out.append("// also subscribe to and publish its own channels, which are")
@@ -427,12 +560,13 @@ def emit_cpp(api_version, modules):
     out.append("  const char* name;")
     out.append("  const char* module;")
     out.append("  int arity;")
+    out.append("  const char* payload_schema;")
     out.append("};")
     out.append("")
     out.append("inline const EventSpec* EventSpecs() {")
     out.append("  static const EventSpec kEvents[] = {")
-    for name, module, arity in events:
-        out.append("      {\"%s\", \"%s\", %d}," % (name, module, arity))
+    for name, module, arity, schema in events:
+        out.append("      {\"%s\", \"%s\", %d, \"%s\"}," % (name, module, arity, schema))
     out.append("  };")
     out.append("  return kEvents;")
     out.append("}")
@@ -591,6 +725,114 @@ def emit_docs(api_version, modules):
     return "\n".join(out)
 
 
+#----------------------------------------------------------------------------
+# Machine-readable catalogue + manifest schema (improvement 80)
+#----------------------------------------------------------------------------
+
+def emit_capability_catalogue(api_version, modules):
+    """A JSON capability catalogue for tooling (an editor, a consent UI, a
+    packaging tool): every capability, which modules need it, and the reason a
+    module gives. Kept in sync with the IDL by `make idl`."""
+    import json
+    by_cap = {}
+    for mod in modules:
+        cap = mod.capability or "nocap"
+        entry = by_cap.setdefault(cap, {"capability": cap, "modules": []})
+        entry["modules"].append({
+            "module": mod.name,
+            "bindings": [fn.binding for fn in mod.functions],
+            "events": [ev.name for ev in mod.events],
+        })
+    catalogue = {
+        "api_version": api_version,
+        "capabilities": sorted(by_cap.values(), key=lambda e: e["capability"]),
+        "binding_count": sum(len(m.functions) for m in modules),
+        "event_count": sum(len(m.events) for m in modules),
+    }
+    return json.dumps(catalogue, indent=2, sort_keys=True) + "\n"
+
+
+def emit_manifest_schema(api_version, modules):
+    """A JSON Schema for a script manifest (berry.manifest.json), so an editor
+    and a packaging tool validate a manifest without the loader. The capability
+    enum is closed to the IDL's set, so an unknown capability is a schema error
+    rather than a runtime denial."""
+    import json
+    caps = sorted({(m.capability or "nocap") for m in modules})
+    schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://berryapi.dev/schema/manifest.schema.json",
+        "title": "BerryAPI script manifest",
+        "type": "object",
+        "required": ["name", "version"],
+        "additionalProperties": True,
+        "properties": {
+            "name": {"type": "string", "minLength": 1},
+            "version": {"type": "string",
+                        "pattern": r"^[0-9]+\.[0-9]+\.[0-9]+"},
+            "api_version": {
+                "type": "string",
+                "pattern": r"^[0-9]+\.[0-9]+\.[0-9]+",
+                "description": "Minimum script API this script needs.",
+            },
+            "capabilities": {
+                "type": "array",
+                "items": {"type": "string", "enum": caps},
+                "description": "Capabilities the script requests; the host "
+                               "must grant each before a binding runs.",
+            },
+            "entry": {"type": "string"},
+            "author": {"type": "string"},
+            "signature": {"type": "string",
+                          "description": "Hex Ed25519 signature over the "
+                                         "canonical manifest payload."},
+        },
+    }
+    return json.dumps(schema, indent=2, sort_keys=True) + "\n"
+
+
+def emit_python(api_version, modules):
+    """A Python client stub (improvement 83): one method per binding, so a test
+    client or a tool gets autocomplete and the exact names/arities without
+    hand-writing them. The stub is transport-agnostic (a caller supplies a
+    `call(name, *args)` function)."""
+    out = ["# Generated by tools/idlgen.py from api/berry.idl. DO NOT EDIT.",
+           '"""BerryAPI script API client stub.',
+           "",
+           "Script API version: %s." % api_version,
+           "",
+           "A transport is any callable taking (name, *args) and returning the",
+           "binding's result; this class only carries the names and arities.",
+           '"""',
+           "",
+           "",
+           "class BerryClient:",
+           '    """Thin wrapper over a transport."""',
+           "",
+           "    def __init__(self, transport):",
+           "        self._call = transport",
+           ""]
+    for mod in modules:
+        if not mod.functions:
+            continue
+        out.append("    # --- %s (capability: %s) ---" % (mod.name, mod.capability))
+        for fn in mod.functions:
+            py = fn.binding.replace(".", "_")
+            params = ", ".join(p.name for p in fn.params)
+            call_args = ", ".join('"%s"' % fn.binding for _ in [0])
+            arglist = (call_args + (", " + params if params else ""))
+            out.append("    def %s(self%s):" % (py, (", " + params) if params else ""))
+            doc = (fn.doc or "").replace('"', "'").replace("\n", " ")
+            if doc:
+                out.append('        """%s"""' % doc)
+            if fn.deprecated:
+                out.append("        # DEPRECATED: %s" %
+                           fn.deprecated.replace('"', "'"))
+            out.append("        return self._call(%s)" % arglist)
+            out.append("")
+    return "\n".join(out)
+
+
 def write_if_changed(path, content):
     if os.path.exists(path):
         with open(path, "r") as fh:
@@ -635,7 +877,57 @@ SELF_TEST_CASES = [
      "module A {\n capability events\n event e()\n event e()\n}\n", True),
     ("event with typed param",
      "module A {\n capability events\n event e(dmg: number)\n}\n", False),
+    ("since accepted",
+     "module A {\n capability render\n since 1.2.0\n fn go() -> nil\n}\n", False),
+    ("removed accepted",
+     "module A {\n capability render\n removed 2.0.0\n fn go() -> nil\n}\n", False),
+    ("bad since rejected",
+     "module A {\n capability render\n since 1.2\n fn go() -> nil\n}\n", True),
+    ("since outside a module rejected",
+     "since 1.2.0\nmodule A {\n capability render\n fn go() -> nil\n}\n", True),
 ]
+
+
+def golden_test():
+    """Golden-file test for the generated output (improvement 81): regenerate
+    every artefact twice and prove it is byte-identical (deterministic), and
+    that it does not contain a trailing-whitespace line (a normalisation the
+    reviewers rely on). Runs as part of `make idl-check`."""
+    failures = []
+    try:
+        api_version, modules = parse(open(IDL_PATH).read())
+    except IdlError as exc:
+        sys.stderr.write("idlgen golden-test: api/berry.idl did not parse: %s\n" % exc)
+        return 1
+    generators = {
+        "cpp": emit_cpp,
+        "ts": emit_ts,
+        "luau": emit_luau,
+        "docs": emit_docs,
+        "catalogue": emit_capability_catalogue,
+        "schema": emit_manifest_schema,
+        "python": emit_python,
+    }
+    for name, gen in generators.items():
+        try:
+            a = gen(api_version, modules)
+            b = gen(api_version, modules)
+        except Exception as exc:   # noqa: BLE001 - report, do not crash the build
+            failures.append("%s raised %r" % (name, exc))
+            continue
+        if a != b:
+            failures.append("%s is not deterministic" % name)
+        if not a.endswith("\n"):
+            failures.append("%s does not end with a newline" % name)
+        for lineno, line in enumerate(a.split("\n"), 1):
+            if line != line.rstrip():
+                failures.append("%s:%d has trailing whitespace" % (name, lineno))
+                break
+    if failures:
+        for f in failures:
+            sys.stderr.write("idlgen golden-test: %s\n" % f)
+        return 1
+    return 0
 
 
 def self_test():
@@ -688,6 +980,31 @@ def self_test():
                 failures.append("event in %s has no name" % mod.name)
             if not mod.name:
                 failures.append("event %s has no module" % ev.name)
+    # The breaking-change linter must flag a removal, an arity change and a
+    # capability change, and must not flag an addition.
+    base = "module A {\n capability render\n fn a(x: number) -> nil\n fn b() -> nil\n}\n"
+    added = "module A {\n capability render\n fn a(x: number) -> nil\n fn b() -> nil\n fn c() -> nil\n}\n"
+    removed = "module A {\n capability render\n fn a(x: number) -> nil\n}\n"
+    rearity = "module A {\n capability render\n fn a(x: number, y: number) -> nil\n fn b() -> nil\n}\n"
+    recap = "module A {\n capability world\n fn a(x: number) -> nil\n fn b() -> nil\n}\n"
+    try:
+        if breaking_changes(base, added):
+            failures.append("breaking linter flagged an addition")
+        if not breaking_changes(base, removed):
+            failures.append("breaking linter missed a removal")
+        if not breaking_changes(base, rearity):
+            failures.append("breaking linter missed an arity change")
+        if not breaking_changes(base, recap):
+            failures.append("breaking linter missed a capability change")
+        # A removal the OLD declaration marked `removed` is a planned
+        # retirement, not an accidental break, so it is not reported.
+        basePlanned = ("module A {\n capability render\n removed 2.0.0\n"
+                       " fn a(x: number) -> nil\n fn b() -> nil\n}\n")
+        newPlanned = "module A {\n capability render\n fn b() -> nil\n}\n"
+        if breaking_changes(basePlanned, newPlanned):
+            failures.append("breaking linter flagged a declared removal")
+    except IdlError as exc:
+        failures.append("breaking linter raised: %s" % exc)
     if failures:
         for f in failures:
             sys.stderr.write("idlgen self-test: %s\n" % f)
@@ -695,9 +1012,63 @@ def self_test():
     return 0
 
 
+def breaking_changes(old_text, new_text):
+    """Diff two IDL documents and return the breaking changes (improvement 77):
+    a binding removed, its arity or return changed, or its capability changed
+    without a `removed` marker. A non-breaking change (a new binding, a new
+    event) is not reported. Returns a list of human-readable strings."""
+    _, old_mods = parse(old_text)
+    _, new_mods = parse(new_text)
+    old_fns = {}
+    for m in old_mods:
+        for fn in m.functions:
+            old_fns[fn.binding] = fn
+    new_fns = {}
+    for m in new_mods:
+        for fn in m.functions:
+            new_fns[fn.binding] = fn
+
+    changes = []
+    for name, ofn in sorted(old_fns.items()):
+        nfn = new_fns.get(name)
+        if nfn is None:
+            if ofn.removed is None:
+                changes.append(
+                    "REMOVED binding %s (no `removed` version declared)" % name)
+            continue
+        if len(ofn.params) != len(nfn.params):
+            changes.append("ARITY %s: %d -> %d params" %
+                           (name, len(ofn.params), len(nfn.params)))
+        if ofn.ret != nfn.ret:
+            changes.append("RETURN %s: %s -> %s" % (name, ofn.ret, nfn.ret))
+        if (ofn.capability or "") != (nfn.capability or ""):
+            changes.append("CAPABILITY %s: %s -> %s" %
+                           (name, ofn.capability, nfn.capability))
+    return changes
+
+
 def main(argv):
     if "--self-test" in argv:
         return self_test()
+    if "--golden-test" in argv:
+        return golden_test()
+    if "--breaking-diff" in argv:
+        idx = argv.index("--breaking-diff")
+        if idx + 2 >= len(argv):
+            sys.stderr.write("idlgen: --breaking-diff needs two IDL files\n")
+            return 2
+        with open(argv[idx + 1]) as fh:
+            old_text = fh.read()
+        with open(argv[idx + 2]) as fh:
+            new_text = fh.read()
+        try:
+            changes = breaking_changes(old_text, new_text)
+        except IdlError as exc:
+            sys.stderr.write("idlgen: %s\n" % exc)
+            return 2
+        for c in changes:
+            sys.stderr.write("idlgen breaking-change: %s\n" % c)
+        return 1 if changes else 0
     check = "--check" in argv
     with open(IDL_PATH, "r") as fh:
         text = fh.read()
@@ -712,6 +1083,12 @@ def main(argv):
         os.path.join(ROOT, "generated", "berry.d.ts"): emit_ts(api_version, modules),
         os.path.join(ROOT, "generated", "berry.luau"): emit_luau(api_version, modules),
         os.path.join(ROOT, "docs", "API.md"): emit_docs(api_version, modules),
+        os.path.join(ROOT, "generated", "capabilities.json"):
+            emit_capability_catalogue(api_version, modules),
+        os.path.join(ROOT, "generated", "manifest.schema.json"):
+            emit_manifest_schema(api_version, modules),
+        os.path.join(ROOT, "generated", "berry_client.py"):
+            emit_python(api_version, modules),
     }
 
     if check:

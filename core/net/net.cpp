@@ -3,6 +3,8 @@
 #include "berry/logger.h"
 #include "berry/event.h"
 #include "berry/version.h"
+#include "berry/voice_crypto.h"   // VoiceRandomBytes: the CSPRNG behind WS keys/masks
+#include "berry/inflate.h"        // Content-Encoding decode (gzip/deflate)
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -15,10 +17,37 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
 #include <algorithm>
 #include <sstream>
 
 namespace Berry {
+
+//----------------------------------------------------------------------------
+// Happy Eyeballs ordering (improvement 45)
+//----------------------------------------------------------------------------
+
+std::vector<size_t> HappyEyeballsOrder(const std::vector<AddrFamily>& families) {
+  // IPv6 first, then IPv4, but interleave: one IPv6, then all IPv4s, then the
+  // remaining IPv6s. This reaches an IPv6-capable host immediately and an
+  // IPv4-only host after a single failed attempt, rather than waiting on every
+  // AAAA address first.
+  std::vector<size_t> v6, v4;
+  for (size_t i = 0; i < families.size(); ++i) {
+    if (families[i] == AddrFamily::V6) v6.push_back(i);
+    else v4.push_back(i);
+  }
+  std::vector<size_t> out;
+  out.reserve(families.size());
+  if (!v6.empty()) {
+    out.push_back(v6[0]);
+    for (size_t i : v4) out.push_back(i);
+    for (size_t k = 1; k < v6.size(); ++k) out.push_back(v6[k]);
+  } else {
+    for (size_t i : v4) out.push_back(i);
+  }
+  return out;
+}
 
 //----------------------------------------------------------------------------
 // Deadline
@@ -80,8 +109,25 @@ bool TcpSocket::Connect(const char* host, u16 port, const Deadline& deadline) {
     return false;
   }
 
+  // Happy Eyeballs ordering (improvement 45): try one IPv6 candidate first,
+  // then the IPv4 candidates, then the rest of the IPv6 ones, so a dual-stack
+  // host is reached quickly and an IPv4-only host is not stalled behind every
+  // AAAA address.
+  std::vector<addrinfo*> ordered;
+  for (addrinfo* ai = res; ai; ai = ai->ai_next) ordered.push_back(ai);
+  {
+    std::vector<AddrFamily> fams;
+    fams.reserve(ordered.size());
+    for (addrinfo* ai : ordered) {
+      fams.push_back(ai->ai_family == AF_INET6 ? AddrFamily::V6 : AddrFamily::V4);
+    }
+    std::vector<addrinfo*> reordered;
+    for (size_t idx : HappyEyeballsOrder(fams)) reordered.push_back(ordered[idx]);
+    ordered.swap(reordered);
+  }
+
   int lastErr = 0;
-  for (addrinfo* ai = res; ai; ai = ai->ai_next) {
+  for (addrinfo* ai : ordered) {
     // The deadline bounds the WHOLE connect, across every candidate address, so
     // a host with many A/AAAA records cannot multiply the wait.
     if (deadline.expired()) { lastErr = ETIMEDOUT; break; }
@@ -130,6 +176,128 @@ bool TcpSocket::Connect(const char* host, u16 port, const Deadline& deadline) {
   }
   freeaddrinfo(res);
   err_ = "connect failed: " + std::string(strerror(lastErr));
+  return false;
+}
+
+bool TcpSocket::ConnectVia(const ProxyConfig& proxy, const char* host, u16 port,
+                           const Deadline& deadline) {
+  if (!proxy.configured()) return Connect(host, port, deadline);
+
+  // 1. Connect to the proxy itself (no proxy-of-a-proxy).
+  if (!Connect(proxy.host.c_str(), proxy.port, deadline)) return false;
+
+  if (proxy.kind == ProxyConfig::Kind::HttpConnect) {
+    // "CONNECT host:port HTTP/1.1" with a Host header.
+    std::string req = "CONNECT " + std::string(host) + ":" +
+                      std::to_string((unsigned)port) + " HTTP/1.1\r\n"
+                      "Host: " + host + ":" + std::to_string((unsigned)port) +
+                      "\r\n\r\n";
+    if (SendAll(req.data(), req.size(), deadline) != (ssize_t)req.size()) {
+      err_ = "proxy CONNECT send failed";
+      Close();
+      return false;
+    }
+    // Read the status line; a 2xx means the tunnel is open.
+    std::string head;
+    char buf[512];
+    while (head.find("\r\n\r\n") == std::string::npos) {
+      ssize_t n = Recv(buf, sizeof buf, deadline);
+      if (n <= 0) { err_ = "proxy CONNECT no response"; Close(); return false; }
+      head.append(buf, (size_t)n);
+      if (head.size() > 8192) { err_ = "proxy CONNECT response too large"; Close(); return false; }
+    }
+    if (head.rfind("HTTP/1.", 0) != 0 || head.size() < 12 ||
+        head[9] != '2') {
+      err_ = "proxy CONNECT refused";
+      Close();
+      return false;
+    }
+    // Bytes after the terminator are the start of the tunnelled stream; for a
+    // CONNECT there should be none, so any are discarded (the caller starts a
+    // fresh protocol over the tunnel).
+    return true;
+  }
+
+  if (proxy.kind == ProxyConfig::Kind::Socks5) {
+    // Greeting: version 5, one method (no-auth, or username/password).
+    const bool useAuth = !proxy.username.empty() && !proxy.password.empty();
+    std::string greet;
+    greet.push_back((char)0x05);
+    greet.push_back((char)(useAuth ? 2 : 1));
+    greet.push_back((char)0x00);
+    if (useAuth) greet.push_back((char)0x02);
+    if (SendAll(greet.data(), greet.size(), deadline) != (ssize_t)greet.size()) {
+      err_ = "socks5 greeting failed"; Close(); return false;
+    }
+    unsigned char sel[2] = {0, 0};
+    if (Recv(sel, 2, deadline) != 2 || sel[0] != 0x05) {
+      err_ = "socks5 bad method reply"; Close(); return false;
+    }
+    if (sel[1] == 0x02) {
+      // Username/password sub-negotiation (RFC 1929).
+      std::string auth;
+      auth.push_back((char)0x01);
+      auth.push_back((char)proxy.username.size());
+      auth += proxy.username;
+      auth.push_back((char)proxy.password.size());
+      auth += proxy.password;
+      if (SendAll(auth.data(), auth.size(), deadline) != (ssize_t)auth.size()) {
+        err_ = "socks5 auth send failed"; Close(); return false;
+      }
+      unsigned char ar[2] = {0, 0};
+      if (Recv(ar, 2, deadline) != 2 || ar[1] != 0x00) {
+        err_ = "socks5 auth refused"; Close(); return false;
+      }
+    } else if (sel[1] != 0x00) {
+      err_ = "socks5 no acceptable method"; Close(); return false;
+    }
+    // CONNECT request. Resolve the host to an address here (an address type of
+    // domain name is also valid, but an address keeps the request small).
+    std::string req;
+    req.push_back((char)0x05);
+    req.push_back((char)0x01);   // CONNECT
+    req.push_back((char)0x00);   // reserved
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* res = nullptr;
+    if (getaddrinfo(host, nullptr, &hints, &res) != 0 || !res) {
+      err_ = "socks5 resolve failed"; Close(); return false;
+    }
+    if (res->ai_family == AF_INET) {
+      req.push_back((char)0x01);
+      const sockaddr_in* in = (const sockaddr_in*)res->ai_addr;
+      req.append((const char*)&in->sin_addr, 4);
+    } else {
+      req.push_back((char)0x04);
+      const sockaddr_in6* in6 = (const sockaddr_in6*)res->ai_addr;
+      req.append((const char*)&in6->sin6_addr, 16);
+    }
+    freeaddrinfo(res);
+    req.push_back((char)((port >> 8) & 0xff));
+    req.push_back((char)(port & 0xff));
+    if (SendAll(req.data(), req.size(), deadline) != (ssize_t)req.size()) {
+      err_ = "socks5 connect send failed"; Close(); return false;
+    }
+    // Reply: ver, rep, rsv, atyp, addr, port. A non-zero rep is a refusal.
+    unsigned char rep[4] = {0, 0, 0, 0};
+    if (Recv(rep, 4, deadline) != 4 || rep[0] != 0x05) {
+      err_ = "socks5 bad connect reply"; Close(); return false;
+    }
+    if (rep[1] != 0x00) {
+      err_ = "socks5 connect refused"; Close(); return false;
+    }
+    size_t addrLen = rep[3] == 0x01 ? 4 : (rep[3] == 0x04 ? 16 : 0);
+    if (addrLen == 0) { err_ = "socks5 bad address type"; Close(); return false; }
+    unsigned char drain[16 + 2];
+    if (Recv(drain, addrLen + 2, deadline) != (ssize_t)(addrLen + 2)) {
+      err_ = "socks5 short bind reply"; Close(); return false;
+    }
+    return true;
+  }
+
+  err_ = "unknown proxy kind";
+  Close();
   return false;
 }
 
@@ -347,9 +515,66 @@ const char* HttpResponse::Header(const char* name) const {
   return nullptr;
 }
 
-HttpRequest::HttpRequest(const char* url) : url_(url) {
+bool HttpRequest::HasControl(const std::string& s) {
+  for (char c : s) {
+    if (c == '\r' || c == '\n' || c == '\0') return true;
+  }
+  return false;
+}
+
+bool HttpRequest::ParseAuthority(const std::string& authority, u16 defaultPort) {
+  port_ = defaultPort;
+  explicitPort_ = false;
+  std::string hostport = authority;
+
+  // An IPv6 literal is bracketed: [::1]:8080. The colon inside the brackets is
+  // part of the address, never a port separator (bug 33).
+  size_t at = hostport.find('@');
+  if (at != std::string::npos) hostport = hostport.substr(at + 1);   // drop userinfo
+  if (hostport.empty()) return false;
+
+  if (hostport[0] == '[') {
+    size_t close = hostport.find(']');
+    if (close == std::string::npos) return false;
+    host_ = hostport.substr(1, close - 1);
+    std::string after = hostport.substr(close + 1);
+    if (after.empty()) return true;
+    if (after[0] != ':') return false;
+    std::string portStr = after.substr(1);
+    if (portStr.empty()) return false;
+    for (char c : portStr) if (!isdigit((unsigned char)c)) return false;
+    long p = strtol(portStr.c_str(), nullptr, 10);
+    if (p < 1 || p > 65535) return false;   // reject 0/out-of-range (bug 34)
+    port_ = (u16)p;
+    explicitPort_ = true;
+    return true;
+  }
+
+  size_t colon = hostport.rfind(':');
+  if (colon == std::string::npos) {
+    host_ = hostport;
+    return !host_.empty();
+  }
+  host_ = hostport.substr(0, colon);
+  std::string portStr = hostport.substr(colon + 1);
+  if (host_.empty() || portStr.empty()) return false;
+  for (char c : portStr) if (!isdigit((unsigned char)c)) return false;
+  long p = strtol(portStr.c_str(), nullptr, 10);
+  if (p < 1 || p > 65535) return false;     // a junk or 70000 port is refused
+  port_ = (u16)p;
+  explicitPort_ = true;
+  return true;
+}
+
+HttpRequest::HttpRequest(const char* url) : url_(url ? url : "") {
   // parse "http://host:port/path" or "https://host:port/path"
-  std::string u = url;
+  std::string u = url_;
+  // A control character anywhere in the URL (host, path or port) is refused so
+  // it can never be spliced into the request line or a header (bug 32).
+  if (HasControl(u)) {
+    malformed_ = true;
+    return;
+  }
   std::string rest = u;
   if (rest.rfind("http://", 0) == 0) {
     rest = rest.substr(7);
@@ -365,28 +590,159 @@ HttpRequest::HttpRequest(const char* url) : url_(url) {
       badScheme_ = true;
     }
   } else {
+    // An unknown/malformed scheme: refuse, and do not try to parse an authority
+    // out of something that is not a URL.
     badScheme_ = true;
-    rest = u;
+    return;
   }
   size_t slash = rest.find('/');
   std::string authority = slash == std::string::npos ? rest : rest.substr(0, slash);
   path_ = slash == std::string::npos ? "/" : rest.substr(slash);
-  size_t colon = authority.rfind(':');
-  if (colon != std::string::npos && authority.find(']') == std::string::npos) {
-    host_ = authority.substr(0, colon);
-    port_ = (u16)atoi(authority.substr(colon + 1).c_str());
-  } else {
-    host_ = authority;
+  if (!ParseAuthority(authority, port_)) {
+    malformed_ = true;
   }
 }
 
 HttpRequest& HttpRequest::Header(const char* name, const char* value) {
-  headers_.emplace_back(name, value);
+  // A header name or value carrying CR/LF/NUL would split the request; refuse
+  // to store it so it can never reach the wire (bug 32).
+  if (name && value && !HasControl(name) && !HasControl(value)) {
+    headers_.emplace_back(name, value);
+  }
   return *this;
+}
+
+HttpResponse HttpRequest::DoStreaming(
+    const std::function<bool(const char*, size_t)>& onChunk) {
+  HttpResponse resp;
+  if (!onChunk) return Do();   // no callback: behave as a buffered request
+  if (malformed_ || badScheme_) {
+    resp.status = 0;
+    resp.reason = malformed_ ? "malformed request URL"
+                             : "unsupported scheme (TLS not available)";
+    return resp;
+  }
+  const Deadline deadline = Deadline::After(timeoutMs_);
+
+  TcpSocket sock;
+  TlsSocket tls;
+  if (tls_) {
+    if (!tls.Connect(host_.c_str(), port_, deadline)) {
+      resp.status = 0; resp.reason = "tls connect failed: " + tls.LastError();
+      return resp;
+    }
+  } else if (!sock.Connect(host_.c_str(), port_, deadline)) {
+    resp.status = 0; resp.reason = "connect error";
+    return resp;
+  }
+
+  const bool ipv6 = host_.find(':') != std::string::npos;
+  const std::string hostHdr = (ipv6 ? "[" + host_ + "]" : host_) +
+      ((explicitPort_ || port_ != (tls_ ? 443 : 80))
+           ? ":" + std::to_string((unsigned)port_) : "");
+  std::string req = method_ + " " + path_ + " HTTP/1.1\r\n"
+      "Host: " + hostHdr + "\r\n"
+      "User-Agent: BerryAPI/" BERRY_VERSION_STRING "\r\n"
+      // A streaming caller gets the raw entity, so no compression is requested.
+      "Accept-Encoding: identity\r\n"
+      "Connection: close\r\n";
+  if (!body_.empty() || method_ == "POST" || method_ == "PUT" ||
+      method_ == "PATCH") {
+    char lenBuf[32];
+    snprintf(lenBuf, sizeof lenBuf, "%zu", body_.size());
+    req += std::string("Content-Length: ") + lenBuf + "\r\n";
+  }
+  for (auto& h : headers_) {
+    std::string lower = h.first;
+    for (char& c : lower) c = (char)tolower((unsigned char)c);
+    if (lower == "host" || lower == "content-length" ||
+        lower == "connection" || lower == "transfer-encoding" ||
+        lower == "accept-encoding") {
+      continue;
+    }
+    req += h.first + ": " + h.second + "\r\n";
+  }
+  req += "\r\n";
+  req += body_;
+  const ssize_t sent = tls_ ? tls.Send(req.data(), req.size(), deadline)
+                            : sock.SendAll(req.data(), req.size(), deadline);
+  if (sent != (ssize_t)req.size()) {
+    resp.status = 0; resp.reason = "send failed";
+    return resp;
+  }
+
+  // Read until the header terminator, then stream the rest.
+  std::string head;
+  char buf[8192];
+  while (head.find("\r\n\r\n") == std::string::npos) {
+    ssize_t n = tls_ ? tls.Recv(buf, sizeof buf, deadline)
+                     : sock.Recv(buf, sizeof buf, deadline);
+    if (n <= 0) { resp.status = 0; resp.reason = "no HTTP headers"; return resp; }
+    head.append(buf, (size_t)n);
+    if (head.size() > 64 * 1024) { resp.status = 0; resp.reason = "headers too large"; return resp; }
+  }
+  const size_t hEnd = head.find("\r\n\r\n");
+  // Parse the status line strictly (same rules as Do()).
+  {
+    const std::string first = head.substr(0, head.find("\r\n"));
+    if (first.rfind("HTTP/1.", 0) == 0 && first.size() >= 12 &&
+        isdigit((unsigned char)first[9]) && first[8] == ' ') {
+      resp.status = (first[9] - '0') * 100 + (first[10] - '0') * 10 +
+                    (first[11] - '0');
+    } else {
+      resp.status = 0; resp.reason = "bad HTTP status line";
+      return resp;
+    }
+    std::istringstream hs(head.substr(0, hEnd));
+    std::string line;
+    std::getline(hs, line);   // skip the status line
+    while (std::getline(hs, line)) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      size_t colon = line.find(':');
+      if (colon == std::string::npos) continue;
+      std::string v = line.substr(colon + 1);
+      size_t b = v.find_first_not_of(" \t");
+      resp.headers.emplace_back(line.substr(0, colon),
+                                b == std::string::npos ? std::string() : v.substr(b));
+    }
+  }
+
+  // Any body bytes already read with the headers go to the callback first.
+  size_t total = 0;
+  if (hEnd + 4 < head.size()) {
+    const size_t extra = head.size() - (hEnd + 4);
+    if (extra > maxBodyBytes_) { resp.truncated = true; }
+    else { total += extra; if (!onChunk(head.data() + hEnd + 4, extra)) return resp; }
+  }
+  for (;;) {
+    ssize_t n = tls_ ? tls.Recv(buf, sizeof buf, deadline)
+                     : sock.Recv(buf, sizeof buf, deadline);
+    if (n < 0) {
+      if (n == -2) resp.truncated = true;
+      break;
+    }
+    if (n == 0) break;
+    if (total + (size_t)n > maxBodyBytes_) {
+      const size_t take = maxBodyBytes_ - total;
+      if (take) onChunk(buf, take);
+      resp.truncated = true;
+      break;
+    }
+    total += (size_t)n;
+    if (!onChunk(buf, (size_t)n)) break;   // caller aborted
+  }
+  return resp;
 }
 
 HttpResponse HttpRequest::Do() {
   HttpResponse resp;
+  if (malformed_) {
+    // A control character in the URL, or a bad authority/port: refuse without
+    // opening a socket so a request-splitting URL can never reach the wire.
+    resp.status = 0;
+    resp.reason = "malformed request URL";
+    return resp;
+  }
   if (badScheme_) {
     // https without TLS support, or a malformed scheme: refuse without opening
     // a socket. A silent downgrade would send plaintext where TLS was asked.
@@ -413,16 +769,38 @@ HttpResponse HttpRequest::Do() {
     return resp;
   }
 
+  // The Host header carries the port whenever it is not the scheme default (or
+  // whenever the caller wrote one explicitly) so a virtual host on a
+  // non-default port is addressed correctly (bug 35). An IPv6 literal is
+  // re-bracketed, which the Host grammar requires.
+  const bool ipv6 = host_.find(':') != std::string::npos;
+  const std::string hostHdr = (ipv6 ? "[" + host_ + "]" : host_) +
+      ((explicitPort_ || port_ != (tls_ ? 443 : 80))
+           ? ":" + std::to_string((unsigned)port_)
+           : "");
+
   std::string req = method_ + " " + path_ + " HTTP/1.1\r\n"
-      "Host: " + host_ + "\r\n"
+      "Host: " + hostHdr + "\r\n"
       "User-Agent: BerryAPI/" BERRY_VERSION_STRING "\r\n"
+      "Accept-Encoding: gzip, deflate\r\n"
       "Connection: close\r\n";
-  if (!body_.empty()) {
+  // A body-bearing method always sends Content-Length, even for an empty body,
+  // so a server that requires it does not answer 411 (bug 36).
+  if (!body_.empty() || method_ == "POST" || method_ == "PUT" ||
+      method_ == "PATCH") {
     char lenBuf[32];
     snprintf(lenBuf, sizeof lenBuf, "%zu", body_.size());
     req += std::string("Content-Length: ") + lenBuf + "\r\n";
   }
-  for (auto& h : headers_) req += h.first + ": " + h.second + "\r\n";
+  for (auto& h : headers_) {
+    std::string lower = h.first;
+    for (char& c : lower) c = (char)tolower((unsigned char)c);
+    if (lower == "host" || lower == "content-length" ||
+        lower == "connection" || lower == "transfer-encoding") {
+      continue;   // client-owned; a duplicate is a smuggling vector
+    }
+    req += h.first + ": " + h.second + "\r\n";
+  }
   req += "\r\n";
   req += body_;
 
@@ -473,27 +851,155 @@ HttpResponse HttpRequest::Do() {
     return resp;
   }
 
+  auto trim = [](std::string s) {
+    size_t b = 0, e = s.size();
+    while (b < e && (s[b] == ' ' || s[b] == '\t')) ++b;
+    while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r')) --e;
+    return s.substr(b, e - b);
+  };
+  auto ieq = [](const std::string& a, const char* b) {
+    size_t n = strlen(b);
+    if (a.size() != n) return false;
+    for (size_t i = 0; i < n; ++i)
+      if (tolower((unsigned char)a[i]) != tolower((unsigned char)b[i])) return false;
+    return true;
+  };
+
   std::istringstream hstream(raw.substr(0, hEnd));
   std::string line;
+  bool statusOk = false;
   if (std::getline(hstream, line)) {
-    // "HTTP/1.1 200 OK"
-    if (line.size() >= 12) {
-      resp.status = atoi(line.c_str() + 9);
-      size_t sp = line.find(' ', 9);
-      if (sp != std::string::npos) resp.reason = line.substr(sp + 1);
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    // Strict: "HTTP/1.0" or "HTTP/1.1", a space, then exactly three digits.
+    if (line.rfind("HTTP/1.", 0) == 0 && line.size() >= 12 &&
+        isdigit((unsigned char)line[7]) &&
+        isdigit((unsigned char)line[9]) &&
+        isdigit((unsigned char)line[10]) &&
+        isdigit((unsigned char)line[11]) && line[8] == ' ') {
+      resp.status = (line[9] - '0') * 100 + (line[10] - '0') * 10 +
+                    (line[11] - '0');
+      statusOk = true;
+      size_t sp = line.find(' ', 12);
+      resp.reason = sp == std::string::npos ? std::string() : line.substr(sp + 1);
     }
   }
+  if (!statusOk) {
+    resp.status = 0;
+    resp.reason = "bad HTTP status line";
+    return resp;
+  }
+
+  // Header fields. An obsolete line-fold (a continuation line starting with
+  // space/tab) appends to the previous value; a duplicate field is combined
+  // with ", " per RFC 7230 (bug 37).
   while (std::getline(hstream, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
     if (line.empty()) continue;
-    if (line.back() == '\r') line.pop_back();
+    if (line[0] == ' ' || line[0] == '\t') {
+      if (!resp.headers.empty()) {
+        resp.headers.back().second += " " + trim(line);
+      }
+      continue;
+    }
     size_t colon = line.find(':');
-    if (colon != std::string::npos) {
-      std::string v = line.substr(colon + 1);
-      while (!v.empty() && v.front() == ' ') v.erase(v.begin());
-      resp.headers.emplace_back(line.substr(0, colon), v);
+    if (colon == std::string::npos) continue;
+    std::string name = line.substr(0, colon);
+    std::string value = trim(line.substr(colon + 1));
+    bool merged = false;
+    for (auto& h : resp.headers) {
+      if (ieq(h.first, name.c_str())) {
+        h.second += ", " + value;
+        merged = true;
+        break;
+      }
+    }
+    if (!merged) resp.headers.emplace_back(name, value);
+  }
+
+  // Body framing. Chunked wins over Content-Length (RFC 7230 §3.3.3), so a
+  // server that chunks a response is decoded rather than having its size lines
+  // left in the body (bug 30).
+  std::string bodyRaw = raw.substr(hEnd + 4);
+  bool chunked = false;
+  const char* clHeader = resp.Header("Content-Length");
+  for (auto& h : resp.headers) {
+    if (ieq(h.first, "Transfer-Encoding") &&
+        h.second.find("chunked") != std::string::npos) {
+      chunked = true;
     }
   }
-  resp.body = raw.substr(hEnd + 4);
+
+  if (chunked) {
+    std::string decoded;
+    size_t pos = 0;
+    for (;;) {
+      size_t eol = bodyRaw.find("\r\n", pos);
+      if (eol == std::string::npos) { resp.truncated = true; break; }
+      std::string sizeLine = bodyRaw.substr(pos, eol - pos);
+      size_t semi = sizeLine.find(';');
+      if (semi != std::string::npos) sizeLine = sizeLine.substr(0, semi);
+      sizeLine = trim(sizeLine);
+      if (sizeLine.empty()) { resp.truncated = true; break; }
+      char* endp = nullptr;
+      unsigned long long chunk = strtoull(sizeLine.c_str(), &endp, 16);
+      if (endp == sizeLine.c_str()) { resp.truncated = true; break; }
+      if (chunk == 0) break;   // last chunk
+      pos = eol + 2;
+      if (pos + chunk > bodyRaw.size()) { resp.truncated = true; break; }
+      if (decoded.size() + chunk > maxBodyBytes_) {
+        decoded.append(bodyRaw, pos, maxBodyBytes_ - decoded.size());
+        resp.truncated = true;
+        break;
+      }
+      decoded.append(bodyRaw, pos, (size_t)chunk);
+      pos += (size_t)chunk + 2;   // skip the chunk's trailing CRLF
+    }
+    resp.body = std::move(decoded);
+  } else if (clHeader && strchr(clHeader, ',') != nullptr) {
+    // Two different Content-Length values (merged above) are a smuggling
+    // vector; refuse rather than pick one.
+    resp.truncated = true;
+    resp.body.clear();
+  } else if (clHeader) {
+    long long cl = strtoll(clHeader, nullptr, 10);
+    if (cl < 0) {
+      resp.truncated = true;
+      resp.body.clear();
+    } else if ((size_t)cl > bodyRaw.size()) {
+      // A short body is a truncated response, never a complete one (bug 31).
+      resp.body = bodyRaw;
+      resp.truncated = true;
+    } else {
+      resp.body = bodyRaw.substr(0, (size_t)cl);
+    }
+  } else {
+    // No framing header: the body runs to the end of the connection (close).
+    resp.body = std::move(bodyRaw);
+  }
+
+  // Content-Encoding (improvement 34): decode gzip/deflate so a caller sees the
+  // entity body, not the transfer encoding. A decode failure leaves the body as
+  // received (a caller that asked for identity still gets bytes) rather than
+  // silently corrupting it; `encoding_failed` records the failure.
+  {
+    const char* enc = resp.Header("Content-Encoding");
+    if (enc && *enc) {
+      std::string lower;
+      for (const char* q = enc; *q; ++q) lower.push_back((char)tolower((unsigned char)*q));
+      const bool gz = lower.find("gzip") != std::string::npos;
+      const bool df = lower.find("deflate") != std::string::npos;
+      if (gz || df) {
+        std::string decoded;
+        if (InflateAuto(reinterpret_cast<const u8*>(resp.body.data()),
+                        resp.body.size(), &decoded, maxBodyBytes_)) {
+          resp.body = std::move(decoded);
+        } else {
+          resp.encodingFailed = true;
+        }
+      }
+    }
+  }
+
   // Trim the body to the caller's cap even when the raw buffer was within the
   // headroom above, so maxBodyBytes is a hard bound on what a caller receives.
   if (resp.body.size() > maxBodyBytes_) {
@@ -514,6 +1020,107 @@ WebSocket::WebSocket() = default;
 WebSocket::~WebSocket() { Close(); }
 
 static std::string WsBase64(const unsigned char* data, size_t len);
+
+// A compact SHA-1, used only for the RFC6455 handshake accept value. SHA-1 is
+// not a security primitive here: the accept value proves the peer read our key,
+// nothing more.
+namespace {
+
+struct Sha1 {
+  u32 h[5] = {0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u};
+  u64 len = 0;
+  u8 buf[64];
+  size_t bufLen = 0;
+
+  static u32 Rol(u32 v, int n) { return (v << n) | (v >> (32 - n)); }
+
+  void Block(const u8* p) {
+    u32 w[80];
+    for (int i = 0; i < 16; ++i)
+      w[i] = ((u32)p[i * 4] << 24) | ((u32)p[i * 4 + 1] << 16) |
+             ((u32)p[i * 4 + 2] << 8) | (u32)p[i * 4 + 3];
+    for (int i = 16; i < 80; ++i)
+      w[i] = Rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    u32 a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+    for (int i = 0; i < 80; ++i) {
+      u32 f, k;
+      if (i < 20) { f = (b & c) | (~b & d); k = 0x5A827999u; }
+      else if (i < 40) { f = b ^ c ^ d; k = 0x6ED9EBA1u; }
+      else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDCu; }
+      else { f = b ^ c ^ d; k = 0xCA62C1D6u; }
+      u32 tmp = Rol(a, 5) + f + e + k + w[i];
+      e = d; d = c; c = Rol(b, 30); b = a; a = tmp;
+    }
+    h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+  }
+
+  void Update(const u8* p, size_t n) {
+    len += n;
+    while (n) {
+      size_t take = 64 - bufLen;
+      if (take > n) take = n;
+      memcpy(buf + bufLen, p, take);
+      bufLen += take; p += take; n -= take;
+      if (bufLen == 64) { Block(buf); bufLen = 0; }
+    }
+  }
+
+  void Final(u8 out[20]) {
+    u64 bits = len * 8;
+    u8 pad = 0x80;
+    Update(&pad, 1);
+    u8 zero = 0;
+    while (bufLen != 56) Update(&zero, 1);
+    u8 lenb[8];
+    for (int i = 0; i < 8; ++i) lenb[i] = (u8)(bits >> (56 - 8 * i));
+    Update(lenb, 8);
+    for (int i = 0; i < 5; ++i) {
+      out[i * 4] = (u8)(h[i] >> 24);
+      out[i * 4 + 1] = (u8)(h[i] >> 16);
+      out[i * 4 + 2] = (u8)(h[i] >> 8);
+      out[i * 4 + 3] = (u8)h[i];
+    }
+  }
+};
+
+}  // namespace
+
+std::string WsAcceptFor(const std::string& key) {
+  static const char kGuid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+  Sha1 s;
+  s.Update(reinterpret_cast<const u8*>(key.data()), key.size());
+  s.Update(reinterpret_cast<const u8*>(kGuid), sizeof(kGuid) - 1);
+  u8 digest[20];
+  s.Final(digest);
+  return WsBase64(digest, 20);
+}
+
+namespace {
+
+/// A cryptographically secure 4-byte masking key. Returns false when no
+/// CSPRNG is available, so a caller refuses rather than sending a predictable
+/// mask (RFC6455 §10.3 forbids a predictable mask).
+bool WsSecureMask(u8 out[4]) {
+  return VoiceRandomBytes(out, 4);
+}
+
+/// Fills `out` with `n` cryptographically secure bytes.
+bool WsSecureRandom(u8* out, size_t n) { return VoiceRandomBytes(out, n); }
+
+/// A close code that may appear on the wire. 1005 and 1006 are reserved for
+/// local use and must never be sent; 1004 is undefined; a code below 1000 or an
+/// unassigned 1016-2999 code is invalid (bug 45).
+bool ValidCloseCode(int code) {
+  if (code < 1000 || code >= 5000) return false;
+  switch (code) {
+    case 1004: case 1005: case 1006: case 1015:
+      return false;
+    default:
+      return true;
+  }
+}
+
+}  // namespace
 
 bool WebSocket::Connect(const char* url, int timeoutMs) {
   const Deadline deadline = Deadline::After(timeoutMs);
@@ -540,15 +1147,53 @@ bool WebSocket::Connect(const char* url, int timeoutMs) {
   std::string authority = slash == std::string::npos ? rest : rest.substr(0, slash);
   std::string path = slash == std::string::npos ? "/" : rest.substr(slash);
 
-  std::string host = authority;
-  u16 port = wantTls ? 443 : 80;
-  size_t colon = authority.rfind(':');
-  if (colon != std::string::npos) {
-    host = authority.substr(0, colon);
-    port = (u16)atoi(authority.substr(colon + 1).c_str());
+  // A control character in the URL would split the request line; refuse it.
+  for (char c : u) {
+    if (c == '\r' || c == '\n' || c == '\0') {
+      err_ = "bad ws url";
+      return false;
+    }
   }
 
+  std::string host = authority;
+  u16 port = wantTls ? 443 : 80;
+  bool explicitPort = false;
+  // A bracketed IPv6 literal keeps its colons; only a colon after the closing
+  // bracket separates the port.
+  if (!authority.empty() && authority[0] == '[') {
+    size_t close = authority.find(']');
+    if (close == std::string::npos) {
+      err_ = "bad ws url";
+      return false;
+    }
+    host = authority.substr(1, close - 1);
+    std::string after = authority.substr(close + 1);
+    if (!after.empty()) {
+      if (after[0] != ':') { err_ = "bad ws url"; return false; }
+      std::string ps = after.substr(1);
+      for (char c : ps) if (!isdigit((unsigned char)c)) { err_ = "bad ws url"; return false; }
+      long p = strtol(ps.c_str(), nullptr, 10);
+      if (p < 1 || p > 65535) { err_ = "bad ws port"; return false; }
+      port = (u16)p;
+      explicitPort = true;
+    }
+  } else {
+    size_t colon = authority.rfind(':');
+    if (colon != std::string::npos) {
+      host = authority.substr(0, colon);
+      std::string ps = authority.substr(colon + 1);
+      for (char c : ps) if (!isdigit((unsigned char)c)) { err_ = "bad ws url"; return false; }
+      long p = strtol(ps.c_str(), nullptr, 10);
+      if (p < 1 || p > 65535) { err_ = "bad ws port"; return false; }
+      port = (u16)p;
+      explicitPort = true;
+    }
+  }
+  if (host.empty()) { err_ = "bad ws url"; return false; }
+
   StreamClose();
+  rxBuf_.clear();
+  closeSent_ = false;
   tls_ = wantTls;
   if (wantTls) {
     tlsSock_.reset(new TlsSocket());
@@ -567,41 +1212,91 @@ bool WebSocket::Connect(const char* url, int timeoutMs) {
     }
   }
 
-  // Random-ish key (16 bytes base64). Deterministic is fine for private use,
-  // but we derive from a counter for a fresh handshake each time.
+  // A random 16-byte nonce, base64-encoded, as RFC6455 §4.1 requires. A
+  // predictable key would let a cache-poisoning proxy forge the handshake.
   unsigned char keyBytes[16];
-  for (int i = 0; i < 16; ++i) keyBytes[i] = (unsigned char)((frameSeq_ * 31 + i * 7) & 0xff);
+  if (!WsSecureRandom(keyBytes, sizeof keyBytes)) {
+    err_ = "no csprng";
+    StreamClose();
+    return false;
+  }
   std::string key = WsBase64(keyBytes, 16);
 
+  const bool ipv6 = host.find(':') != std::string::npos;
+  const std::string hostHdr = (ipv6 ? "[" + host + "]" : host) +
+      ((explicitPort || port != (wantTls ? 443 : 80))
+           ? ":" + std::to_string((unsigned)port)
+           : "");
   std::string req =
       "GET " + path + " HTTP/1.1\r\n"
-      "Host: " + host + "\r\n"
+      "Host: " + hostHdr + "\r\n"
       "Upgrade: websocket\r\n"
       "Connection: Upgrade\r\n"
       "Sec-WebSocket-Key: " + key + "\r\n"
       "Sec-WebSocket-Version: 13\r\n"
       "User-Agent: BerryAPI\r\n\r\n";
-  if (StreamSend(req.data(), req.size(), deadline) != (ssize_t)req.size()) return false;
+  if (StreamSend(req.data(), req.size(), deadline) != (ssize_t)req.size()) {
+    err_ = "handshake send failed";
+    StreamClose();
+    return false;
+  }
 
-  // Read handshake response.
+  // Read handshake response, bounded.
   char buf[4096];
   std::string raw;
   while (raw.find("\r\n\r\n") == std::string::npos) {
     ssize_t n = StreamRecv(buf, sizeof buf, deadline);
     if (n <= 0) {
       err_ = "handshake timeout";
+      StreamClose();
       return false;
     }
     raw.append(buf, (size_t)n);
-    if (raw.size() > 65536) return false;
+    if (raw.size() > 65536) {
+      err_ = "handshake too large";
+      StreamClose();
+      return false;
+    }
   }
-  // Verify the 101 Switching Protocols upgrade response.
-  bool upgraded = raw.rfind("HTTP/1.1 101", 0) == 0 ||
-                  raw.find(" 101 ") != std::string::npos;
-  if (!upgraded) {
+  size_t hEnd = raw.find("\r\n\r\n");
+
+  // Strict upgrade check: the status line must be exactly "HTTP/1.1 101 ...",
+  // and the Upgrade and Connection headers must both be present (bug 39).
+  bool ok101 = raw.rfind("HTTP/1.1 101", 0) == 0;
+  std::string head = raw.substr(0, hEnd);
+  bool hasUpgrade = head.find("Upgrade: websocket") != std::string::npos ||
+                    head.find("upgrade: websocket") != std::string::npos;
+  bool hasConnection = head.find("Connection: Upgrade") != std::string::npos ||
+                       head.find("connection: Upgrade") != std::string::npos ||
+                       head.find("connection: upgrade") != std::string::npos;
+  // Sec-WebSocket-Accept must equal base64(SHA1(key + GUID)) (bug 38).
+  std::string wantAccept = WsAcceptFor(key);
+  bool acceptOk = false;
+  {
+    const std::string hdrName = "Sec-WebSocket-Accept:";
+    size_t p = head.find(hdrName);
+    if (p == std::string::npos) p = head.find("sec-websocket-accept:");
+    if (p != std::string::npos) {
+      size_t v = p + hdrName.size();
+      size_t e = head.find("\r\n", v);
+      std::string val = head.substr(v, e == std::string::npos ? std::string::npos : e - v);
+      size_t b = val.find_first_not_of(" \t");
+      size_t en = val.find_last_not_of(" \t\r");
+      if (b != std::string::npos) val = val.substr(b, en - b + 1);
+      acceptOk = (val == wantAccept);
+    }
+  }
+  if (!ok101 || !hasUpgrade || !hasConnection || !acceptOk) {
     err_ = "not upgraded";
+    StreamClose();
     return false;
   }
+
+  // Any bytes after the handshake terminator are the start of the frame
+  // stream; keep them so the first frame is not lost (bug 43).
+  std::string leftover = raw.substr(hEnd + 4);
+  rxBuf_.assign(leftover.begin(), leftover.end());
+
   open_ = true;
   if (onOpen_) onOpen_();
   return true;
@@ -638,15 +1333,46 @@ void WebSocket::StreamClose() {
 void WebSocket::Close(int code, const char* reason) {
   if (!open_) return;
   open_ = false;
-  unsigned char frame[4];
-  frame[0] = 0x88;
-  frame[1] = 0x02;
-  frame[2] = (unsigned char)(code >> 8);
-  frame[3] = (unsigned char)(code & 0xff);
-  const Deadline dl = Deadline::After(1000);
-  if (sock_ || tlsSock_) StreamSend(frame, sizeof frame, dl);
-  if (onClose_) onClose_(code, reason ? reason : "");
+  const char* why = reason ? reason : "";
+
+  // Send a properly masked close frame carrying a validated code and the
+  // reason text, unless the code may not appear on the wire (bug 45).
+  if ((sock_ || tlsSock_) && !closeSent_) {
+    closeSent_ = true;
+    if (ValidCloseCode(code)) {
+      std::string payload;
+      payload.push_back((char)((code >> 8) & 0xff));
+      payload.push_back((char)(code & 0xff));
+      payload.append(why);
+      if (payload.size() > 125) payload.resize(125);   // control frame cap
+      // Reuse SendFrame's masking, but it checks open_; build inline.
+      u8 mask[4];
+      if (WsSecureMask(mask)) {
+        std::vector<u8> frame;
+        frame.push_back(0x88);
+        frame.push_back((u8)(0x80 | payload.size()));
+        frame.push_back(mask[0]); frame.push_back(mask[1]);
+        frame.push_back(mask[2]); frame.push_back(mask[3]);
+        for (size_t i = 0; i < payload.size(); ++i)
+          frame.push_back((u8)payload[i] ^ mask[i % 4]);
+        std::lock_guard<std::mutex> lk(sendMutex_);
+        StreamSend(frame.data(), frame.size(), Deadline::After(1000));
+      }
+    }
+  }
+
+  // Wait briefly for the peer's close echo so the server sees a clean close.
+  const Deadline dl = Deadline::After(500);
+  u8 tmp[64];
+  while (StreamWaitReadable(dl)) {
+    ssize_t n = StreamRecv(tmp, sizeof tmp, dl);
+    if (n <= 0) break;
+    if ((tmp[0] & 0x0f) == 0x08) break;   // a close frame arrived
+  }
+
+  if (onClose_) onClose_(code, why);
   StreamClose();
+  rxBuf_.clear();
 }
 
 bool WebSocket::IsOpen() const { return open_; }
@@ -663,6 +1389,11 @@ bool WebSocket::SendPing() {
 
 bool WebSocket::SendFrame(WsOpcode op, const void* payload, size_t len) {
   if (!open_ || (!sock_ && !tlsSock_)) return false;
+
+  // A fresh, unpredictable masking key per frame, from the CSPRNG (bug 41).
+  u8 mask[4];
+  if (!WsSecureMask(mask)) return false;
+
   std::vector<u8> frame;
   frame.push_back(0x80 | (u8)op);   // FIN + opcode
   size_t n = len;
@@ -674,22 +1405,18 @@ bool WebSocket::SendFrame(WsOpcode op, const void* payload, size_t len) {
     frame.push_back((u8)(0x80 | 127));
     for (int i = 7; i >= 0; --i) frame.push_back((u8)((n >> (8 * i)) & 0xff));
   }
-  // Masking key (client frames must be masked).
-  u32 mask = (u32)(frameSeq_ * 2654435761u) + 0x9e3779b9u;
-  frameSeq_++;
-  frame.push_back((u8)(mask >> 24));
-  frame.push_back((u8)(mask >> 16));
-  frame.push_back((u8)(mask >> 8));
-  frame.push_back((u8)(mask & 0xff));
+  frame.push_back(mask[0]); frame.push_back(mask[1]);
+  frame.push_back(mask[2]); frame.push_back(mask[3]);
   const u8* p = (const u8*)payload;
-  // Mask key is transmitted big-endian (mask>>24 first) per RFC6455; apply it
-  // in the same byte order so the receiver's key[i % 4] decrypts correctly.
-  const u8 key[4] = {(u8)(mask >> 24), (u8)(mask >> 16), (u8)(mask >> 8), (u8)mask};
-  for (size_t i = 0; i < n; ++i) frame.push_back((u8)(p[i] ^ key[i % 4]));
+  for (size_t i = 0; i < n; ++i) frame.push_back((u8)(p[i] ^ mask[i % 4]));
 
+  // The whole send (including the mask draw) is serialized, so two concurrent
+  // SendFrame calls cannot interleave on the wire.
   std::lock_guard<std::mutex> lk(sendMutex_);
-  return StreamSend(frame.data(), frame.size(), Deadline::After(5000)) ==
-         (ssize_t)frame.size();
+  const bool ok = StreamSend(frame.data(), frame.size(), Deadline::After(5000)) ==
+                  (ssize_t)frame.size();
+  if (ok) lastSendMs_ = NowMs();
+  return ok;
 }
 
 //----------------------------------------------------------------------------
@@ -721,21 +1448,27 @@ WsFrameStatus ParseWsFrame(const u8* data, size_t len, WsFrameView* out,
   // before deciding we need more header bytes).
   if (control && (payloadLen == 126 || payloadLen == 127)) return WsFrameStatus::Invalid;
 
+  // A server-to-client frame MUST NOT be masked (RFC6455 §5.1). A masked frame
+  // is a protocol error, not something to accept and unmask (bug 46).
+  if (masked) return WsFrameStatus::Invalid;
+
   size_t off = 2;
   if (payloadLen == 126) {
     if (len < off + 2) return WsFrameStatus::NeedMore;
     payloadLen = ((u64)data[off] << 8) | data[off + 1];
+    // Non-minimal encoding: a value < 126 must have used the 7-bit form.
+    if (payloadLen < 126) return WsFrameStatus::Invalid;
     off += 2;
   } else if (payloadLen == 127) {
     if (len < off + 8) return WsFrameStatus::NeedMore;
     payloadLen = 0;
-    for (int i = 0; i < 8; ++i) payloadLen = (payloadLen << 8) | data[off + i];
+    for (size_t i = 0; i < 8; ++i) {
+      payloadLen = (payloadLen << 8) | (u64)data[off + i];
+    }
+    // The most significant bit must be 0, and the value must need 8 bytes.
+    if (payloadLen & 0x8000000000000000ULL) return WsFrameStatus::Invalid;
+    if (payloadLen < 65536) return WsFrameStatus::Invalid;
     off += 8;
-  }
-
-  if (masked) {
-    if (len < off + 4) return WsFrameStatus::NeedMore;
-    off += 4;   // masking key; payload that follows is masked on the wire
   }
 
   // RFC6455: control frames are <=125 bytes and not fragmented.
@@ -757,71 +1490,146 @@ WsFrameStatus ParseWsFrame(const u8* data, size_t len, WsFrameView* out,
   return WsFrameStatus::Ok;
 }
 
+bool WebSocket::RecvInto(std::string* out, size_t n, const Deadline& dl) {
+  while (out->size() < n) {
+    char tmp[4096];
+    size_t want = n - out->size();
+    if (want > sizeof tmp) want = sizeof tmp;
+    ssize_t r = StreamRecv(tmp, want, dl);
+    if (r <= 0) return false;
+    out->append(tmp, (size_t)r);
+  }
+  return true;
+}
+
 void WebSocket::Pump() {
   if (!open_ || (!sock_ && !tlsSock_)) return;
-  // A Pump is a bounded read attempt, not an operation with a deadline; each
-  // partial read is given a short slice so one Pump cannot stall the worker.
+  // A Pump is a bounded read attempt. The carried buffer (rxBuf_) is the single
+  // source of frame bytes, so bytes that arrived with the handshake, or a
+  // partial frame from an earlier Pump, are never lost (bugs 43, 47).
   const Deadline poll = Deadline::After(200);
-  if (!StreamWaitReadable(poll)) return;
-  unsigned char hdr[2];
-  ssize_t hr = StreamRecv(hdr, 2, poll);
-  if (hr < 2) {
-    if (hr == 0) { open_ = false; if (onClose_) onClose_(1006, "eof"); }
+
+  // Keepalive (improvement 51): send a ping when the interval has elapsed since
+  // the last send, so an idle connection is kept open.
+  if (keepaliveMs_ > 0) {
+    const u64 now = NowMs();
+    if (lastSendMs_ == 0 || now - lastSendMs_ >= (u64)keepaliveMs_) {
+      if (SendFrame(WsOpcode::Ping, nullptr, 0)) lastSendMs_ = now;
+    }
+  }
+
+  // Read whatever is available into rxBuf_.
+  bool eof = false;
+  if (StreamWaitReadable(poll)) {
+    char tmp[8192];
+    ssize_t n = StreamRecv(tmp, sizeof tmp, poll);
+    if (n > 0) {
+      rxBuf_.insert(rxBuf_.end(), (const u8*)tmp, (const u8*)tmp + n);
+    } else if (n == 0) {
+      eof = true;
+    }
+  }
+  // Parse already-buffered data BEFORE reporting EOF: a peer that sends its
+  // frames and closes in one go must still have those frames delivered, so the
+  // EOF is only reported once the buffer is drained.
+  if (rxBuf_.empty()) {
+    if (eof) {
+      open_ = false;
+      if (onClose_) onClose_(1006, "eof");
+    }
     return;
   }
-  bool fin = (hdr[0] & 0x80) != 0;
-  u8 opcode = hdr[0] & 0x0f;
-  bool masked = (hdr[1] & 0x80) != 0;
-  u64 len = hdr[1] & 0x7f;
-  const Deadline body = Deadline::After(1000);
-  if (len == 126) {
-    unsigned char ext[2];
-    if (StreamRecv(ext, 2, body) != 2) return;
-    len = ((u64)ext[0] << 8) | ext[1];
-  } else if (len == 127) {
-    unsigned char ext[8];
-    if (StreamRecv(ext, 8, body) != 8) return;
-    len = 0;
-    for (int i = 0; i < 8; ++i) len = (len << 8) | ext[i];
-  }
-  unsigned char maskKey[4] = {0, 0, 0, 0};
-  if (masked && StreamRecv(maskKey, 4, body) != 4) return;
-  if (len > 16u * 1024 * 1024) return;   // sanity cap
-  std::vector<u8> payload((size_t)len);
-  size_t got = 0;
-  while (got < len) {
-    ssize_t n = StreamRecv(payload.data() + got, (size_t)(len - got), body);
-    if (n <= 0) return;
-    got += (size_t)n;
-  }
-  for (size_t i = 0; i < payload.size(); ++i) payload[i] ^= maskKey[i % 4];
 
-  WsMessage msg{(WsOpcode)opcode, std::move(payload), fin};
-  if (opcode == (u8)WsOpcode::Close) {
+  WsFrameView view;
+  WsFrameStatus st = ParseWsFrame(rxBuf_.data(), rxBuf_.size(), &view,
+                                  16u * 1024 * 1024);
+  if (st == WsFrameStatus::NeedMore) return;   // keep buffering
+  if (st == WsFrameStatus::Invalid) {
+    // A protocol error from the peer: close with 1002 and stop.
+    err_ = "protocol error";
+    Close(1002, "protocol error");
+    return;
+  }
+  if (st == WsFrameStatus::Oversized) {
+    // A frame bomb: close 1009 and drop the buffer so we never desync (bug 47).
+    err_ = "oversized frame";
+    Close(1009, "message too big");
+    return;
+  }
+
+  // A complete frame: consume exactly its bytes.
+  std::vector<u8> payload(view.payload, view.payload + view.payloadLen);
+  rxBuf_.erase(rxBuf_.begin(),
+               rxBuf_.begin() + static_cast<std::ptrdiff_t>(view.frameLen));
+
+  WsMessage msg{(WsOpcode)view.opcode, std::move(payload), view.fin};
+  if (view.opcode == (u8)WsOpcode::Close) {
     int code = 1000;
     if (msg.payload.size() >= 2) code = (msg.payload[0] << 8) | msg.payload[1];
     std::string reason = msg.payload.size() > 2
         ? std::string((const char*)msg.payload.data() + 2, msg.payload.size() - 2) : "";
-    HandleCloseFrame(msg);
+    // Echo the close (masked) and report it once.
+    if (!closeSent_ && (sock_ || tlsSock_)) {
+      closeSent_ = true;
+      u8 mask[4];
+      if (WsSecureMask(mask)) {
+        u8 reply[6] = {0x88, 0x82, mask[0], mask[1], mask[2], mask[3]};
+        u8 p0 = (u8)((code >> 8) & 0xff) ^ mask[0];
+        u8 p1 = (u8)(code & 0xff) ^ mask[1];
+        reply[4] = p0; reply[5] = p1;
+        StreamSend(reply, sizeof reply, Deadline::After(1000));
+      }
+    }
     open_ = false;
     if (onClose_) onClose_(code, reason);
+    StreamClose();
+    rxBuf_.clear();
     return;
   }
-  if (opcode == (u8)WsOpcode::Ping) {
-    SendFrame(WsOpcode::Pong, msg.payload.data(), msg.payload.size());
+  if (view.opcode == (u8)WsOpcode::Ping) {
+    if (autoPong_) {
+      SendFrame(WsOpcode::Pong, msg.payload.data(), msg.payload.size());
+    }
     return;
   }
-  if (onMessage_) onMessage_(msg);
-}
+  if (view.opcode == (u8)WsOpcode::Pong) return;   // a keepalive reply
 
-void WebSocket::HandleCloseFrame(const WsMessage& frame) {
-  // Respond with a close echo so the server sees a clean close.
-  unsigned char reply[4] = {0x88, 0x02, 0, 0};
-  if (frame.payload.size() >= 2) {
-    reply[2] = frame.payload[0];
-    reply[3] = frame.payload[1];
+  // Fragmentation reassembly (improvement 51): a data frame with FIN=0 starts a
+  // message; Continuation frames append; the FIN frame completes it. Control
+  // frames (handled above) may interleave and do not disturb the buffer.
+  const bool isData = view.opcode == (u8)WsOpcode::Text ||
+                      view.opcode == (u8)WsOpcode::Binary;
+  const bool isCont = view.opcode == (u8)WsOpcode::Continuation;
+  if (isData && !view.fin) {
+    fragmenting_ = true;
+    fragOpcode_ = view.opcode;
+    fragBuf_ = std::move(msg.payload);
+    return;
   }
-  if (sock_ || tlsSock_) StreamSend(reply, 4, Deadline::After(1000));
+  if (isCont) {
+    if (!fragmenting_) {
+      // A continuation with no start is a protocol error.
+      Close(1002, "unexpected continuation");
+      return;
+    }
+    if (fragBuf_.size() + msg.payload.size() > kMaxMessage) {
+      Close(1009, "message too big");
+      return;
+    }
+    fragBuf_.insert(fragBuf_.end(), msg.payload.begin(), msg.payload.end());
+    if (!view.fin) return;   // more fragments to come
+    // The message is complete: deliver it under its original opcode.
+    WsMessage whole{(WsOpcode)fragOpcode_, std::move(fragBuf_), true};
+    fragmenting_ = false;
+    fragBuf_.clear();
+    fragOpcode_ = 0;
+    if (onMessage_) onMessage_(whole);
+    return;
+  }
+  if (isData && view.fin) {
+    if (onMessage_) onMessage_(msg);
+    return;
+  }
 }
 
 //----------------------------------------------------------------------------
@@ -835,7 +1643,7 @@ static std::string WsBase64(const unsigned char* d, size_t n) {
   std::string out;
   int i = 0;
   while (i + 3 <= (int)n) {
-    u32 v = (d[i] << 16) | (d[i + 1] << 8) | d[i + 2];
+    u32 v = ((u32)d[i] << 16) | ((u32)d[i + 1] << 8) | (u32)d[i + 2];
     out += kBase64[(v >> 18) & 63];
     out += kBase64[(v >> 12) & 63];
     out += kBase64[(v >> 6) & 63];
@@ -844,12 +1652,12 @@ static std::string WsBase64(const unsigned char* d, size_t n) {
   }
   int rem = (int)n - i;
   if (rem == 1) {
-    u32 v = d[i] << 16;
+    u32 v = (u32)d[i] << 16;
     out += kBase64[(v >> 18) & 63];
     out += kBase64[(v >> 12) & 63];
     out += "==";
   } else if (rem == 2) {
-    u32 v = (d[i] << 16) | (d[i + 1] << 8);
+    u32 v = ((u32)d[i] << 16) | ((u32)d[i + 1] << 8);
     out += kBase64[(v >> 18) & 63];
     out += kBase64[(v >> 12) & 63];
     out += kBase64[(v >> 6) & 63];

@@ -210,6 +210,23 @@ bool ScriptHost::RestoreState(const std::string& state, ScriptError* err) {
   return vm_->RestoreState(state, err);
 }
 
+int ScriptHost::StateSchemaVersion() const {
+  if (!vm_) return 0;
+  // The script declares its state schema by exporting a numeric global
+  // `state_schema`. Absent or non-numeric reads as 0 ("no schema declared"),
+  // which matches every other version on reload.
+  for (const std::string& name : vm_->FunctionNames()) {
+    if (name != "state_schema") continue;
+    std::vector<ScriptValue> ret;
+    if (vm_->Call("state_schema", {}, &ret, nullptr) == ScriptStatus::Ok &&
+        !ret.empty() && ret[0].IsNumber()) {
+      return (int)ret[0].AsNumber();
+    }
+    return 0;
+  }
+  return 0;
+}
+
 //----------------------------------------------------------------------------
 // ScriptWorker
 //----------------------------------------------------------------------------

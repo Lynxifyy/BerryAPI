@@ -31,6 +31,35 @@ bool GetString(const detail::json::Value& obj, const char* key,
   return true;
 }
 
+/// True when `host` is a bare IPv4 literal inside a loopback, link-local,
+/// private or CGNAT range, or an IPv6 loopback/link-local/ULA literal. A relay
+/// host like this is refused by default so a malicious token cannot point the
+/// client at its own LAN (bug 56).
+bool IsPrivateOrLocalHost(const std::string& host) {
+  // IPv6 loopback / link-local / unique-local.
+  if (host == "::1" || host == "::") return true;
+  if (host.size() >= 2 &&
+      (host.rfind("fe80:", 0) == 0 || host.rfind("FE80:", 0) == 0 ||
+       host.rfind("fc", 0) == 0 || host.rfind("fd", 0) == 0 ||
+       host.rfind("FC", 0) == 0 || host.rfind("FD", 0) == 0)) {
+    return true;
+  }
+  // Dotted-quad IPv4.
+  unsigned a = 0, b = 0, c = 0, d = 0;
+  char extra = 0;
+  if (sscanf(host.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &extra) == 4) {
+    if (a > 255 || b > 255 || c > 255 || d > 255) return true;   // malformed
+    if (a == 127) return true;                    // loopback
+    if (a == 10) return true;                     // private
+    if (a == 192 && b == 168) return true;        // private
+    if (a == 172 && b >= 16 && b <= 31) return true;  // private
+    if (a == 169 && b == 254) return true;        // link-local
+    if (a == 100 && b >= 64 && b <= 127) return true; // CGNAT
+    if (a == 0) return true;                      // "this network"
+  }
+  return false;
+}
+
 }  // namespace
 
 std::string RoomTokenSignedBytes(const RoomToken& token) {
@@ -72,22 +101,52 @@ bool RoomTokenClient::VerifyDocument(const std::string& body,
   if (!GetString(root, "relay_host", &tok.relayHost) || tok.relayHost.empty()) {
     return fail("token has no relay host");
   }
+  // The relay host must be a plain hostname or address: no control character,
+  // no scheme, no path. A CRLF here would be a header-injection vector.
+  for (char ch : tok.relayHost) {
+    if (ch == '\r' || ch == '\n' || ch == '\0' || ch == '/' || ch == ' ' ||
+        ch == '@') {
+      return fail("token relay host is malformed");
+    }
+  }
+  // Refuse a relay in the client's own LAN unless the deployment opts in, so a
+  // malicious (or compromised-backend) token cannot pivot into the local
+  // network (bug 56).
+  if (!cfg_.allowPrivateRelayHost && IsPrivateOrLocalHost(tok.relayHost)) {
+    return fail("token relay host is in a local/private range");
+  }
   const detail::json::Value* portV = root.Get("relay_port");
   if (portV == nullptr || !portV->IsNumber() || portV->number < 1 ||
       portV->number > 65535) {
     return fail("token has no valid relay port");
   }
+  // A fractional or non-finite port is refused rather than truncated: 443.7 is
+  // not 443 (bug 55).
+  if (portV->number != (double)(unsigned long long)portV->number) {
+    return fail("token relay port is not an integer");
+  }
   tok.relayPort = (u16)portV->number;
 
-  if (const detail::json::Value* expV = root.Get("expires_at")) {
-    if (expV->IsNumber() && expV->number > 0) {
-      tok.expiresAtMs = (u64)expV->number;
-    }
+  // expires_at is REQUIRED: a token with no expiry, or a non-positive one,
+  // never expires, which turns a leaked token into a permanent key (bug 54).
+  const detail::json::Value* expV = root.Get("expires_at");
+  if (expV == nullptr || !expV->IsNumber() || expV->number <= 0) {
+    return fail("token has no expiry");
   }
+  if (expV->number != (double)(unsigned long long)expV->number) {
+    return fail("token expiry is not an integer");
+  }
+  if (expV->number > 1.8e18) return fail("token expiry is out of range");
+  tok.expiresAtMs = (u64)expV->number;
   if (tok.expired(nowMs)) return fail("token expired");
 
-  // Signature: required and verified when a backend key is configured.
-  if (!cfg_.backendPublicKeyHex.empty()) {
+  // Signature: required and verified. An empty backend key fails closed unless
+  // the deployment explicitly opted in to TLS-only authentication (bug 53).
+  if (cfg_.backendPublicKeyHex.empty()) {
+    if (!cfg_.allowUnsigned) {
+      return fail("no backend key configured and unsigned tokens are not allowed");
+    }
+  } else {
     std::string sigHex;
     if (!GetString(root, "signature", &sigHex)) {
       return fail("token is not signed");
