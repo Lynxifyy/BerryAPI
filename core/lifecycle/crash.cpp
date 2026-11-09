@@ -85,7 +85,13 @@ void SignalHandler(int sig, siginfo_t* info, void*) {
       n = snprintf(line, sizeof line, "fault address: %p\n", info->si_addr);
       if (n > 0) write(fd, line, (size_t)n);
     }
-#if defined(__GLIBC__) || defined(__linux__)
+// backtrace(3) is a glibc facility. On Android it is only declared from API 33,
+// while the on-device build targets API 24, so the symbol would be undeclared
+// there. Detect availability rather than assuming __linux__ implies glibc: when
+// it is absent the report still carries the signal, the fault address and the
+// last log line.
+#if defined(__GLIBC__) || (defined(__linux__) && !defined(__ANDROID__)) || \
+    (defined(__ANDROID__) && defined(__ANDROID_API__) && __ANDROID_API__ >= 33)
     void* frames[64];
     int got = backtrace(frames, 64);
     backtrace_symbols_fd(frames, got, fd);
