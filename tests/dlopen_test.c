@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "berry/config.h"
+#include "berry/cosmetic_c.h"
 
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { \
@@ -78,6 +79,41 @@ int main(int argc, char** argv) {
   CHECK(isAttached() == 1);
   detach();
   CHECK(isAttached() == 0);
+
+  // --- The cosmetic C surface: resolved by dlsym, refused before attach, and
+  // self-consistent (size + abi) after. This is the contract the launcher's
+  // native preloader binds; a missing export leaves cosmetics silently dark. ---
+  uint32_t (*cosmeticAbi)(void) =
+      (uint32_t (*)(void))dlsym(h, "BERRY_CosmeticAbiVersion");
+  uint32_t (*cosmeticSize)(void) =
+      (uint32_t (*)(void))dlsym(h, "BERRY_CosmeticStructSize");
+  uint32_t (*cosmeticReaderSize)(void) =
+      (uint32_t (*)(void))dlsym(h, "BERRY_CosmeticBoneReaderStructSize");
+  const BerryCosmeticApi* (*getCosmeticApi)(void) =
+      (const BerryCosmeticApi* (*)(void))dlsym(h, "BERRY_GetCosmeticApi");
+  const char* (*cosmeticStatusName)(int32_t) =
+      (const char* (*)(int32_t))dlsym(h, "BERRY_CosmeticStatusName");
+  CHECK(cosmeticAbi && cosmeticSize && cosmeticReaderSize && getCosmeticApi &&
+        cosmeticStatusName);
+  if (cosmeticAbi && cosmeticSize && cosmeticReaderSize && getCosmeticApi) {
+    CHECK(cosmeticAbi() == BERRY_COSMETIC_ABI_VERSION);
+    CHECK(cosmeticReaderSize() == sizeof(BerryPlayerModelBoneReaderC));
+    CHECK(getCosmeticApi() == NULL);   // detached: no surface
+    detach();
+    CHECK(inject() == 1);
+    const BerryCosmeticApi* capi = getCosmeticApi();
+    CHECK(capi != NULL);
+    if (capi != NULL) {
+      CHECK(capi->size == cosmeticSize());
+      CHECK(capi->abi_version == cosmeticAbi());
+      CHECK(capi->size == sizeof(BerryCosmeticApi));
+      CHECK(capi->equip && capi->list && capi->stats &&
+            capi->set_player_model_hook);
+      CHECK(capi->registry_count() > 0);
+    }
+    detach();
+    CHECK(getCosmeticApi() == NULL);
+  }
 
   // --- Plain Inject remains idempotent and re-injectable ---
   int wasAttached = isAttached();

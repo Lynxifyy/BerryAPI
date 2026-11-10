@@ -26,7 +26,11 @@
 //     BERRY_ClearWorldSeam / BERRY_HasWorldSeam and the BerrySeamC struct), so
 //     a host that is not linked against the C++ ABI can bind a LevelSeam and
 //     the World module's entity reads stop failing closed.
-#define BERRY_ABI_VERSION 8
+// v9: BerryConfigC grew the cosmetic fields (cosmetic_pack_directory,
+//     cosmetic_asset_directory), so a host can point the client at its cosmetic
+//     packs and asset data through the C ABI. The cosmetic surface itself lives
+//     in berry/cosmetic_c.h under its own BERRY_COSMETIC_ABI_VERSION.
+#define BERRY_ABI_VERSION 9
 
 // Legacy internal SDK ABI identifier (kept for compatibility).
 #define BERRY_SDK_ABI 1

@@ -75,7 +75,10 @@ See [docs/BUILD.md](docs/BUILD.md) for NDK details, Dobby CMake, and hook flags.
 
 ## Exported C ABI
 
-`libBerryAPI.so` exports exactly these symbols (C, `extern "C"`):
+`libBerryAPI.so` exports a small C surface (C, `extern "C"`) so a host that is
+not linked against BerryAPI's C++ ABI can drive it through `dlopen` + `dlsym`.
+
+Core lifecycle:
 
 ```c
 bool        BERRY_Inject();
@@ -87,6 +90,20 @@ BERRY_PatchedFn BERRY_ShimPatchInPlace(void* target, void* detour);
 int         BERRY_ShimUnpatch(void* target);
 bool        BERRY_ShimCanPatch();
 ```
+
+Feature surfaces, each a plain C struct of function pointers with a `size` and
+an `abi_version` the host checks before calling a pointer, and each obtained
+from a `BERRY_Get*Api()` that returns null before attach:
+
+| surface | header | getter |
+|---------|--------|--------|
+| world seam | `berry/seam.h` | `BERRY_SetWorldSeam` |
+| replay | `berry/replay_c.h` | `BERRY_GetReplayApi` |
+| performance governor | `berry/governor_c.h` | `BERRY_GetGovernorApi` |
+| cosmetics | `berry/cosmetic_c.h` | `BERRY_GetCosmeticApi` |
+
+The cosmetic surface also carries the player-model hook
+(`set_player_model_hook`), which is what makes cosmetics resolve to a real rig.
 
 `BerryConfigC` is a **plain C struct** (see `include/berry/config.h`) that starts
 with `uint32_t size; uint32_t abi_version;`. The library validates both and

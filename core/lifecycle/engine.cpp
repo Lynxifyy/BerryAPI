@@ -145,6 +145,12 @@ bool Engine::Bootstrap(const BerryConfigC& cfg) {
   if (cfg.script_data_directory) {
     internal.scriptDataDirectory = cfg.script_data_directory;
   }
+  if (cfg.cosmetic_pack_directory) {
+    internal.cosmeticPackDirectory = cfg.cosmetic_pack_directory;
+  }
+  if (cfg.cosmetic_asset_directory) {
+    internal.cosmeticAssetDirectory = cfg.cosmetic_asset_directory;
+  }
   ApplyConfig(internal);
   Log::Info("BerryAPI v%s bootstrapped (abi %u)", BERRY_VERSION_STRING,
             (unsigned)BERRY_ABI_VERSION);
@@ -242,6 +248,8 @@ bool Engine::Attach() {
     ccfg.voiceRoomSecret = cfg_.voiceRoomSecret;
     ccfg.lanIface = cfg_.lanIface;
     ccfg.scriptDataDirectory = cfg_.scriptDataDirectory;
+    ccfg.cosmeticPackDirectory = cfg_.cosmeticPackDirectory;
+    ccfg.cosmeticAssetDirectory = cfg_.cosmeticAssetDirectory;
     client_ = std::make_unique<BerryClient>();
     if (!client_->Attach(*this, ccfg)) {
       Log::Error("BerryClient failed to attach; detaching modules");

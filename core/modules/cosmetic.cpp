@@ -593,6 +593,12 @@ bool CosmeticService::Unequip(CosmeticSlot slot) {
   return local_.Unequip(slot);
 }
 
+void CosmeticService::ClearLocalLoadout() {
+  std::lock_guard<std::mutex> lk(mutex_);
+  local_.Clear();
+  animClock_.store(0.0f);
+}
+
 std::string CosmeticService::Equipped(CosmeticSlot slot) const {
   std::lock_guard<std::mutex> lk(mutex_);
   return local_.Equipped(slot);
