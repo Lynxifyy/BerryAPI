@@ -473,11 +473,26 @@ void AsyncRuntime::InstallBindings(ScriptBindings* bindings,
                            args.empty() ? std::string() : args[0].ToDisplay();
                        const f64 rawTimeout =
                            args.size() >= 2 ? args[1].AsNumber() : 8000.0;
+                       // Guard the cast: a NaN or out-of-range double converted
+                       // to long is undefined behaviour, and HttpGetBlocking
+                       // cannot undo a conversion that already happened at the
+                       // call site. Out-of-range values clamp to the same
+                       // 1s..60s window HttpGetBlocking applies.
+                       long timeoutMs = 8000;
+                       if (std::isfinite(rawTimeout)) {
+                         if (rawTimeout <= 1000.0) {
+                           timeoutMs = 1000;
+                         } else if (rawTimeout >= 60000.0) {
+                           timeoutMs = 60000;
+                         } else {
+                           timeoutMs = (long)rawTimeout;
+                         }
+                       }
                        // Blocking HTTP on the script worker is intended: this
                        // thread exists for exactly this and is never the
                        // render thread.
                        ScriptValue body =
-                           HttpGetBlocking(ctx, url, (long)rawTimeout, self->policy_);
+                           HttpGetBlocking(ctx, url, timeoutMs, self->policy_);
                        return body;
                      });
 }
