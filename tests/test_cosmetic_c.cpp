@@ -62,6 +62,16 @@ int32_t PoseRevision(uint64_t raw, uint16_t runtime, uint64_t* out, void* user) 
 
 }  // namespace
 
+// The player-model hook is installed on this function. It must be a real
+// function in this module: the shim writes a `jmp rel32` from the target to the
+// detour and a `jmp rel32` back from the trampoline, so the target has to be
+// within 32 bits of both, which an anonymous mapping is not guaranteed to be.
+// It is only patched and restored, never called, so a patched prologue is safe.
+extern "C" __attribute__((noinline)) int CosmeticHookTargetProbe(int x) {
+  volatile int v = x + 1;
+  return v;
+}
+
 int main() {
   // --- Before attach: the surface is refused, every call fails closed ---
   CHECK(BERRY_GetCosmeticApi() == nullptr);
@@ -206,13 +216,13 @@ int main() {
   noFn.bone_transform = nullptr;
   CHECK(api->set_player_model_hook(&readerState, &noFn) == BERRY_COSMETIC_BAD_READER);
 
-  // With a target, the hook installs (the host harness backend can hook) and
-  // reports itself installed; a second install is refused until cleared.
-  int hookTarget = 0;
-  const int32_t hookStatus = api->set_player_model_hook(&hookTarget, &reader);
+  // With a real target, the hook installs (the host harness backend can hook)
+  // and reports itself installed; a second install is refused until cleared.
+  void* const hookTarget = reinterpret_cast<void*>(&CosmeticHookTargetProbe);
+  const int32_t hookStatus = api->set_player_model_hook(hookTarget, &reader);
   if (hookStatus == BERRY_COSMETIC_OK) {
     CHECK(api->has_player_model_hook() == 1);
-    CHECK(api->set_player_model_hook(&hookTarget, &reader) == BERRY_COSMETIC_ALREADY_HOOKED);
+    CHECK(api->set_player_model_hook(hookTarget, &reader) == BERRY_COSMETIC_ALREADY_HOOKED);
     api->clear_player_model_hook();
     CHECK(api->has_player_model_hook() == 0);
   } else {
