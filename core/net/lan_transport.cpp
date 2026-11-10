@@ -49,7 +49,14 @@ std::string PeerKey(const std::string& host, u16 port) {
 
 }  // namespace
 
-const char* LanCosmeticTransport::Magic() { return cosmeticfrag::kMagic; }
+const char* LanCosmeticTransport::Magic() {
+  // Return a NUL-terminated copy: cosmeticfrag::kMagic is a 4-byte array with no
+  // terminator, so callers that build a std::string from it would read past the
+  // end. The other transports return a 5-byte static for the same reason.
+  static char m[5] = {cosmeticfrag::kMagic[0], cosmeticfrag::kMagic[1],
+                      cosmeticfrag::kMagic[2], cosmeticfrag::kMagic[3], '\0'};
+  return m;
+}
 
 void LanCosmeticTransport::FillHeader(u8* out, u8 kind, u16 msgId, u16 index,
                                       u16 count, u32 totalLen, u16 payloadPer,

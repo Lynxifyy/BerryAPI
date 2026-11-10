@@ -410,6 +410,34 @@ class BERRY_API BerryClient {
   /// The cosmetic asset loader (mesh/texture store), or null when no asset
   /// directory is configured. For diagnostics and tests.
   CosmeticAssetLoader* cosmeticAssets() { return cosmeticAssets_.get(); }
+
+  //--- cosmetic runtime control (the C-ABI host's surface) ------------------
+  //
+  // A host that dlopen's libBerryAPI.so and talks to it through the cosmetic C
+  // ABI (berry/cosmetic_c.h) drives these. They are the public form of the
+  // attach-time work `BuildCosmetics` does, so a host can reload packs and
+  // install the player-model hook after attach without rebuilding the client.
+
+  /// Reloads model packs from `packDir` and asset data from `assetDir`,
+  /// replacing what is currently loaded. Either directory may be empty, which
+  /// leaves that half untouched. Returns the number of assets registered across
+  /// the pack load. Each pack loads atomically, so a failed pack changes nothing
+  /// while the other packs still load.
+  size_t ReloadCosmeticPacks(const std::string& packDir,
+                             const std::string& assetDir);
+
+  /// Installs the player-model hook on `target` and binds `reader` as the
+  /// per-build bone source, so cosmetics resolve to the rendered rig. Refuses a
+  /// null target, an empty reader, or a hook already installed. The hook uses
+  /// the process hook backend; a backend that cannot hook leaves no hook behind.
+  bool InstallPlayerModelHook(void* target, const PlayerModelBoneReader& reader);
+
+  /// Removes the player-model hook and unbinds the reader, so the skeleton
+  /// source resolves nothing again. Idempotent.
+  void ClearPlayerModelHook();
+
+  /// True when a player-model hook is installed.
+  bool hasPlayerModelHook() const { return playerModelHook_ != nullptr; }
   /// The cosmetic asset store: the process-wide mesh/texture catalog the render
   /// seam resolves a draw item's handles against.
   static CosmeticAssetStore& assets() { return CosmeticAssetStore::Instance(); }

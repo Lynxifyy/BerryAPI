@@ -90,6 +90,11 @@ struct EngineConfig {
   std::string lanIface;
   /// Root directory for the sandboxed `fs.*` store. Empty keeps it in-memory.
   std::string scriptDataDirectory;
+  /// Root directory for cosmetic model packs (*.pack.json). Empty loads none.
+  std::string cosmeticPackDirectory;
+  /// Root directory for cosmetic asset data (*.mesh.json / *.tex.json). Empty
+  /// loads none.
+  std::string cosmeticAssetDirectory;
 };
 
 class BERRY_API Engine {

@@ -117,6 +117,13 @@ typedef struct BerryConfigC {
   // refuses a symlink on every path component and writes through a temp file
   // plus rename, so it cannot escape the directory or expose a partial write.
   const char* script_data_directory;
+  // Root directory for cosmetic model packs (*.pack.json), or NULL. Loading at
+  // attach registers the catalog the wardrobe reads, so a fresh client has the
+  // host's assets without a rebuild.
+  const char* cosmetic_pack_directory;
+  // Root directory for cosmetic asset data (*.mesh.json / *.tex.json), or NULL.
+  // Loaded before the packs, so a pack's geometry/texture handles resolve.
+  const char* cosmetic_asset_directory;
 } BerryConfigC;
 
 #ifdef __cplusplus

@@ -2382,7 +2382,12 @@
  *
  * This module adds support for the AES Armv8-A Cryptographic Extensions on Armv8 systems.
  */
-#define MBEDTLS_AESCE_C
+// The Armv8-A AES extension lives in library/aesce.c, which is not
+// vendored (only the trimmed client stack is). Enabling it leaves aes.c
+// with undefined mbedtls_aesce_* references on arm64, which is a link
+// failure for the arm64 test build and an unresolved symbol in the
+// shipping .so. The portable AES in aes.c is used instead.
+//#define MBEDTLS_AESCE_C
 
 /**
  * \def MBEDTLS_AES_C

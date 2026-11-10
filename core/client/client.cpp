@@ -568,29 +568,10 @@ void BerryClient::BuildPacketCapture(const ClientConfig& cfg) {
 }
 
 void BerryClient::BuildCosmetics(const ClientConfig& cfg) {
-  // Cosmetic asset data loads first: a pack names geometry/texture handles, so
-  // the handles must exist before the pack's assets are registered (otherwise a
-  // pack asset would resolve to a retired handle and draw nothing).
-  if (!cfg.cosmeticAssetDirectory.empty()) {
-    cosmeticAssets_ = std::make_unique<CosmeticAssetLoader>(
-        fs_.get(), cfg.cosmeticAssetDirectory);
-    const auto report = cosmeticAssets_->LoadDirectory();
-    Log::Info("BerryClient: cosmetic assets: %zu meshes, %zu textures, "
-              "%zu refused%s",
-              report.meshes, report.textures, report.failed,
-              report.truncated ? " (truncated)" : "");
-  }
-
-  // Model packs register into the catalog the wardrobe reads. Loading after the
-  // assets means a pack's handles resolve; a pack that names a handle no asset
-  // supplied still registers (the asset simply draws nothing), which keeps a
-  // missing texture from discarding a whole cape.
-  if (!cfg.cosmeticPackDirectory.empty()) {
-    packs_->SetRoot(cfg.cosmeticPackDirectory);
-    const PackLoadReport report = packs_->LoadDirectory();
-    Log::Info("BerryClient: cosmetic packs: %zu loaded, %zu refused%s",
-              report.packsLoaded, report.packsFailed,
-              report.truncated ? " (truncated)" : "");
+  // Asset data + model packs: one code path with the runtime reload the C ABI
+  // host drives, so attach and reload can never drift.
+  if (!cfg.cosmeticAssetDirectory.empty() || !cfg.cosmeticPackDirectory.empty()) {
+    ReloadCosmeticPacks(cfg.cosmeticPackDirectory, cfg.cosmeticAssetDirectory);
   }
 
   // Author the built-in clips into the animator, so the built-in cape flaps and
@@ -605,21 +586,71 @@ void BerryClient::BuildCosmetics(const ClientConfig& cfg) {
   // leaves the skeleton source fail-closed (nothing resolves), which is the
   // correct default for a build whose layout is unknown.
   if (cfg.playerModelRenderTarget && cfg.playerModelBones.valid()) {
-    playerModelSkeleton_->SetReader(cfg.playerModelBones);
-    playerModelHook_ = std::make_unique<PlayerModelHook>();
-    playerModelHook_->SetReader(cfg.playerModelBones);
-    if (playerModelHook_->Install(cfg.playerModelRenderTarget,
-                                  HookManager::Instance().Backend())) {
-      Log::Info("BerryClient: player-model hook installed");
-    } else {
-      Log::Warn("BerryClient: player-model hook refused; cosmetics resolve no "
-                "bones");
-      playerModelHook_.reset();
-    }
+    InstallPlayerModelHook(cfg.playerModelRenderTarget, cfg.playerModelBones);
   } else {
     Log::Info("BerryClient: no player-model target/reader; cosmetics resolve "
               "no bones (fail closed)");
   }
+}
+
+size_t BerryClient::ReloadCosmeticPacks(const std::string& packDir,
+                                         const std::string& assetDir) {
+  // Asset data first: a pack names geometry/texture handles, so the handles
+  // must exist before the pack's assets are registered, or a pack asset would
+  // resolve to a retired handle and draw nothing. This mirrors BuildCosmetics.
+  if (!assetDir.empty()) {
+    if (!cosmeticAssets_) {
+      cosmeticAssets_ = std::make_unique<CosmeticAssetLoader>(fs_.get(), assetDir);
+    }
+    cosmeticAssets_->LoadDirectory(assetDir);
+  }
+  size_t registered = 0;
+  if (!packDir.empty()) {
+    if (!packs_) packs_ = std::make_unique<CosmeticPackLoader>(fs_.get());
+    packs_->SetRoot(packDir);
+    const PackLoadReport report = packs_->LoadDirectory(packDir);
+    registered = report.assetsRegistered;
+    Log::Info("BerryClient: cosmetic reload: %zu packs loaded, %zu refused, "
+              "%zu assets",
+              report.packsLoaded, report.packsFailed, report.assetsRegistered);
+  }
+  // A reload can change the catalog the wardrobe reads, so drop any cached
+  // resolve: a cached item composed against a now-retired asset would be stale.
+  if (cosmetics_) cosmetics_->ClearResolveCache();
+  return registered;
+}
+
+bool BerryClient::InstallPlayerModelHook(void* target,
+                                        const PlayerModelBoneReader& reader) {
+  if (target == nullptr) return false;
+  if (!reader.valid()) return false;
+  if (playerModelHook_) return false;  // already installed; clear it first
+  if (!playerModelSkeleton_) return false;
+
+  // The hook refreshes the reader's cache from the rendered pose, so the
+  // skeleton source resolves bones the game actually computed. Bind the source
+  // first, so a bone is resolvable the instant the detour is live.
+  playerModelSkeleton_->SetReader(reader);
+  auto hook = std::make_unique<PlayerModelHook>();
+  hook->SetReader(reader);
+  if (!hook->Install(target, HookManager::Instance().Backend())) {
+    // A refused install leaves the source bound to a reader nothing refreshes;
+    // clear it so the source fails closed rather than reading a stale cache.
+    playerModelSkeleton_->SetReader(PlayerModelBoneReader{});
+    Log::Warn("BerryClient: player-model hook refused; cosmetics resolve no bones");
+    return false;
+  }
+  playerModelHook_ = std::move(hook);
+  Log::Info("BerryClient: player-model hook installed (runtime)");
+  return true;
+}
+
+void BerryClient::ClearPlayerModelHook() {
+  if (playerModelHook_) playerModelHook_->Uninstall();
+  playerModelHook_.reset();
+  // Unbind the reader too: with no hook refreshing it, the cache would go
+  // stale, and the correct fail-closed state is "resolve nothing".
+  if (playerModelSkeleton_) playerModelSkeleton_->SetReader(PlayerModelBoneReader{});
 }
 
 void BerryClient::RegisterBuiltinClips() {

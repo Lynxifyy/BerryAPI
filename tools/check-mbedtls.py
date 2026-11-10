@@ -86,6 +86,16 @@ FORBIDDEN_FEATURES = [
 ]
 
 
+# Config options that pull in a source unit this tree does not vendor. Each must
+# stay OFF, or the build references symbols that do not exist. AESCE is the case
+# that bit us: `aes.c` guards its Armv8-A fast path on `MBEDTLS_AESCE_C`, but
+# `library/aesce.c` is not vendored, so an arm64 build links with undefined
+# `mbedtls_aesce_*` references.
+UNVENDORED_FEATURES = [
+    "MBEDTLS_AESCE_C",
+]
+
+
 def defines(text: str) -> set[str]:
     return set(re.findall(r"^#define (MBEDTLS_[A-Z0-9_]+)", text, re.M))
 
@@ -126,6 +136,11 @@ def check_config(problems: list[str]) -> None:
         if feat in have:
             problems.append(
                 f"{feat} is on; the trimmed client-only config is not applied")
+    for feat in UNVENDORED_FEATURES:
+        if feat in have:
+            problems.append(
+                f"{feat} is on but its source unit is not vendored; "
+                f"the build will reference missing symbols")
 
 
 def check_units(problems: list[str]) -> None:
