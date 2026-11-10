@@ -313,11 +313,14 @@ berry-sigcheck: build/berry-sigcheck
 
 # Self-check: the tool must read a build-id from a real ELF and match a pattern
 # against it. Uses the tool's own binary as the ELF.
+# The pattern is the 16-byte ELF identification header, not the bare 4-byte
+# magic: a compiler may embed the magic as an immediate in its own code (clang
+# does, in its generated loader checks), which makes the short pattern ambiguous.
 .PHONY: check-sigcheck
 check-sigcheck: build/berry-sigcheck
 	@id=$$(./build/berry-sigcheck build/berry-sigcheck --build-id) || { echo "check-sigcheck: no build-id"; exit 1; }; \
 	[ -n "$$id" ] || { echo "check-sigcheck: empty build-id"; exit 1; }; \
-	./build/berry-sigcheck build/berry-sigcheck --pattern "7F 45 4C 46" >/dev/null || { echo "check-sigcheck: ELF magic did not match"; exit 1; }; \
+	./build/berry-sigcheck build/berry-sigcheck --pattern "7F 45 4C 46 02 01 01 00 00 00 00 00 00 00 00 00" >/dev/null || { echo "check-sigcheck: ELF identification header did not match"; exit 1; }; \
 	echo "== berry-sigcheck OK =="
 
 # End-to-end check for the developer CLI. It drives the real binary through
