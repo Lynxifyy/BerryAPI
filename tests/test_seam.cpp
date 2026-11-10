@@ -155,7 +155,7 @@ int32_t GetLocalPlayer(BerryLocalPlayerC* out, void* user) {
 BerrySeamC MakeSeam(HostCtx* ctx) {
   BerrySeamC seam{};
   seam.size = sizeof(BerrySeamC);
-  seam.abi_version = BERRY_ABI_VERSION;
+  seam.abi_version = BERRY_SEAM_ABI_VERSION;
   seam.user = ctx;
   seam.get_entity = GetEntity;
   seam.all_entities = AllEntities;
@@ -195,7 +195,7 @@ int main() {
   shortSeam.size = sizeof(BerrySeamC) - 1;
   CHECK(BERRY_SetWorldSeam(&shortSeam) == 0);
   BerrySeamC badAbi = MakeSeam(&ctx);
-  badAbi.abi_version = BERRY_ABI_VERSION + 1;
+  badAbi.abi_version = BERRY_SEAM_ABI_VERSION + 1;
   CHECK(BERRY_SetWorldSeam(&badAbi) == 0);
   CHECK(BERRY_HasWorldSeam() == 0);
 
@@ -284,7 +284,7 @@ int main() {
   HostCtx sparse;
   BerrySeamC minimal{};
   minimal.size = sizeof(BerrySeamC);
-  minimal.abi_version = BERRY_ABI_VERSION;
+  minimal.abi_version = BERRY_SEAM_ABI_VERSION;
   minimal.user = &sparse;
   CHECK(BERRY_SetWorldSeam(&minimal) == 1);
   bound = BoundSeam();
@@ -300,7 +300,7 @@ int main() {
 
   // --- The struct-size / ABI probes a mirroring host checks before binding. ---
   CHECK(BERRY_WorldSeamStructSize() == sizeof(BerrySeamC));
-  CHECK(BERRY_WorldSeamAbiVersion() == BERRY_ABI_VERSION);
+  CHECK(BERRY_WorldSeamAbiVersion() == BERRY_SEAM_ABI_VERSION);
 
   // --- Unbind. ---
   BERRY_ClearWorldSeam();

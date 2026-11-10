@@ -135,7 +135,12 @@ OUT="$ROOT/build-android/$ABI"
 mkdir -p "$OUT"
 echo "build-android: ABI=$ABI out=$OUT"
 
-COMMON_FLAGS=(-std=c++17 -O2 -fPIC -fvisibility=hidden -fno-exceptions -fno-rtti
+# Exceptions are enabled to match the host build: the hook chain wraps each
+# handler in try/catch so one faulting handler is isolated and auto-disabled
+# rather than taking the whole chain (and the game) down. Compiling this
+# translation unit with -fno-exceptions fails outright, which is why the host
+# build never set it; the Android build must agree.
+COMMON_FLAGS=(-std=c++17 -O2 -fPIC -fvisibility=hidden -fno-rtti
               "-DBERRY_BUILD_SHARED" "-DBERRY_PLATFORM_ANDROID=1"
               "-I$ROOT/include" "-I$ROOT/third_party/ed25519"
               "-I$ROOT/third_party/mbedtls/include"

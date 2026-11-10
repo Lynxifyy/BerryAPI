@@ -46,6 +46,14 @@ parts a client that only needs HTTPS/WSS does not use:
 - the debug/tracing and memory-buffer-allocator units, and the x86 AES-NI /
   Padlock / SSE2 fast paths (they are selected per build, not vendored).
 
+`MBEDTLS_AESCE_C` (the Armv8-A AES extension, `library/aesce.c`) is also OFF.
+That unit is not vendored, and `aes.c` guards its Armv8-A fast path on the
+option: leaving it on makes `aes.c` reference the `mbedtls_aesce_*` symbols
+with nothing to satisfy them, which is a link failure for the arm64 test build
+and an unresolved symbol in the shipping `.so` (a call to address 0 at run
+time). The portable AES in `aes.c` is used instead. `tools/check-mbedtls.py`
+fails the build if the option is turned back on.
+
 TLS 1.3 is kept (`MBEDTLS_SSL_PROTO_TLS1_3`), as is `MBEDTLS_PSA_CRYPTO_C`
 which TLS 1.3 requires. Certificate verification
 (`MBEDTLS_X509_CRT_PARSE_C`, `MBEDTLS_X509_USE_C`) and the trusted-CA store

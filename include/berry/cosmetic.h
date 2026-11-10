@@ -538,6 +538,9 @@ class BERRY_API CosmeticService {
   /// Equips an asset on the local player. Refuses an unknown asset.
   bool Equip(const std::string& assetId, CosmeticError* out = nullptr);
   bool Unequip(CosmeticSlot slot);
+  /// Empties the local loadout and resets the animation clock, so a fresh
+  /// loadout starts its clips from zero.
+  void ClearLocalLoadout();
   /// The asset id equipped in `slot` on the local player, or "".
   std::string Equipped(CosmeticSlot slot) const;
 

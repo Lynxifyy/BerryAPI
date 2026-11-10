@@ -82,6 +82,12 @@ typedef struct BerryLocalPlayerC {
   float pitch, yaw, roll;
 } BerryLocalPlayerC;
 
+/// The seam ABI version. Independent of the global `BERRY_ABI_VERSION`: the
+/// seam struct may gain a slot without moving the engine config ABI, and the
+/// engine config may grow without moving the seam. Bump whenever `BerrySeamC`
+/// changes layout or a slot's signature changes.
+#define BERRY_SEAM_ABI_VERSION 8
+
 /// The seam a host fills and binds.
 ///
 /// Every function pointer is optional: a null one makes the matching read fail
@@ -92,7 +98,7 @@ typedef struct BerryLocalPlayerC {
 typedef struct BerrySeamC {
   /// Must equal `sizeof(BerrySeamC)`.
   uint32_t size;
-  /// Must equal `BERRY_ABI_VERSION`.
+  /// Must equal `BERRY_SEAM_ABI_VERSION`.
   uint32_t abi_version;
   /// Host context, passed back to every callback. May be null.
   void *user;
@@ -159,7 +165,7 @@ BERRY_API int32_t BERRY_HasWorldSeam(void);
 /// safe: a layout drift is caught by a number, not by a misread function pointer.
 BERRY_API uint32_t BERRY_WorldSeamStructSize(void);
 
-/// The `BERRY_ABI_VERSION` this build was compiled with, for the same check.
+/// The `BERRY_SEAM_ABI_VERSION` this build was compiled with, for the same check.
 BERRY_API uint32_t BERRY_WorldSeamAbiVersion(void);
 
 #ifdef __cplusplus

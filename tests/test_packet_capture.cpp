@@ -138,12 +138,29 @@ namespace {
 
 // A fake "game" receive function with the conventional Bedrock shape. It counts
 // calls, so the test can prove the hook calls the original.
+//
+// It is `noinline`, and every call site reaches it through a volatile pointer
+// (see `CallReceive` below): a compiler is free to inline a direct call to a
+// local function, and an inlined body would bypass the patched prologue
+// entirely. clang does inline it at -O1/-O2, which is why the call below is
+// indirect rather than `FakeReceive(...)`.
 std::atomic<int> g_origCalls{0};
 std::atomic<int> g_lastPayload{0};
 
+__attribute__((noinline))
 void FakeReceive(void* /*self*/, const void* packet) {
   ++g_origCalls;
   if (packet) g_lastPayload = *(const int*)packet;
+}
+
+// Calls a fake receive function through a volatile pointer, so the call goes to
+// the function's code (which a hook may have patched) instead of an inlined copy.
+// The volatile read of the pointer is observable, so no optimizer can fold the
+// call back to a direct one.
+__attribute__((noinline))
+void CallReceive(void (*fn)(void*, const void*), const void* packet) {
+  void (*volatile vfn)(void*, const void*) = fn;
+  vfn(nullptr, packet);
 }
 
 /// A packet object the fake decode understands: the first 4 bytes are the id,
@@ -184,7 +201,7 @@ static void TestHookCapturesAndCallsThrough() {
   CHECK(!dup.Install((void*)&FakeReceive, abi, HookManager::Instance().Backend(), &hub));
 
   FakePacket pkt{57, "the-chunk"};
-  FakeReceive(nullptr, &pkt);   // goes through the detour
+  CallReceive(&FakeReceive, &pkt);   // goes through the detour
 
   // The original ran, and the packet was captured and classified.
   CHECK(g_origCalls == 1);
@@ -199,7 +216,7 @@ static void TestHookCapturesAndCallsThrough() {
   CHECK(!hook.installed());
   // After uninstall the function is the original again.
   FakePacket pkt2{20, "block"};
-  FakeReceive(nullptr, &pkt2);
+  CallReceive(&FakeReceive, &pkt2);
   CHECK(g_origCalls == 2);
   CHECK(obs.seen.size() == 1);   // no capture after uninstall
 }
@@ -234,7 +251,7 @@ static void TestHookFailClosed() {
   PacketReceiveHook h4;
   CHECK(h4.Install((void*)&FakeReceive, abi, HookManager::Instance().Backend(), &hub));
   FakePacket bad{0xDEAD, "nope"};
-  FakeReceive(nullptr, &bad);
+  CallReceive(&FakeReceive, &bad);
   CHECK(g_origCalls == 1);
   CHECK(h4.captured() == 0);
   CHECK(obs.seen.empty());
@@ -342,14 +359,6 @@ void ClientFakeReceive(void* /*self*/, const void* packet) {
   (void)packet;
 }
 
-// Calls `ClientFakeReceive` through a volatile pointer, so the call goes to the
-// function's code (which the hook patched) instead of being inlined at the
-// call site.
-void CallFakeReceive(const void* packet) {
-  static void (*volatile fn)(void*, const void*) = &ClientFakeReceive;
-  fn(nullptr, packet);
-}
-
 // The decode ABI the client's config carries: id in the first 4 bytes, the rest
 // is the payload. Matches `FakePacket`.
 bool ClientDecode(const void* p, u32* id, std::string* payload) {
@@ -440,7 +449,7 @@ static void TestClientInstallsReceiveHookFromConfig() {
   client->replayPacketObserver()->capture()->Start();
   const u64 before = client->packets().totals().total();
   FakePacket pkt{20, "block-bytes"};    // UpdateBlock -> Chunk
-  CallFakeReceive(&pkt);     // goes through the installed detour
+  CallReceive(&ClientFakeReceive, &pkt);   // goes through the installed detour
 
   CHECK(g_clientOrigCalls == 1);                       // original still ran
   CHECK(client->packetReceiveHook()->captured() == 1);
@@ -454,7 +463,7 @@ static void TestClientInstallsReceiveHookFromConfig() {
   // Detach must uninstall the hook: the target is the original again.
   client->Detach();
   FakePacket pkt2{20, "after"};
-  CallFakeReceive(&pkt2);
+  CallReceive(&ClientFakeReceive, &pkt2);
   CHECK(g_clientOrigCalls == 2);
 
   eng.Detach();
