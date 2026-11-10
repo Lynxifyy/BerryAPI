@@ -232,7 +232,7 @@ extern "C" {
 BERRY_API int32_t BERRY_SetWorldSeam(const BerrySeamC* seam) {
   if (seam == nullptr) return 0;
   if (seam->size < sizeof(BerrySeamC)) return 0;
-  if (seam->abi_version != BERRY_ABI_VERSION) return 0;
+  if (seam->abi_version != BERRY_SEAM_ABI_VERSION) return 0;
 
   Berry::Engine& engine = Berry::Engine::Instance();
   // No seam can bind before the module set is attached: there is no World module
@@ -267,7 +267,7 @@ BERRY_API uint32_t BERRY_WorldSeamStructSize(void) {
 }
 
 BERRY_API uint32_t BERRY_WorldSeamAbiVersion(void) {
-  return static_cast<uint32_t>(BERRY_ABI_VERSION);
+  return static_cast<uint32_t>(BERRY_SEAM_ABI_VERSION);
 }
 
 }  // extern "C"

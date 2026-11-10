@@ -29,7 +29,9 @@
 // v9: BerryConfigC grew the cosmetic fields (cosmetic_pack_directory,
 //     cosmetic_asset_directory), so a host can point the client at its cosmetic
 //     packs and asset data through the C ABI. The cosmetic surface itself lives
-//     in berry/cosmetic_c.h under its own BERRY_COSMETIC_ABI_VERSION.
+//     in berry/cosmetic_c.h under its own BERRY_COSMETIC_ABI_VERSION, and the
+//     world seam now reports BERRY_SEAM_ABI_VERSION (berry/seam.h) instead of
+//     this number, so a config-only growth no longer moves the seam's ABI.
 #define BERRY_ABI_VERSION 9
 
 // Legacy internal SDK ABI identifier (kept for compatibility).
